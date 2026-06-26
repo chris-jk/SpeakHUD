@@ -346,6 +346,18 @@ final class Agent {
     }
 }
 
+// Because the agent is a running instance of the app bundle, double-clicking
+// SpeakHUD.app doesn't launch a new reader — macOS just "reopens" the agent.
+// Treat that reopen as "read the clipboard", so double-click does what you'd expect.
+final class AgentDelegate: NSObject, NSApplicationDelegate {
+    let agent: Agent
+    init(_ agent: Agent) { self.agent = agent }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        agent.trigger()
+        return true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point: dispatch on mode.
 // ---------------------------------------------------------------------------
@@ -372,6 +384,8 @@ if argv.contains("--agent") {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     let agent = Agent()
+    let agentDelegate = AgentDelegate(agent)
+    app.delegate = agentDelegate          // handles double-click "reopen" -> read clipboard
     agent.run()
     app.run()
     exit(0)
