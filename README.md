@@ -22,6 +22,8 @@ a standalone app.
   Accessibility permission needed).
 - **Global hotkey to read the clipboard** from anywhere (default `⌃⌥S`), served by a
   tiny background agent. The combo is **user-configurable**.
+- **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,
+  and **one-click enable "read my Claude Code responses aloud"** — no manual JSON editing.
 
 ## How it picks what to read
 
@@ -70,10 +72,32 @@ Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications`) and 
 - `SPEAK_RATE` — an initial AVSpeech rate `0.0–1.0` (snaps to the nearest speed step;
   overrides the saved preference for that launch).
 
+## Menu bar & settings
+
+The background agent shows a small **speaker icon** in the menu bar:
+
+- **Read Clipboard Aloud**
+- **Read Claude Code Responses Aloud** — a checkbox that installs/removes the Claude
+  Code `Stop` hook for you (see below).
+- **Global Hotkey** — pick a preset or open the config file.
+- **SpeakHUD on GitHub** / **Quit**.
+
 ## Claude Code integration
 
-A `Stop` hook runs a small script that grabs the latest assistant response, strips code
-blocks/markdown, and pipes it to `speak-hud`. See `hook/` for the reference script.
+SpeakHUD can read each Claude Code response aloud the moment a turn finishes. Enable it
+the easy way from the menu bar (**Read Claude Code Responses Aloud**), or from the CLI:
+
+```sh
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --setup-claude    # install
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --remove-claude   # uninstall
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --claude-status   # check
+```
+
+Setup is a safe, idempotent merge into `~/.claude/settings.json`: it copies
+`read-summary.py` and the reader binary into `~/.claude`, then adds a `Stop` hook that
+grabs the latest assistant response, strips code blocks/markdown, and pipes it to
+`speak-hud`. Your other settings and hooks are preserved; removing it touches only the
+SpeakHUD entry. See `hook/` for the reference script.
 
 ## Files
 

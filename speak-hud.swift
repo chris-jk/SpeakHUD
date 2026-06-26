@@ -272,6 +272,94 @@ enum HotkeyConfig {
     }
 }
 
+// Installs/removes the Claude Code "Stop" hook that reads each response aloud, so
+// a downloaded copy can replicate the author's setup with one click. All edits to
+// ~/.claude/settings.json are idempotent merges — existing keys are preserved.
+// Set SPEAKHUD_CLAUDE_DIR to point at a different dir (used by tests).
+enum ClaudeHook {
+    static var dir: String {
+        if let d = ProcessInfo.processInfo.environment["SPEAKHUD_CLAUDE_DIR"], !d.isEmpty {
+            return NSString(string: d).expandingTildeInPath
+        }
+        return NSString(string: "~/.claude").expandingTildeInPath
+    }
+    static var settingsPath: String { dir + "/settings.json" }
+    static var scriptPath: String { dir + "/read-summary.py" }
+    static var binDir: String { dir + "/bin" }
+    static var binPath: String { binDir + "/speak-hud" }
+    static let hookCommand = "python3 ~/.claude/read-summary.py"
+
+    private static func stopGroups(_ root: [String: Any]) -> [[String: Any]] {
+        (root["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]] ?? []
+    }
+    private static func groupHasOurs(_ group: [String: Any]) -> Bool {
+        guard let inner = group["hooks"] as? [[String: Any]] else { return false }
+        return inner.contains { ($0["command"] as? String)?.contains("read-summary.py") == true }
+    }
+
+    static func isInstalled() -> Bool {
+        guard let data = FileManager.default.contents(atPath: settingsPath),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return stopGroups(root).contains(where: groupHasOurs)
+    }
+
+    @discardableResult
+    static func install() -> String {
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: binDir, withIntermediateDirectories: true)
+        // 1) Drop read-summary.py and the reader binary into ~/.claude.
+        if let src = Bundle.main.url(forResource: "read-summary", withExtension: "py"),
+           let data = try? Data(contentsOf: src) {
+            try? data.write(to: URL(fileURLWithPath: scriptPath))
+        }
+        try? fm.removeItem(atPath: binPath)
+        try? fm.copyItem(atPath: CommandLine.arguments[0], toPath: binPath)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binPath)
+        // 2) Merge the Stop hook into settings.json (preserving everything else).
+        var root: [String: Any] = [:]
+        if let data = fm.contents(atPath: settingsPath) {
+            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return "error: ~/.claude/settings.json is not valid JSON — left it untouched"
+            }
+            root = parsed
+        }
+        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        var stop = hooks["Stop"] as? [[String: Any]] ?? []
+        if !stop.contains(where: groupHasOurs) {
+            stop.append(["hooks": [["type": "command", "command": hookCommand, "async": true]]])
+        }
+        hooks["Stop"] = stop
+        root["hooks"] = hooks
+        return write(root) ? "installed" : "error: could not write settings.json"
+    }
+
+    @discardableResult
+    static func remove() -> String {
+        let fm = FileManager.default
+        guard let data = fm.contents(atPath: settingsPath),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return "nothing to remove" }
+        if var hooks = root["hooks"] as? [String: Any],
+           var stop = hooks["Stop"] as? [[String: Any]] {
+            stop.removeAll(where: groupHasOurs)
+            if stop.isEmpty { hooks.removeValue(forKey: "Stop") } else { hooks["Stop"] = stop }
+            if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
+        }
+        return write(root) ? "removed" : "error: could not write settings.json"
+    }
+
+    private static func write(_ root: [String: Any]) -> Bool {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        guard let data = try? JSONSerialization.data(withJSONObject: root,
+                                                     options: [.prettyPrinted, .sortedKeys]),
+              var text = String(data: data, encoding: .utf8) else { return false }
+        // JSONSerialization escapes every "/" as "\/"; undo that for a clean config file.
+        text = text.replacingOccurrences(of: "\\/", with: "/") + "\n"
+        return (try? text.write(toFile: settingsPath, atomically: true, encoding: .utf8)) != nil
+    }
+}
+
 // Human combo like "ctrl+opt+s" -> (Carbon keycode, modifier mask).
 let keyCodeMap: [String: UInt32] = [
     "a":0x00,"s":0x01,"d":0x02,"f":0x03,"h":0x04,"g":0x05,"z":0x06,"x":0x07,"c":0x08,
@@ -358,6 +446,80 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// Menu-bar settings surface for the agent: read clipboard, toggle the Claude Code
+// integration, and pick the global hotkey — all without a Dock icon or window.
+final class MenuController: NSObject {
+    let agent: Agent
+    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    var claudeItem: NSMenuItem!
+    let hotkeyPresets = [("⌃⌥S", "ctrl+opt+s"), ("⌃⌥R", "ctrl+opt+r"),
+                         ("⌃⌥Space", "ctrl+opt+space"), ("⌘⌥S", "cmd+opt+s")]
+    var hotkeyItems: [NSMenuItem] = []
+
+    init(_ agent: Agent) { self.agent = agent; super.init(); build() }
+
+    private func build() {
+        if let btn = statusItem.button {
+            btn.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "SpeakHUD")
+        }
+        let menu = NSMenu()
+        menu.addItem(item("Read Clipboard Aloud", #selector(readClipboard)))
+        menu.addItem(.separator())
+
+        claudeItem = item("Read Claude Code Responses Aloud", #selector(toggleClaude))
+        menu.addItem(claudeItem)
+
+        let hk = NSMenu()
+        for (label, spec) in hotkeyPresets {
+            let it = item(label, #selector(pickHotkey(_:))); it.representedObject = spec
+            hk.addItem(it); hotkeyItems.append(it)
+        }
+        hk.addItem(.separator())
+        hk.addItem(item("Edit Config File…", #selector(openHotkeyConfig)))
+        let hkParent = NSMenuItem(title: "Global Hotkey", action: nil, keyEquivalent: "")
+        hkParent.submenu = hk
+        menu.addItem(hkParent)
+
+        menu.addItem(.separator())
+        menu.addItem(item("SpeakHUD on GitHub", #selector(openGitHub)))
+        menu.addItem(item("Quit SpeakHUD", #selector(quit)))
+        statusItem.menu = menu
+        refresh()
+    }
+
+    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
+        let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        it.target = self
+        return it
+    }
+
+    private func refresh() {
+        claudeItem.state = ClaudeHook.isInstalled() ? .on : .off
+        let current = HotkeyConfig.load()
+        for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
+    }
+
+    @objc private func readClipboard() { agent.trigger() }
+    @objc private func toggleClaude() {
+        _ = ClaudeHook.isInstalled() ? ClaudeHook.remove() : ClaudeHook.install()
+        refresh()
+    }
+    @objc private func pickHotkey(_ sender: NSMenuItem) {
+        guard let spec = sender.representedObject as? String else { return }
+        HotkeyConfig.save(spec)
+        agent.register()        // re-register live; no restart needed
+        refresh()
+    }
+    @objc private func openHotkeyConfig() {
+        HotkeyConfig.save(HotkeyConfig.load())   // make sure the file exists first
+        NSWorkspace.shared.open(URL(fileURLWithPath: HotkeyConfig.path))
+    }
+    @objc private func openGitHub() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/chris-jk/SpeakHUD")!)
+    }
+    @objc private func quit() { NSApp.terminate(nil) }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point: dispatch on mode.
 // ---------------------------------------------------------------------------
@@ -380,6 +542,10 @@ if let i = argv.firstIndex(of: "--set-hotkey") {
     exit(0)
 }
 
+if argv.contains("--setup-claude")  { print(ClaudeHook.install()); exit(0) }
+if argv.contains("--remove-claude") { print(ClaudeHook.remove());  exit(0) }
+if argv.contains("--claude-status") { print(ClaudeHook.isInstalled() ? "installed" : "not installed"); exit(0) }
+
 if argv.contains("--agent") {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -387,6 +553,8 @@ if argv.contains("--agent") {
     let agentDelegate = AgentDelegate(agent)
     app.delegate = agentDelegate          // handles double-click "reopen" -> read clipboard
     agent.run()
+    let menuController = MenuController(agent)   // menu-bar settings surface
+    _ = menuController
     app.run()
     exit(0)
 }

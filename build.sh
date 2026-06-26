@@ -29,6 +29,7 @@ if [ ! -f AppIcon.icns ]; then
   iconutil -c icns "$ISET" -o AppIcon.icns
 fi
 cp AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
+cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the in-app Claude Code setup
 
 echo "== Info.plist =="
 cat > "$STAGE/Contents/Info.plist" <<PLIST
