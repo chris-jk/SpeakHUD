@@ -16,9 +16,12 @@ a standalone app.
   current word at the new rate (AVSpeech can't change rate live, so it restarts cleanly
   on a fresh synthesizer — reusing one after `stopSpeaking(.immediate)` silently drops
   audio).
-- **Remembers your speed** across launches via `UserDefaults`.
+- **Remembers your speed** across launches (shared `UserDefaults` suite, so the app,
+  the hook, and the hotkey all agree).
 - **Pause / Resume anywhere** with a system-wide `⌃⌥P` hotkey (Carbon hotkey, no
   Accessibility permission needed).
+- **Global hotkey to read the clipboard** from anywhere (default `⌃⌥S`), served by a
+  tiny background agent. The combo is **user-configurable**.
 
 ## How it picks what to read
 
@@ -28,6 +31,28 @@ In priority order:
 2. Text piped on stdin: `echo "hello" | speak-hud` — this is how the Claude Code hook feeds it.
 3. **The clipboard** — when launched on its own (double-click / Spotlight / a hotkey),
    it reads whatever text you've copied.
+
+## Global hotkey (read clipboard from anywhere)
+
+`build.sh` installs a background **LaunchAgent** (`com.chris.speakhud.agent`) that
+registers a system-wide hotkey. Press it and SpeakHUD reads whatever text is on your
+clipboard — no need to open the app first. Default combo: **`⌃⌥S`**.
+
+Set your own combo (one or more of `cmd`/`ctrl`/`opt`/`shift` plus a key):
+
+```sh
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --set-hotkey "ctrl+opt+r"
+```
+
+This writes `~/.config/speakhud/config.json` and restarts the agent. Invalid combos
+(no modifier, unknown key) are rejected and leave the current setting untouched.
+
+Manage the agent directly if needed:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.chris.speakhud.agent   # restart
+launchctl bootout   gui/$(id -u)/com.chris.speakhud.agent       # stop/disable
+```
 
 ## Build & install
 
@@ -52,6 +77,7 @@ blocks/markdown, and pipes it to `speak-hud`. See `hook/` for the reference scri
 
 ## Files
 
-- `speak-hud.swift` — the whole app.
+- `speak-hud.swift` — the whole app: reader HUD, `--agent` (hotkey listener), and
+  `--set-hotkey`.
 - `make-icon.swift` — renders the app icon.
-- `build.sh` — compile, bundle, sign, install.
+- `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.

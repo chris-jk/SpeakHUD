@@ -2,6 +2,11 @@ import Cocoa
 import AVFoundation
 import Carbon.HIToolbox
 
+// Shared prefs domain so the speed setting is the same no matter how the reader
+// was launched (double-click app, Claude Code hook, or the global hotkey).
+// NB: the suite name must NOT equal the app's bundle id, or macOS rejects it.
+let prefs = UserDefaults(suiteName: "com.chris.speakhud.shared") ?? .standard
+
 // Text source priority: explicit arg → piped stdin (the Claude Code hook) →
 // clipboard. The clipboard fallback is what makes the .app useful when launched
 // on its own (double-click / Spotlight / a hotkey), where there's no stdin pipe.
@@ -51,7 +56,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
         synth.delegate = self
         Controller.shared = self
         // Restore the last speed the user picked…
-        if let saved = UserDefaults.standard.object(forKey: Self.rateKey) as? Int,
+        if let saved = prefs.object(forKey: Self.rateKey) as? Int,
            saved >= 0, saved < rateSteps.count {
             rateIndex = saved
         }
@@ -106,7 +111,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
     // Cycle the playback speed; resume speaking from the current word at the new rate.
     @objc func changeSpeed() {
         rateIndex = (rateIndex + 1) % rateSteps.count
-        UserDefaults.standard.set(rateIndex, forKey: Self.rateKey)   // remember it
+        prefs.set(rateIndex, forKey: Self.rateKey)   // remember it
         speedBtn?.title = "⏩ \(rateLabels[rateIndex])"
         let wasActive = synth.isSpeaking || synth.isPaused
         if wasActive {
@@ -243,6 +248,136 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Global hotkey + background agent (read the clipboard from anywhere)
+// ---------------------------------------------------------------------------
+
+// Stored at ~/.config/speakhud/config.json so you can set your own combo.
+enum HotkeyConfig {
+    static let defaultSpec = "ctrl+opt+s"
+    static var dir: String { NSString(string: "~/.config/speakhud").expandingTildeInPath }
+    static var path: String { dir + "/config.json" }
+    static func load() -> String {
+        if let data = FileManager.default.contents(atPath: path),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let hk = (obj["hotkey"] as? String)?.trimmingCharacters(in: .whitespaces),
+           !hk.isEmpty { return hk }
+        return defaultSpec
+    }
+    @discardableResult
+    static func save(_ spec: String) -> Bool {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let json = "{\n  \"hotkey\": \"\(spec)\"\n}\n"
+        return (try? json.write(toFile: path, atomically: true, encoding: .utf8)) != nil
+    }
+}
+
+// Human combo like "ctrl+opt+s" -> (Carbon keycode, modifier mask).
+let keyCodeMap: [String: UInt32] = [
+    "a":0x00,"s":0x01,"d":0x02,"f":0x03,"h":0x04,"g":0x05,"z":0x06,"x":0x07,"c":0x08,
+    "v":0x09,"b":0x0B,"q":0x0C,"w":0x0D,"e":0x0E,"r":0x0F,"y":0x10,"t":0x11,"o":0x1F,
+    "u":0x20,"i":0x22,"p":0x23,"l":0x25,"j":0x26,"k":0x28,"n":0x2D,"m":0x2E,
+    "1":0x12,"2":0x13,"3":0x14,"4":0x15,"5":0x17,"6":0x16,"7":0x1A,"8":0x1C,"9":0x19,"0":0x1D,
+    "space":0x31,"return":0x24,"tab":0x30,
+    "f1":0x7A,"f2":0x78,"f3":0x63,"f4":0x76,"f5":0x60,"f6":0x61,"f7":0x62,"f8":0x64,
+    "f9":0x65,"f10":0x6D,"f11":0x67,"f12":0x6F,
+]
+
+func parseHotkey(_ spec: String) -> (keyCode: UInt32, mods: UInt32)? {
+    var mods: UInt32 = 0
+    var key: String?
+    for raw in spec.lowercased().split(separator: "+") {
+        switch raw.trimmingCharacters(in: .whitespaces) {
+        case "cmd", "command", "⌘": mods |= UInt32(cmdKey)
+        case "ctrl", "control", "⌃": mods |= UInt32(controlKey)
+        case "opt", "option", "alt", "⌥": mods |= UInt32(optionKey)
+        case "shift", "⇧": mods |= UInt32(shiftKey)
+        case let other: key = other
+        }
+    }
+    guard let k = key, let code = keyCodeMap[k], mods != 0 else { return nil }   // need ≥1 modifier
+    return (code, mods)
+}
+
+// Background listener: registers the global hotkey and, on press, launches the
+// reader (which reads the clipboard). Runs from a LaunchAgent; no window/Dock.
+final class Agent {
+    static weak var shared: Agent?
+    var hotKeyRef: EventHotKeyRef?
+    var reader: Process?
+    var usr1: DispatchSourceSignal?
+    let readerPath = CommandLine.arguments[0]
+
+    func run() {
+        Agent.shared = self
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                 eventKind: OSType(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ -> OSStatus in
+            Agent.shared?.trigger(); return noErr
+        }, 1, &spec, nil, nil)
+        register()
+        // SIGUSR1 also triggers a read — lets the install step self-test without keys.
+        signal(SIGUSR1, SIG_IGN)
+        let s = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        s.setEventHandler { Agent.shared?.trigger() }
+        s.resume()
+        usr1 = s
+    }
+
+    func register() {
+        if let r = hotKeyRef { UnregisterEventHotKey(r); hotKeyRef = nil }
+        let spec = HotkeyConfig.load()
+        guard let hk = parseHotkey(spec) else {
+            FileHandle.standardError.write("SpeakHUD agent: invalid hotkey \"\(spec)\"\n".data(using: .utf8)!)
+            return
+        }
+        let id = EventHotKeyID(signature: OSType(0x53504b41) /* 'SPKA' */, id: 1)
+        RegisterEventHotKey(hk.keyCode, hk.mods, id, GetApplicationEventTarget(), 0, &hotKeyRef)
+        FileHandle.standardError.write("SpeakHUD agent: listening for \(spec)\n".data(using: .utf8)!)
+    }
+
+    func trigger() {
+        reader?.terminate()                 // replace any in-progress read
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: readerPath)   // no args -> reads clipboard
+        p.standardInput = FileHandle.nullDevice
+        try? p.run()
+        reader = p
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point: dispatch on mode.
+// ---------------------------------------------------------------------------
+let argv = CommandLine.arguments
+
+if let i = argv.firstIndex(of: "--set-hotkey") {
+    guard i + 1 < argv.count, parseHotkey(argv[i + 1]) != nil else {
+        FileHandle.standardError.write(
+            "usage: speak-hud --set-hotkey \"ctrl+opt+s\"  (need ≥1 modifier + a key)\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let spec = argv[i + 1]
+    HotkeyConfig.save(spec)
+    // Restart the agent so it picks up the new combo (no-op if it isn't installed).
+    let kick = Process()
+    kick.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    kick.arguments = ["kickstart", "-k", "gui/\(getuid())/com.chris.speakhud.agent"]
+    try? kick.run(); kick.waitUntilExit()
+    print("hotkey set to \(spec)")
+    exit(0)
+}
+
+if argv.contains("--agent") {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let agent = Agent()
+    agent.run()
+    app.run()
+    exit(0)
+}
+
+// Default: the reader HUD.
 let text = resolveText().trimmingCharacters(in: .whitespacesAndNewlines)
 if text.isEmpty { exit(0) }
 

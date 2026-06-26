@@ -71,4 +71,33 @@ if [ -d "$HOME/.claude/bin" ]; then
   echo "  refreshed -> ~/.claude/bin/$EXEC"
 fi
 
+echo "== Install global-hotkey agent (LaunchAgent) =="
+AGENT_LABEL="com.chris.speakhud.agent"
+PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$PLIST" <<APLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$AGENT_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$DEST/Contents/MacOS/$EXEC</string>
+    <string>--agent</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+APLIST
+UID_NUM=$(id -u)
+launchctl bootout "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
+launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || true
+launchctl enable "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
+launchctl kickstart -k "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
+echo "  agent loaded; global hotkey reads ~/.config/speakhud/config.json (default ctrl+opt+s)"
+echo "  change it with:  $DEST/Contents/MacOS/$EXEC --set-hotkey \"ctrl+opt+r\""
+
 echo "Done."
