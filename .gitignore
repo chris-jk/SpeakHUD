@@ -1,0 +1,13 @@
+# Build artifacts
+*.o
+*.dSYM/
+/build/
+/dist/
+*.app/
+
+# macOS
+.DS_Store
+
+# Temp icon staging
+icon_master.png
+*.iconset/
