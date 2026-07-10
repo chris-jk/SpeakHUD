@@ -1,8 +1,8 @@
 # SpeakHUD
 
 A tiny macOS app that reads text aloud in a floating HUD with **Replay**, **Pause**,
-**Speed**, and **Stop** controls. Built with `AVSpeechSynthesizer` — no dependencies,
-no menu-bar clutter (it's an agent app), single Swift file.
+**Speed**, **Skip**, and **Stop** controls. Built with `AVSpeechSynthesizer` — no
+dependencies, no menu-bar clutter (it's an agent app), single Swift file.
 
 It started life as a Claude Code "read my last response out loud" hook and grew into
 a standalone app.
@@ -12,33 +12,64 @@ a standalone app.
 ## Features
 
 - **Floating HUD** with karaoke-style word highlighting that follows along.
+- **One speech queue.** Run Claude in four terminals and they take turns instead of
+  cutting each other off — you only have one pair of ears.
 - **Speed control** — cycle `0.75× → 2×`. Changing speed mid-read resumes from the
   current word at the new rate (AVSpeech can't change rate live, so it restarts cleanly
   on a fresh synthesizer — reusing one after `stopSpeaking(.immediate)` silently drops
   audio).
 - **Remembers your speed** across launches (shared `UserDefaults` suite, so the app,
   the hook, and the hotkey all agree).
-- **Pause / Resume anywhere** with a system-wide `⌃⌥P` hotkey (Carbon hotkey, no
-  Accessibility permission needed).
-- **Global hotkey to read the clipboard** from anywhere (default `⌃⌥S`), served by a
-  tiny background agent. The combo is **user-configurable**.
+- **Pause / Resume anywhere** with a system-wide `⌃⌥P` hotkey.
+- **Global hotkey to read your highlighted text** from any app (default `⌃⌥S`), with
+  play / pause / speed controls in the HUD. The combo is **user-configurable**.
 - **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,
   and **one-click enable "read my Claude Code responses aloud"** — no manual JSON editing.
+
+## The queue
+
+Only one thing speaks at a time. Anything that arrives while the HUD is busy waits
+its turn, and the HUD shows what's behind it:
+
+```
+🔊 Speaking…  1×                    ▸ 2 queued
+from: SpeakHUD
+┌──────────────────────────────────────────┐
+│ Yes, I understand — and I found the      │
+│ exact line causing it…                   │
+└──────────────────────────────────────────┘
+ next: StrainGuide, cloudflare-dns
+
+ ↻ Replay   ❚❚ Pause   ⏩ 1×   ⏭ Skip   ■ Stop
+```
+
+- **Claude Code turns queue.** Each finished turn is written to a spool directory
+  (`~/.local/state/speakhud/queue/`) and drained one at a time by the background agent.
+- **Newest per session wins.** If one terminal finishes two turns while you're still
+  listening to something else, only the newer one is kept — you want the latest answer,
+  not a stale one. Sessions are tracked separately, so two terminals in the same repo
+  are both heard.
+- **Hotkey reads jump the queue.** You highlighted that text and asked for it *now*,
+  so it preempts whatever was speaking.
+- **Skip** moves to the next item; **Stop** clears the queue entirely.
+- Items that have waited more than 10 minutes are dropped unspoken, so an agent that
+  was stopped for a while doesn't come back and read you the whole morning.
 
 ## How it picks what to read
 
 In priority order:
 
 1. A command-line argument: `speak-hud "hello world"`
-2. Text piped on stdin: `echo "hello" | speak-hud` — this is how the Claude Code hook feeds it.
-3. **The clipboard** — when launched on its own (double-click / Spotlight / a hotkey),
-   it reads whatever text you've copied.
+2. Text piped on stdin: `echo "hello" | speak-hud`
+3. **Your highlighted text** in the frontmost app (global hotkey).
+4. **The clipboard** — the fallback when nothing is selected, and when launched on its
+   own (double-click / Spotlight).
 
-## Global hotkey (read clipboard from anywhere)
+## Global hotkey (read your selection from anywhere)
 
 `build.sh` installs a background **LaunchAgent** (`com.chris.speakhud.agent`) that
-registers a system-wide hotkey. Press it and SpeakHUD reads whatever text is on your
-clipboard — no need to open the app first. Default combo: **`⌃⌥S`**.
+registers a system-wide hotkey. Highlight text in any app, press it, and SpeakHUD reads
+the selection in a HUD you can pause, stop, and re-speed. Default combo: **`⌃⌥S`**.
 
 Set your own combo (one or more of `cmd`/`ctrl`/`opt`/`shift` plus a key):
 
@@ -54,7 +85,25 @@ Manage the agent directly if needed:
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.chris.speakhud.agent   # restart
 launchctl bootout   gui/$(id -u)/com.chris.speakhud.agent       # stop/disable
+tail -f ~/Library/Logs/speakhud-agent.log                       # what it's doing
 ```
+
+The log records whether Accessibility was granted, which hotkey it bound, and each
+item it picks up off the queue. It's the only place to see the permission state, since
+running `speak-hud` from a terminal reports *the terminal's* Accessibility grant rather
+than SpeakHUD's.
+
+### Accessibility permission
+
+Reading *highlighted* text out of another app requires macOS **Accessibility** access —
+there's no way around it. Grant it from the menu bar (**Grant Accessibility Access…**,
+which only appears while the permission is missing).
+
+Until you do, the hotkey falls back to reading the **clipboard**, so nothing breaks.
+
+Two strategies are used, in order: the Accessibility API's selected-text attribute
+(clean, doesn't touch your clipboard), and — for apps that don't implement it, like
+Chrome and some terminals — a synthesized `⌘C` with your clipboard restored afterwards.
 
 ## Build & install
 
@@ -63,8 +112,15 @@ launchctl bootout   gui/$(id -u)/com.chris.speakhud.agent       # stop/disable
 ```
 
 Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications`) and refreshes
-`~/.claude/bin/speak-hud` for the Claude Code hook. Stock-macOS tools only (`swiftc`,
-`codesign`, `sips`, `iconutil`).
+`~/.claude/read-summary.py` + `~/.claude/bin/speak-hud` for the Claude Code hook.
+Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
+
+**Signing matters here.** macOS keys the Accessibility grant to the app's code signature,
+and an ad-hoc signature gets a new hash on every build — so a rebuild would silently
+revoke the permission. `build.sh` therefore signs with the first **Developer ID
+Application** identity in your keychain, falling back to ad-hoc (with a warning) if you
+don't have one. Override with `SPEAKHUD_SIGN_ID=<hash-or-name> ./build.sh`; a self-signed
+certificate works fine, since all that matters is that it's stable.
 
 ## Optional: voice & rate via environment
 
@@ -80,6 +136,7 @@ The background agent shows a small **speaker icon** in the menu bar:
 - **Read Claude Code Responses Aloud** — a checkbox that installs/removes the Claude
   Code `Stop` hook for you (see below).
 - **Global Hotkey** — pick a preset or open the config file.
+- **Grant Accessibility Access…** — shown only until the permission is granted.
 - **SpeakHUD on GitHub** / **Quit**.
 
 ## Claude Code integration
@@ -95,13 +152,14 @@ the easy way from the menu bar (**Read Claude Code Responses Aloud**), or from t
 
 Setup is a safe, idempotent merge into `~/.claude/settings.json`: it copies
 `read-summary.py` and the reader binary into `~/.claude`, then adds a `Stop` hook that
-grabs the latest assistant response, strips code blocks/markdown, and pipes it to
-`speak-hud`. Your other settings and hooks are preserved; removing it touches only the
+grabs the latest assistant response, strips code blocks/markdown, and hands it to the
+agent's queue. Your other settings and hooks are preserved; removing it touches only the
 SpeakHUD entry. See `hook/` for the reference script.
 
 ## Files
 
-- `speak-hud.swift` — the whole app: reader HUD, `--agent` (hotkey listener), and
-  `--set-hotkey`.
+- `speak-hud.swift` — the whole app: the queue-owning HUD, `--agent` (hotkey listener,
+  spool watcher, menu bar), and `--set-hotkey`.
+- `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn.
 - `make-icon.swift` — renders the app icon.
 - `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.

@@ -1,5 +1,6 @@
 import Cocoa
 import AVFoundation
+import ApplicationServices
 import Carbon.HIToolbox
 
 // Shared prefs domain so the speed setting is the same no matter how the reader
@@ -10,9 +11,15 @@ let prefs = UserDefaults(suiteName: "com.chris.speakhud.shared") ?? .standard
 // Text source priority: explicit arg → piped stdin (the Claude Code hook) →
 // clipboard. The clipboard fallback is what makes the .app useful when launched
 // on its own (double-click / Spotlight / a hotkey), where there's no stdin pipe.
-func resolveText() -> String {
-    let args = CommandLine.arguments
-    if args.count > 1, !args[1].isEmpty { return args[1] }
+func resolveText(_ args: [String]) -> String {
+    var i = 1
+    while i < args.count {
+        let a = args[i]
+        if a == "--source" { i += 2; continue }   // flag + its value
+        if a.hasPrefix("--") { i += 1; continue }
+        if !a.isEmpty { return a }
+        i += 1
+    }
     // Only drain stdin when it's a pipe/file; reading an interactive TTY would block.
     if isatty(FileHandle.standardInput.fileDescriptor) == 0 {
         let data = FileHandle.standardInput.readDataToEndOfFile()
@@ -24,20 +31,215 @@ func resolveText() -> String {
     return NSPasteboard.general.string(forType: .string) ?? ""
 }
 
-final class Controller: NSObject, AVSpeechSynthesizerDelegate {
+// ---------------------------------------------------------------------------
+// The unit of speech: one thing to read, and where it came from.
+// ---------------------------------------------------------------------------
+
+struct SpeechItem {
+    let text: String
+    let source: String   // shown as "from: …" — a project name, or the frontmost app
+    let key: String      // coalescing key: one Claude Code session == one terminal
+    let created: Date
+}
+
+// Claude Code turns arrive as files here rather than as processes, so a finished
+// turn can never interrupt one that's already speaking. The hook writes `<name>.tmp`
+// and renames it to `<name>.json`, which is atomic within a filesystem — the agent
+// therefore never observes a half-written item.
+enum Spool {
+    static let maxAge: TimeInterval = 600   // a stopped agent shouldn't wake up and read you the backlog
+    static var dir: String { NSString(string: "~/.local/state/speakhud/queue").expandingTildeInPath }
+
+    static func ensure() {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    }
+
+    /// Consume every queued item in arrival order. Files are deleted as they're read,
+    /// so a malformed one can't wedge the queue forever.
+    static func drain() -> [SpeechItem] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        var out: [SpeechItem] = []
+        for name in names.filter({ $0.hasSuffix(".json") }).sorted() {
+            let path = dir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            guard let data = fm.contents(atPath: path),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let text = obj["text"] as? String, !text.isEmpty
+            else { continue }
+            let created = Date(timeIntervalSince1970: obj["created"] as? Double ?? 0)
+            guard Date().timeIntervalSince(created) < maxAge else { continue }
+            out.append(SpeechItem(text: text,
+                                  source: obj["source"] as? String ?? "Claude Code",
+                                  key: obj["key"] as? String ?? name,
+                                  created: created))
+        }
+        return out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reading the text you've highlighted in whatever app is frontmost.
+// ---------------------------------------------------------------------------
+
+enum Selection {
+    static var isTrusted: Bool { AXIsProcessTrusted() }
+
+    /// Shows the system "grant Accessibility" prompt. Returns true if already trusted.
+    @discardableResult
+    static func requestTrust() -> Bool {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    /// Selected text from the frontmost app, or nil if there is none (or we're untrusted).
+    static func current() -> String? {
+        guard isTrusted else { return nil }
+        return viaAccessibility() ?? viaSynthesizedCopy()
+    }
+
+    /// The clean path: ask the focused UI element for its selection. Doesn't touch
+    /// the clipboard, but plenty of apps (Chrome, some terminals) don't implement it.
+    private static func viaAccessibility() -> String? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.5)   // never hang on a wedged app
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID()
+        else { return nil }
+        var selected: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(f as! AXUIElement, kAXSelectedTextAttribute as CFString, &selected) == .success,
+              let s = selected as? String
+        else { return nil }
+        return nonEmpty(s)
+    }
+
+    /// The fallback: press ⌘C for the user and put their clipboard back afterwards.
+    private static func viaSynthesizedCopy() -> String? {
+        let pb = NSPasteboard.general
+        let saved = snapshot(pb)
+        let before = pb.changeCount
+
+        let source = CGEventSource(stateID: .combinedSessionState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false)
+        else { return nil }
+        // Set flags explicitly: the user is still holding the trigger hotkey's modifiers,
+        // and we must not deliver ⌃⌥⌘C to the target app.
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+
+        // Nothing selected means ⌘C is a no-op and changeCount never moves.
+        var waitedMs = 0
+        while pb.changeCount == before && waitedMs < 300 { usleep(10_000); waitedMs += 10 }
+        guard pb.changeCount != before else { return nil }
+
+        let copied = pb.string(forType: .string)
+        restore(saved, to: pb)
+        return copied.flatMap(nonEmpty)
+    }
+
+    private static func nonEmpty(_ s: String) -> String? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    private static func snapshot(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
+        (pb.pasteboardItems ?? []).map { item in
+            var types: [NSPasteboard.PasteboardType: Data] = [:]
+            for t in item.types { types[t] = item.data(forType: t) }
+            return types
+        }
+    }
+
+    private static func restore(_ snap: [[NSPasteboard.PasteboardType: Data]], to pb: NSPasteboard) {
+        pb.clearContents()
+        let items = snap.map { types -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (t, data) in types { item.setData(data, forType: t) }
+            return item
+        }
+        if !items.isEmpty { pb.writeObjects(items) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global hotkeys. One Carbon handler for the whole process, dispatching on the
+// hotkey id — installing a handler per feature would fire all of them on any key.
+// ---------------------------------------------------------------------------
+
+enum HotKeyAction: UInt32 { case read = 1, togglePause = 2 }
+
+final class HotKeyCenter {
+    static let shared = HotKeyCenter()
+    private static let signature = OSType(0x53504b48)   // 'SPKH'
+    private var refs: [UInt32: EventHotKeyRef] = [:]
+    private var handlers: [UInt32: () -> Void] = [:]
+    private var installed = false
+
+    private func installHandler() {
+        guard !installed else { return }
+        installed = true
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                 eventKind: OSType(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
+            guard let event = event else { return noErr }
+            var id = EventHotKeyID()
+            let err = GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                                        EventParamType(typeEventHotKeyID), nil,
+                                        MemoryLayout<EventHotKeyID>.size, nil, &id)
+            if err == noErr { HotKeyCenter.shared.handlers[id.id]?() }
+            return noErr
+        }, 1, &spec, nil, nil)
+    }
+
+    @discardableResult
+    func register(_ action: HotKeyAction, keyCode: UInt32, mods: UInt32,
+                  handler: @escaping () -> Void) -> Bool {
+        installHandler()
+        unregister(action)
+        var ref: EventHotKeyRef?
+        let id = EventHotKeyID(signature: Self.signature, id: action.rawValue)
+        guard RegisterEventHotKey(keyCode, mods, id, GetApplicationEventTarget(), 0, &ref) == noErr,
+              let ref = ref else { return false }
+        refs[action.rawValue] = ref
+        handlers[action.rawValue] = handler
+        return true
+    }
+
+    func unregister(_ action: HotKeyAction) {
+        if let ref = refs.removeValue(forKey: action.rawValue) { UnregisterEventHotKey(ref) }
+        handlers.removeValue(forKey: action.rawValue)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The HUD. Owns the queue: exactly one item speaks at a time, and a finished
+// Claude Code turn waits its turn instead of killing the one you're listening to.
+// ---------------------------------------------------------------------------
+
+final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate {
     // Replaced on every (re)start: stopSpeaking(.immediate) poisons an instance so
     // the next utterance silently finishes with no audio. A fresh synth avoids that.
     var synth = AVSpeechSynthesizer()
-    let text: String
-    let nsText: NSString
+
+    private(set) var current: SpeechItem?
+    private(set) var queue: [SpeechItem] = []
+    /// Standalone reader exits; the agent just hides the panel and keeps listening.
+    var onIdle: () -> Void = { NSApp.terminate(nil) }
+
     var panel: NSPanel!
     var statusLabel: NSTextField!
+    var queueLabel: NSTextField!
+    var sourceLabel: NSTextField!
+    var nextLabel: NSTextField!
     var pauseBtn: NSButton!
     var speedBtn: NSButton!
+    var skipBtn: NSButton!
     var textView: NSTextView!
     var closeTimer: Timer?
-    var hotKeyRef: EventHotKeyRef?
-    static weak var shared: Controller?
 
     // Speed control. AVSpeech can't change rate mid-utterance, so changing speed
     // restarts speaking from the current word at the new rate. macOS default rate
@@ -46,15 +248,13 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
     let rateLabels: [String] = ["0.75×", "1×", "1.25×", "1.5×", "1.75×", "2×"]
     static let rateKey = "speakRateIndex"   // UserDefaults key for persisted speed
     var rateIndex = 1
-    var speakStart = 0     // char offset in `text` where the current utterance begins
+    var nsText: NSString = ""
+    var speakStart = 0     // char offset in the current item where the utterance begins
     var lastWordStart = 0  // char offset of the word currently being spoken
 
-    init(text: String) {
-        self.text = text
-        self.nsText = text as NSString
+    override init() {
         super.init()
         synth.delegate = self
-        Controller.shared = self
         // Restore the last speed the user picked…
         if let saved = prefs.object(forKey: Self.rateKey) as? Int,
            saved >= 0, saved < rateSteps.count {
@@ -66,18 +266,76 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    // System-wide ⌃⌥P toggles pause/resume. Carbon hotkeys need no Accessibility permission.
-    func registerHotKey() {
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                 eventKind: OSType(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { (_, _, _) -> OSStatus in
-            Controller.shared?.togglePause()
-            return noErr
-        }, 1, &spec, nil, nil)
-        let id = EventHotKeyID(signature: OSType(0x53504b59) /* 'SPKY' */, id: 1)
-        RegisterEventHotKey(UInt32(kVK_ANSI_P), UInt32(controlKey | optionKey),
-                            id, GetApplicationEventTarget(), 0, &hotKeyRef)
+    // -- queue -------------------------------------------------------------
+
+    /// Wait your turn. A second turn from the same session replaces the first one
+    /// still waiting in line — you want the latest answer, not a stale one.
+    /// Returns true if nothing was speaking and this item started straight away.
+    @discardableResult
+    func enqueue(_ item: SpeechItem) -> Bool {
+        if let i = queue.firstIndex(where: { $0.key == item.key }) {
+            queue[i] = item   // keep its place in line; a chatty session shouldn't jump the queue
+        } else {
+            queue.append(item)
+        }
+        guard current == nil else { updateQueueUI(); return false }
+        // current == nil only ever happens with an empty queue, so advance() picks
+        // up the item we just appended.
+        advance()
+        return true
     }
+
+    /// Jump the queue. Used for hotkey reads: you highlighted that text and asked
+    /// for it now, so it shouldn't sit behind Claude's narration.
+    func playNow(_ item: SpeechItem) {
+        closeTimer?.invalidate()
+        start(item)
+    }
+
+    @objc func skip() {
+        synth.stopSpeaking(at: .immediate)
+        advance()
+    }
+
+    private func advance() {
+        if queue.isEmpty {
+            current = nil
+            statusLabel?.stringValue = "Done"
+            clearHighlight()
+            updateQueueUI()
+            scheduleAutoClose(after: 8)
+        } else {
+            start(queue.removeFirst())
+        }
+    }
+
+    private func start(_ item: SpeechItem) {
+        closeTimer?.invalidate()
+        current = item
+        nsText = item.text as NSString
+        speakStart = 0
+        lastWordStart = 0
+        buildWindowIfNeeded()
+        textView.string = item.text
+        sourceLabel.stringValue = "from: \(item.source)"
+        updateQueueUI()
+        panel.orderFrontRegardless()
+        speak()
+    }
+
+    private func updateQueueUI() {
+        guard queueLabel != nil else { return }
+        queueLabel.stringValue = queue.isEmpty ? "" : "▸ \(queue.count) queued"
+        if queue.isEmpty {
+            nextLabel.stringValue = ""
+        } else {
+            let names = queue.prefix(3).map(\.source).joined(separator: ", ")
+            nextLabel.stringValue = "next: " + names + (queue.count > 3 ? "…" : "")
+        }
+        skipBtn.isEnabled = !queue.isEmpty
+    }
+
+    // -- speech ------------------------------------------------------------
 
     private func utterance() -> AVSpeechUtterance {
         // Speak from the current resume point so a mid-stream speed change picks up
@@ -119,10 +377,11 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
             speak()
         }
     }
+
     @objc func togglePause() {
         if synth.isPaused {
             synth.continueSpeaking()
-            statusLabel?.stringValue = "🔊 Speaking…"
+            statusLabel?.stringValue = "🔊 Speaking…  \(rateLabels[rateIndex])"
             pauseBtn?.title = "❚❚ Pause"
         } else if synth.isSpeaking {
             synth.pauseSpeaking(at: .word)
@@ -130,18 +389,34 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
             pauseBtn?.title = "▶ Resume"
         }
     }
-    @objc func stopAndClose() { synth.stopSpeaking(at: .immediate); NSApp.terminate(nil) }
-    @objc func closeOnly() { NSApp.terminate(nil) }
+
+    /// Stop everything and throw the queue away.
+    @objc func stopAll() {
+        closeTimer?.invalidate()
+        synth.stopSpeaking(at: .immediate)
+        queue.removeAll()
+        current = nil
+        updateQueueUI()
+        onIdle()
+    }
+
+    func hidePanel() {
+        closeTimer?.invalidate()
+        panel?.orderOut(nil)
+    }
 
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        statusLabel?.stringValue = "Done"
-        clearHighlight()
-        scheduleAutoClose(after: 8)
+        // A synth we already replaced can still deliver this; ignore it or we'd
+        // advance the queue twice for one item.
+        guard s === synth else { return }
+        advance()
     }
+
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {}
 
     // Karaoke-style follow: highlight + scroll to the word currently being spoken.
     func speechSynthesizer(_ s: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
+        guard s === synth else { return }
         // Ranges are relative to the (possibly sliced) utterance; shift to full-text coords.
         let full = NSRange(location: speakStart + characterRange.location, length: characterRange.length)
         lastWordStart = full.location
@@ -160,13 +435,21 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
 
     private func scheduleAutoClose(after seconds: TimeInterval) {
         closeTimer?.invalidate()
-        closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { _ in
-            NSApp.terminate(nil)
+        closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
+            self?.onIdle()
         }
     }
 
-    func buildWindow() {
-        let w: CGFloat = 440, h: CGFloat = 300
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        stopAll()
+        return false   // stopAll already hid (or terminated) us
+    }
+
+    // -- window ------------------------------------------------------------
+
+    func buildWindowIfNeeded() {
+        guard panel == nil else { return }
+        let w: CGFloat = 440, h: CGFloat = 330
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: w, height: h),
             styleMask: [.nonactivatingPanel, .titled, .closable, .resizable, .fullSizeContentView],
@@ -178,20 +461,38 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.minSize = NSSize(width: 360, height: 200)
+        panel.minSize = NSSize(width: 380, height: 260)
+        panel.delegate = self
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
 
-        // Status (pinned to top)
+        // Status + queue depth (pinned to top)
         let label = NSTextField(labelWithString: "🔊 Speaking…")
-        label.frame = NSRect(x: 16, y: h - 30, width: w - 32, height: 20)
+        label.frame = NSRect(x: 16, y: h - 30, width: 240, height: 20)
         label.font = .systemFont(ofSize: 13, weight: .semibold)
         label.autoresizingMask = [.width, .minYMargin]
         content.addSubview(label)
         statusLabel = label
 
+        let queued = NSTextField(labelWithString: "")
+        queued.frame = NSRect(x: w - 156, y: h - 29, width: 140, height: 18)
+        queued.alignment = .right
+        queued.font = .systemFont(ofSize: 11, weight: .medium)
+        queued.textColor = .secondaryLabelColor
+        queued.autoresizingMask = [.minXMargin, .minYMargin]
+        content.addSubview(queued)
+        queueLabel = queued
+
+        let src = NSTextField(labelWithString: "")
+        src.frame = NSRect(x: 16, y: h - 48, width: w - 32, height: 16)
+        src.font = .systemFont(ofSize: 11)
+        src.textColor = .secondaryLabelColor
+        src.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(src)
+        sourceLabel = src
+
         // Full response text — scrollable, auto-follows speech (fills the middle)
-        let scroll = NSScrollView(frame: NSRect(x: 16, y: 78, width: w - 32, height: h - 114))
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 96, width: w - 32, height: h - 152))
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .bezelBorder
@@ -208,14 +509,23 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
         tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
         tv.textContainer?.widthTracksTextView = true
-        tv.string = text
         scroll.documentView = tv
         content.addSubview(scroll)
         textView = tv
 
+        // What's waiting behind the current item
+        let next = NSTextField(labelWithString: "")
+        next.frame = NSRect(x: 16, y: 76, width: w - 32, height: 14)
+        next.font = .systemFont(ofSize: 10)
+        next.textColor = .tertiaryLabelColor
+        next.lineBreakMode = .byTruncatingTail
+        next.autoresizingMask = [.width, .maxYMargin]
+        content.addSubview(next)
+        nextLabel = next
+
         // Hotkey hint (above buttons, pinned to bottom)
         let hint = NSTextField(labelWithString: "Pause / Resume anywhere:  ⌃⌥P")
-        hint.frame = NSRect(x: 16, y: 52, width: w - 32, height: 14)
+        hint.frame = NSRect(x: 16, y: 58, width: w - 32, height: 14)
         hint.font = .systemFont(ofSize: 10)
         hint.textColor = .secondaryLabelColor
         hint.autoresizingMask = [.width, .maxYMargin]
@@ -224,7 +534,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
         // Buttons (pinned to bottom)
         func button(_ title: String, _ x: CGFloat, _ width: CGFloat, _ action: Selector) -> NSButton {
             let b = NSButton(title: title, target: self, action: action)
-            b.frame = NSRect(x: x, y: 14, width: width, height: 26)
+            b.frame = NSRect(x: x, y: 16, width: width, height: 26)
             b.bezelStyle = .rounded
             b.autoresizingMask = [.maxYMargin]
             return b
@@ -234,8 +544,10 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
         content.addSubview(pauseBtn)
         speedBtn = button("⏩ \(rateLabels[rateIndex])", 186, 70, #selector(changeSpeed))
         content.addSubview(speedBtn)
-        content.addSubview(button("■ Stop", 260, 66, #selector(stopAndClose)))
-        content.addSubview(button("Close", 330, 62, #selector(closeOnly)))
+        skipBtn = button("⏭ Skip", 260, 66, #selector(skip))
+        skipBtn.isEnabled = false
+        content.addSubview(skipBtn)
+        content.addSubview(button("■ Stop", 330, 66, #selector(stopAll)))
 
         panel.contentView = content
 
@@ -243,13 +555,12 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate {
             let vf = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: vf.maxX - w - 20, y: vf.maxY - h - 20))
         }
-        panel.orderFrontRegardless()
         self.panel = panel
     }
 }
 
 // ---------------------------------------------------------------------------
-// Global hotkey + background agent (read the clipboard from anywhere)
+// Global hotkey + background agent (read the selection from anywhere)
 // ---------------------------------------------------------------------------
 
 // Stored at ~/.config/speakhud/config.json so you can set your own combo.
@@ -387,50 +698,107 @@ func parseHotkey(_ spec: String) -> (keyCode: UInt32, mods: UInt32)? {
     return (code, mods)
 }
 
-// Background listener: registers the global hotkey and, on press, launches the
-// reader (which reads the clipboard). Runs from a LaunchAgent; no window/Dock.
+// Background listener: owns the one HUD, the speech queue, and the global hotkey.
+// Runs from a LaunchAgent; no window/Dock until something needs reading.
 final class Agent {
     static weak var shared: Agent?
-    var hotKeyRef: EventHotKeyRef?
-    var reader: Process?
+    let hud = Controller()
+    var spoolSource: DispatchSourceFileSystemObject?
+    var pollTimer: Timer?
     var usr1: DispatchSourceSignal?
-    let readerPath = CommandLine.arguments[0]
+
+    /// launchd routes stderr to ~/Library/Logs/speakhud-agent.log (see build.sh).
+    func log(_ message: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        FileHandle.standardError.write("[\(ts)] \(message)\n".data(using: .utf8)!)
+    }
 
     func run() {
         Agent.shared = self
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                 eventKind: OSType(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ -> OSStatus in
-            Agent.shared?.trigger(); return noErr
-        }, 1, &spec, nil, nil)
-        register()
+        hud.onIdle = { [weak self] in self?.hud.hidePanel() }
+        log("agent started (pid \(getpid()))")
+        // The one thing you can't tell from outside the process: whether macOS will
+        // let us see the text you've highlighted.
+        log(Selection.isTrusted
+            ? "accessibility: granted — hotkey reads your selection"
+            : "accessibility: NOT granted — hotkey falls back to the clipboard")
+        registerReadHotKey()
+        HotKeyCenter.shared.register(.togglePause,
+                                     keyCode: UInt32(kVK_ANSI_P),
+                                     mods: UInt32(controlKey | optionKey)) { [weak self] in
+            self?.hud.togglePause()
+        }
+        watchSpool()
         // SIGUSR1 also triggers a read — lets the install step self-test without keys.
         signal(SIGUSR1, SIG_IGN)
         let s = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-        s.setEventHandler { Agent.shared?.trigger() }
+        s.setEventHandler { Agent.shared?.readClipboard() }
         s.resume()
         usr1 = s
     }
 
-    func register() {
-        if let r = hotKeyRef { UnregisterEventHotKey(r); hotKeyRef = nil }
+    func registerReadHotKey() {
         let spec = HotkeyConfig.load()
         guard let hk = parseHotkey(spec) else {
-            FileHandle.standardError.write("SpeakHUD agent: invalid hotkey \"\(spec)\"\n".data(using: .utf8)!)
+            log("invalid hotkey \"\(spec)\" — not registered")
             return
         }
-        let id = EventHotKeyID(signature: OSType(0x53504b41) /* 'SPKA' */, id: 1)
-        RegisterEventHotKey(hk.keyCode, hk.mods, id, GetApplicationEventTarget(), 0, &hotKeyRef)
-        FileHandle.standardError.write("SpeakHUD agent: listening for \(spec)\n".data(using: .utf8)!)
+        let ok = HotKeyCenter.shared.register(.read, keyCode: hk.keyCode, mods: hk.mods) { [weak self] in
+            self?.readSelection()
+        }
+        log(ok ? "listening for \(spec)" : "could not register \(spec) — another app owns it")
     }
 
-    func trigger() {
-        reader?.terminate()                 // replace any in-progress read
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: readerPath)   // no args -> reads clipboard
-        p.standardInput = FileHandle.nullDevice
-        try? p.run()
-        reader = p
+    // -- spool -------------------------------------------------------------
+
+    private func watchSpool() {
+        Spool.ensure()
+        let fd = open(Spool.dir, O_EVTONLY)
+        if fd >= 0 {
+            let src = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd, eventMask: [.write, .extend, .rename], queue: .main)
+            src.setEventHandler { [weak self] in self?.drainSpool() }
+            src.setCancelHandler { close(fd) }
+            src.resume()
+            spoolSource = src
+        }
+        // Safety net: the vnode source goes deaf if the directory is ever replaced.
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            self?.drainSpool()
+        }
+        drainSpool()
+    }
+
+    private func drainSpool() {
+        for item in Spool.drain() {
+            if hud.enqueue(item) {
+                log("speaking \(item.source)")
+            } else {
+                log("queued \(item.source) — \(hud.queue.count) waiting")
+            }
+        }
+    }
+
+    // -- reads -------------------------------------------------------------
+
+    /// Hotkey: read whatever is highlighted in the frontmost app.
+    func readSelection() {
+        let app = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Selection"
+        // No selection (or no Accessibility grant) falls back to the clipboard,
+        // which is exactly what this hotkey did before it could see selections.
+        play(Selection.current() ?? NSPasteboard.general.string(forType: .string) ?? "", source: app)
+    }
+
+    /// Menu item / double-clicking the app: there's no meaningful selection when
+    /// SpeakHUD itself is frontmost, so read the clipboard.
+    func readClipboard() {
+        play(NSPasteboard.general.string(forType: .string) ?? "", source: "Clipboard")
+    }
+
+    private func play(_ raw: String, source: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { NSSound.beep(); return }
+        hud.playNow(SpeechItem(text: text, source: source, key: UUID().uuidString, created: Date()))
     }
 }
 
@@ -441,17 +809,18 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     let agent: Agent
     init(_ agent: Agent) { self.agent = agent }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        agent.trigger()
+        agent.readClipboard()
         return true
     }
 }
 
 // Menu-bar settings surface for the agent: read clipboard, toggle the Claude Code
 // integration, and pick the global hotkey — all without a Dock icon or window.
-final class MenuController: NSObject {
+final class MenuController: NSObject, NSMenuDelegate {
     let agent: Agent
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var claudeItem: NSMenuItem!
+    var axItem: NSMenuItem!
     let hotkeyPresets = [("⌃⌥S", "ctrl+opt+s"), ("⌃⌥R", "ctrl+opt+r"),
                          ("⌃⌥Space", "ctrl+opt+space"), ("⌘⌥S", "cmd+opt+s")]
     var hotkeyItems: [NSMenuItem] = []
@@ -463,6 +832,7 @@ final class MenuController: NSObject {
             btn.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "SpeakHUD")
         }
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(item("Read Clipboard Aloud", #selector(readClipboard)))
         menu.addItem(.separator())
 
@@ -480,6 +850,10 @@ final class MenuController: NSObject {
         hkParent.submenu = hk
         menu.addItem(hkParent)
 
+        // Only surfaced when we can't read selections yet — otherwise it's noise.
+        axItem = item("Grant Accessibility Access…", #selector(grantAccessibility))
+        menu.addItem(axItem)
+
         menu.addItem(.separator())
         menu.addItem(item("SpeakHUD on GitHub", #selector(openGitHub)))
         menu.addItem(item("Quit SpeakHUD", #selector(quit)))
@@ -493,21 +867,31 @@ final class MenuController: NSObject {
         return it
     }
 
+    func menuNeedsUpdate(_ menu: NSMenu) { refresh() }
+
     private func refresh() {
         claudeItem.state = ClaudeHook.isInstalled() ? .on : .off
+        axItem.isHidden = Selection.isTrusted
         let current = HotkeyConfig.load()
         for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
     }
 
-    @objc private func readClipboard() { agent.trigger() }
+    @objc private func readClipboard() { agent.readClipboard() }
     @objc private func toggleClaude() {
         _ = ClaudeHook.isInstalled() ? ClaudeHook.remove() : ClaudeHook.install()
+        refresh()
+    }
+    @objc private func grantAccessibility() {
+        if !Selection.requestTrust() {
+            NSWorkspace.shared.open(URL(string:
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+        }
         refresh()
     }
     @objc private func pickHotkey(_ sender: NSMenuItem) {
         guard let spec = sender.representedObject as? String else { return }
         HotkeyConfig.save(spec)
-        agent.register()        // re-register live; no restart needed
+        agent.registerReadHotKey()   // re-register live; no restart needed
         refresh()
     }
     @objc private func openHotkeyConfig() {
@@ -559,14 +943,22 @@ if argv.contains("--agent") {
     exit(0)
 }
 
-// Default: the reader HUD.
-let text = resolveText().trimmingCharacters(in: .whitespacesAndNewlines)
+// Default: a one-shot reader HUD. Used for `speak-hud "text"` and as the Claude
+// Code hook's fallback when the agent isn't running to serialize things for us.
+let text = resolveText(argv).trimmingCharacters(in: .whitespacesAndNewlines)
 if text.isEmpty { exit(0) }
+
+var sourceName = "Claude Code"
+if let i = argv.firstIndex(of: "--source"), i + 1 < argv.count { sourceName = argv[i + 1] }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)   // no Dock icon, doesn't steal focus
-let controller = Controller(text: text)
-controller.buildWindow()
-controller.registerHotKey()
-controller.speak()
+let controller = Controller()
+controller.onIdle = { NSApp.terminate(nil) }
+HotKeyCenter.shared.register(.togglePause,
+                             keyCode: UInt32(kVK_ANSI_P),
+                             mods: UInt32(controlKey | optionKey)) { [weak controller] in
+    controller?.togglePause()
+}
+controller.enqueue(SpeechItem(text: text, source: sourceName, key: UUID().uuidString, created: Date()))
 app.run()
