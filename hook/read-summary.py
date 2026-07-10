@@ -94,9 +94,18 @@ def enqueue(text, source, key):
     # random tail keeps a same-instant tie between two terminals from clobbering.
     stem = f"{time.time_ns():019d}-{os.urandom(4).hex()}"
     tmp = os.path.join(QUEUE_DIR, stem + ".tmp")
-    with open(tmp, "w") as f:
-        json.dump({"text": text, "source": source, "key": key, "created": time.time()}, f)
-    os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"text": text, "source": source, "key": key, "created": time.time()}, f)
+        os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
+    except OSError:
+        # Don't leave a partial .tmp behind to accumulate; the agent ignores them,
+        # but nothing else would ever clean them up.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def speak_directly(text, source):
@@ -134,13 +143,19 @@ def main():
     cwd = data.get("cwd") or ""
     source = os.path.basename(cwd.rstrip("/")) or "Claude Code"
     # Coalesce on the session, not the project: two terminals in the same repo are
-    # two independent conversations and both deserve to be heard.
-    key = data.get("session_id") or cwd or source
+    # two independent conversations and both deserve to be heard. The transcript is
+    # per-session too, so it's the right fallback; `cwd` would merge those terminals
+    # back together. `path` is non-empty here — main() returned early otherwise.
+    key = data.get("session_id") or path
 
     if agent_running():
-        enqueue(text, source, key)
-    else:
-        speak_directly(text, source)
+        try:
+            enqueue(text, source, key)
+            return
+        except OSError as e:
+            # A full disk or an unwritable spool shouldn't mean silence.
+            print(f"speakhud: could not queue turn ({e}); speaking directly", file=sys.stderr)
+    speak_directly(text, source)
 
 
 if __name__ == "__main__":

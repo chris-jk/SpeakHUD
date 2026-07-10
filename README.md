@@ -2,7 +2,8 @@
 
 A tiny macOS app that reads text aloud in a floating HUD with **Replay**, **Pause**,
 **Speed**, **Skip**, and **Stop** controls. Built with `AVSpeechSynthesizer` — no
-dependencies, no menu-bar clutter (it's an agent app), single Swift file.
+dependencies, no Dock icon (it's an agent app), and the entire runtime in a single Swift
+file. (`make-icon.swift` is a build-time icon generator; it never ships in the app.)
 
 It started life as a Claude Code "read my last response out loud" hook and grew into
 a standalone app.
@@ -161,5 +162,5 @@ SpeakHUD entry. See `hook/` for the reference script.
 - `speak-hud.swift` — the whole app: the queue-owning HUD, `--agent` (hotkey listener,
   spool watcher, menu bar), and `--set-hotkey`.
 - `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn.
-- `make-icon.swift` — renders the app icon.
+- `make-icon.swift` — build-time tool that renders `AppIcon.icns`; not part of the app.
 - `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.
