@@ -32,6 +32,10 @@ Instead the hook writes one JSON file per finished turn into
 
 - Files are written as `<name>.tmp` and then `rename`d to `<name>.json`. Rename is atomic
   within a filesystem, so the agent never reads a half-written item.
+- The agent claims an item by renaming it again, to `<name>.taken`, and only deletes it
+  once it has actually been spoken (or been skipped, stopped, or superseded). A crash or
+  a rebuild mid-queue therefore leaves the pending items on disk, and the next agent
+  re-adopts them on startup rather than swallowing the queue.
 - The name is a zero-padded nanosecond timestamp plus a random tail, so a plain filename
   sort is arrival order and two terminals finishing at the same instant can't clobber
   each other.

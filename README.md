@@ -33,17 +33,21 @@ Only one thing speaks at a time. Anything that arrives while the HUD is busy wai
 its turn, and the HUD shows what's behind it:
 
 ```
-🔊 Speaking…  1×                    ▸ 2 queued
-from: SpeakHUD
+ ●  grow_guide_app                       ▸ 3 queued
+🔊 Speaking…  1.25×
 ┌──────────────────────────────────────────┐
 │ Yes, I understand — and I found the      │
 │ exact line causing it…                   │
 └──────────────────────────────────────────┘
- next: StrainGuide, cloudflare-dns
+ next: SpeakHUD, StrainGuide, cloudflare-dns
 
  ↻ Replay   ❚❚ Pause   ⏩ 1×   ⏭ Skip   ■ Stop
 ```
 
+- **Whoever is speaking is named in a colored pill**, and each project keeps the same
+  color every time (a stable hash of the name, not Swift's per-process `hashValue`),
+  so four terminals become four colors you recognize rather than four names you read.
+  The `next:` line colors each waiting project the same way.
 - **Claude Code turns queue.** Each finished turn is written to a spool directory
   (`~/.local/state/speakhud/queue/`) and drained one at a time by the background agent.
 - **Newest per session wins.** If one terminal finishes two turns while you're still
@@ -52,7 +56,11 @@ from: SpeakHUD
   are both heard.
 - **Hotkey reads jump the queue.** You highlighted that text and asked for it *now*,
   so it preempts whatever was speaking.
-- **Skip** moves to the next item; **Stop** clears the queue entirely.
+- **Skip** moves to the next item. **Stop** — and closing the window — discards
+  everything that was waiting.
+- **The queue survives a restart.** A taken item stays on disk (renamed `.taken`) until
+  it has actually been spoken, so killing or rebuilding the agent mid-queue replays what
+  was pending instead of swallowing it.
 - Items that have waited more than 10 minutes are dropped unspoken, so an agent that
   was stopped for a while doesn't come back and read you the whole morning.
 
@@ -80,6 +88,17 @@ Set your own combo (one or more of `cmd`/`ctrl`/`opt`/`shift` plus a key):
 
 This writes `~/.config/speakhud/config.json` and restarts the agent. Invalid combos
 (no modifier, unknown key) are rejected and leave the current setting untouched.
+
+> **If you pick `⌘⌥S`,** know that macOS's own **Accessibility → Spoken Content → Speak
+> selection** claims that combo by default. Both will then read your selection at once,
+> and the system one has no HUD and no speed control. Turn it off first:
+>
+> ```sh
+> defaults write com.apple.speech.synthesis.general.prefs SpokenUIUseSpeakingHotKeyFlag -bool false
+> ```
+>
+> If a stray voice persists, untick it once in System Settings — the pref is read by a
+> system service that may not notice a `defaults write` until then.
 
 Manage the agent directly if needed:
 

@@ -37,9 +37,13 @@ func resolveText(_ args: [String]) -> String {
 
 struct SpeechItem {
     let text: String
-    let source: String   // shown as "from: …" — a project name, or the frontmost app
+    let source: String   // a project name, or the frontmost app
     let key: String      // coalescing key: one Claude Code session == one terminal
     let created: Date
+    /// The spool file backing this item. Deleted only once the item has actually been
+    /// spoken, so an agent restart can't swallow a queue. Nil for hotkey reads and the
+    /// standalone reader, which have nothing on disk to recover.
+    var file: String? = nil
 }
 
 // Claude Code turns arrive as files here rather than as processes, so a finished
@@ -54,27 +58,48 @@ enum Spool {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     }
 
-    /// Consume every queued item in arrival order. Files are deleted as they're read,
-    /// so a malformed one can't wedge the queue forever.
+    /// Items a previous agent had picked up but never finished speaking — it was
+    /// restarted or crashed mid-queue. Hand them back so they get another turn.
+    static func recover() {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
+        for name in names where name.hasSuffix(".taken") {
+            let stem = String(name.dropLast(6))
+            try? fm.moveItem(atPath: dir + "/" + name, toPath: dir + "/" + stem + ".json")
+        }
+    }
+
+    /// Take every queued item, in arrival order. A taken item is renamed rather than
+    /// deleted, so it still exists on disk until it has actually been spoken; `done()`
+    /// is what finally removes it.
     static func drain() -> [SpeechItem] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
         var out: [SpeechItem] = []
         for name in names.filter({ $0.hasSuffix(".json") }).sorted() {
-            let path = dir + "/" + name
-            defer { try? fm.removeItem(atPath: path) }
-            guard let data = fm.contents(atPath: path),
+            let stem = String(name.dropLast(5))
+            let taken = dir + "/" + stem + ".taken"
+            // Claim it atomically; if the rename loses, someone else has it.
+            guard (try? fm.moveItem(atPath: dir + "/" + name, toPath: taken)) != nil else { continue }
+            guard let data = fm.contents(atPath: taken),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let text = obj["text"] as? String, !text.isEmpty
-            else { continue }
+            else { done(taken); continue }   // malformed: drop it, don't wedge the queue
             let created = Date(timeIntervalSince1970: obj["created"] as? Double ?? 0)
-            guard Date().timeIntervalSince(created) < maxAge else { continue }
+            guard Date().timeIntervalSince(created) < maxAge else { done(taken); continue }
             out.append(SpeechItem(text: text,
                                   source: obj["source"] as? String ?? "Claude Code",
-                                  key: obj["key"] as? String ?? name,
-                                  created: created))
+                                  key: obj["key"] as? String ?? stem,
+                                  created: created,
+                                  file: taken))
         }
         return out
+    }
+
+    /// This item will never be spoken again — finished, skipped, stopped, or superseded.
+    static func done(_ path: String?) {
+        guard let path = path else { return }
+        try? FileManager.default.removeItem(atPath: path)
     }
 }
 
@@ -216,6 +241,71 @@ final class HotKeyCenter {
 }
 
 // ---------------------------------------------------------------------------
+// Source identity: a stable color per project, so four terminals are four
+// colors you learn rather than four names you have to read.
+// ---------------------------------------------------------------------------
+
+enum Accent {
+    // Yellow and red are omitted: one is illegible, the other reads as an error.
+    private static let palette: [NSColor] = [
+        .systemBlue, .systemGreen, .systemOrange, .systemPurple,
+        .systemTeal, .systemPink, .systemIndigo, .systemBrown,
+    ]
+    /// djb2 rather than Swift's `hashValue`, whose seed is randomized per process —
+    /// a project would otherwise change color every time the agent restarted.
+    static func color(for source: String) -> NSColor {
+        var h: UInt64 = 5381
+        for byte in source.utf8 { h = (h &* 33) &+ UInt64(byte) }
+        return palette[Int(h % UInt64(palette.count))]
+    }
+}
+
+/// A colored pill naming whoever is speaking.
+final class SourceBadge: NSView {
+    var text = "" { didSet { needsDisplay = true } }
+    var accent: NSColor = .systemBlue { didSet { needsDisplay = true } }
+
+    private static let dot: CGFloat = 7
+    private static let padX: CGFloat = 11
+    private static let gap: CGFloat = 7
+    private static let maxWidth: CGFloat = 260
+    static let height: CGFloat = 24
+
+    private var textAttrs: [NSAttributedString.Key: Any] {
+        let p = NSMutableParagraphStyle()
+        p.lineBreakMode = .byTruncatingTail   // long repo names shouldn't stretch the pill
+        return [.font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: accent,
+                .paragraphStyle: p]
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let w = (text as NSString).size(withAttributes: textAttrs).width
+        return NSSize(width: min(ceil(w) + Self.padX * 2 + Self.dot + Self.gap, Self.maxWidth),
+                      height: Self.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds
+        let pill = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: r.height / 2, yRadius: r.height / 2)
+        accent.withAlphaComponent(0.18).setFill(); pill.fill()
+        accent.withAlphaComponent(0.5).setStroke(); pill.lineWidth = 1; pill.stroke()
+
+        accent.setFill()
+        NSBezierPath(ovalIn: NSRect(x: Self.padX, y: (r.height - Self.dot) / 2,
+                                    width: Self.dot, height: Self.dot)).fill()
+
+        let attrs = textAttrs
+        let s = text as NSString
+        let th = s.size(withAttributes: attrs).height
+        let x = Self.padX + Self.dot + Self.gap
+        s.draw(in: NSRect(x: x, y: (r.height - th) / 2, width: r.width - x - Self.padX, height: th),
+               withAttributes: attrs)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The HUD. Owns the queue: exactly one item speaks at a time, and a finished
 // Claude Code turn waits its turn instead of killing the one you're listening to.
 // ---------------------------------------------------------------------------
@@ -229,11 +319,14 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     private(set) var queue: [SpeechItem] = []
     /// Standalone reader exits; the agent just hides the panel and keeps listening.
     var onIdle: () -> Void = { NSApp.terminate(nil) }
+    /// Where queue transitions go. The agent points this at its log file.
+    var log: (String) -> Void = { _ in }
+    private var startedSpeaking = Date()
 
     var panel: NSPanel!
     var statusLabel: NSTextField!
     var queueLabel: NSTextField!
-    var sourceLabel: NSTextField!
+    var sourceBadge: SourceBadge!
     var nextLabel: NSTextField!
     var pauseBtn: NSButton!
     var speedBtn: NSButton!
@@ -268,12 +361,16 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
 
     // -- queue -------------------------------------------------------------
 
+    /// An item that will never be spoken again releases its spool file.
+    private func retire(_ item: SpeechItem?) { Spool.done(item?.file) }
+
     /// Wait your turn. A second turn from the same session replaces the first one
     /// still waiting in line — you want the latest answer, not a stale one.
     /// Returns true if nothing was speaking and this item started straight away.
     @discardableResult
     func enqueue(_ item: SpeechItem) -> Bool {
         if let i = queue.firstIndex(where: { $0.key == item.key }) {
+            retire(queue[i])  // the stale turn is never spoken; let go of its file
             queue[i] = item   // keep its place in line; a chatty session shouldn't jump the queue
         } else {
             queue.append(item)
@@ -289,10 +386,12 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     /// for it now, so it shouldn't sit behind Claude's narration.
     func playNow(_ item: SpeechItem) {
         closeTimer?.invalidate()
+        if let c = current { log("preempted \(c.source)"); retire(c) }
         start(item)
     }
 
     @objc func skip() {
+        if let c = current { log("skipped \(c.source)"); retire(c) }
         synth.stopSpeaking(at: .immediate)
         advance()
     }
@@ -312,27 +411,45 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     private func start(_ item: SpeechItem) {
         closeTimer?.invalidate()
         current = item
+        startedSpeaking = Date()
         nsText = item.text as NSString
         speakStart = 0
         lastWordStart = 0
         buildWindowIfNeeded()
         textView.string = item.text
-        sourceLabel.stringValue = "from: \(item.source)"
+        sourceBadge.text = item.source
+        sourceBadge.accent = Accent.color(for: item.source)
+        sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
         updateQueueUI()
         panel.orderFrontRegardless()
+        log("start \(item.source) (\(item.text.count) chars)")
         speak()
     }
 
     private func updateQueueUI() {
         guard queueLabel != nil else { return }
         queueLabel.stringValue = queue.isEmpty ? "" : "▸ \(queue.count) queued"
-        if queue.isEmpty {
-            nextLabel.stringValue = ""
-        } else {
-            let names = queue.prefix(3).map(\.source).joined(separator: ", ")
-            nextLabel.stringValue = "next: " + names + (queue.count > 3 ? "…" : "")
-        }
+        nextLabel.attributedStringValue = queuePreview()
         skipBtn.isEnabled = !queue.isEmpty
+    }
+
+    /// "next: Alpha, Beta", each name in its project's color.
+    private func queuePreview() -> NSAttributedString {
+        guard !queue.isEmpty else { return NSAttributedString(string: "") }
+        let dim: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+        ]
+        let out = NSMutableAttributedString(string: "next: ", attributes: dim)
+        for (i, item) in queue.prefix(3).enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: ", ", attributes: dim)) }
+            out.append(NSAttributedString(string: item.source, attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: Accent.color(for: item.source),
+            ]))
+        }
+        if queue.count > 3 { out.append(NSAttributedString(string: "…", attributes: dim)) }
+        return out
     }
 
     // -- speech ------------------------------------------------------------
@@ -390,10 +507,14 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         }
     }
 
-    /// Stop everything and throw the queue away.
+    /// Stop everything and throw the queue away. Note this discards what's waiting —
+    /// "Skip" is the one that moves on to the next item.
     @objc func stopAll() {
         closeTimer?.invalidate()
         synth.stopSpeaking(at: .immediate)
+        log("stop: discarded \(queue.count) queued item(s)")
+        retire(current)
+        queue.forEach { retire($0) }
         queue.removeAll()
         current = nil
         updateQueueUI()
@@ -409,7 +530,18 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         // A synth we already replaced can still deliver this; ignore it or we'd
         // advance the queue twice for one item.
         guard s === synth else { return }
-        advance()
+        let elapsed = Date().timeIntervalSince(startedSpeaking)
+        if let c = current {
+            log(String(format: "finish %@ after %.1fs", c.source, elapsed))
+            retire(c)
+        }
+        // Never re-enter AVSpeechSynthesizer from inside its own delegate callback:
+        // advance() replaces `synth`, deallocating the very instance calling us, and
+        // the next utterance can be dropped without a sound. Hop out of the callback.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, s === self.synth else { return }  // superseded meanwhile
+            self.advance()
+        }
     }
 
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {}
@@ -466,16 +598,16 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
 
-        // Status + queue depth (pinned to top)
-        let label = NSTextField(labelWithString: "🔊 Speaking…")
-        label.frame = NSRect(x: 16, y: h - 30, width: 240, height: 20)
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
-        label.autoresizingMask = [.width, .minYMargin]
-        content.addSubview(label)
-        statusLabel = label
+        // Who's talking — the loudest thing in the window, because with several
+        // terminals queued it's the first thing you need to know. Indented past the
+        // traffic lights, which float over this content view (.fullSizeContentView).
+        let badge = SourceBadge(frame: NSRect(x: 80, y: h - 34, width: 140, height: SourceBadge.height))
+        badge.autoresizingMask = [.minYMargin]
+        content.addSubview(badge)
+        sourceBadge = badge
 
         let queued = NSTextField(labelWithString: "")
-        queued.frame = NSRect(x: w - 156, y: h - 29, width: 140, height: 18)
+        queued.frame = NSRect(x: w - 166, y: h - 31, width: 150, height: 18)
         queued.alignment = .right
         queued.font = .systemFont(ofSize: 11, weight: .medium)
         queued.textColor = .secondaryLabelColor
@@ -483,16 +615,17 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         content.addSubview(queued)
         queueLabel = queued
 
-        let src = NSTextField(labelWithString: "")
-        src.frame = NSRect(x: 16, y: h - 48, width: w - 32, height: 16)
-        src.font = .systemFont(ofSize: 11)
-        src.textColor = .secondaryLabelColor
-        src.autoresizingMask = [.width, .minYMargin]
-        content.addSubview(src)
-        sourceLabel = src
+        // Playback state, demoted below the source.
+        let label = NSTextField(labelWithString: "🔊 Speaking…")
+        label.frame = NSRect(x: 18, y: h - 58, width: w - 36, height: 18)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(label)
+        statusLabel = label
 
         // Full response text — scrollable, auto-follows speech (fills the middle)
-        let scroll = NSScrollView(frame: NSRect(x: 16, y: 96, width: w - 32, height: h - 152))
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 96, width: w - 32, height: h - 162))
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .bezelBorder
@@ -716,6 +849,7 @@ final class Agent {
     func run() {
         Agent.shared = self
         hud.onIdle = { [weak self] in self?.hud.hidePanel() }
+        hud.log = { [weak self] in self?.log($0) }
         log("agent started (pid \(getpid()))")
         // The one thing you can't tell from outside the process: whether macOS will
         // let us see the text you've highlighted.
@@ -753,6 +887,7 @@ final class Agent {
 
     private func watchSpool() {
         Spool.ensure()
+        Spool.recover()   // whatever the last agent died holding gets another turn
         let fd = open(Spool.dir, O_EVTONLY)
         if fd >= 0 {
             let src = DispatchSource.makeFileSystemObjectSource(
