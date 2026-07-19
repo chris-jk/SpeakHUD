@@ -65,19 +65,46 @@ def current_response_text(path):
         for c in content:
             if isinstance(c, dict) and c.get("type") == "text":
                 texts.append(c.get("text", ""))
-    text = " ".join(t for t in texts if t).strip()
+    # Blank line between blocks: they're separate thoughts, not one sentence.
+    text = "\n\n".join(t for t in texts if t).strip()
     return text or None
 
 
+BULLET = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
+
+
 def clean(text):
+    """Strip markdown to speakable prose, keeping the shape of the response.
+
+    Flattening every newline turns a structured answer into one unreadable run-on in
+    the HUD, and robs the synthesizer of the pauses that paragraph breaks give it.
+    So: paragraphs stay paragraphs, list items stay one-per-line, and only the runs
+    of spaces *within* a line get collapsed.
+    """
     # Drop fenced code blocks entirely — reading code aloud is useless.
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    text = re.sub(r"`[^`]*`", "", text)          # inline code
+    # Keep what's *inside* inline code. Deleting it leaves "it called , which…" —
+    # a broken sentence on screen and a stumble when spoken. Fenced blocks are the
+    # genuinely unreadable ones, and those are already gone.
+    text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"\[([^\]]*)\]\([^\)]*\)", r"\1", text)  # links -> label
-    text = re.sub(r"[*_#>]+", "", text)          # emphasis / headers / quotes
-    text = re.sub(r"^\s*[-+]\s+", "", text, flags=re.MULTILINE)  # list bullets
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+
+    blocks = []
+    for block in re.split(r"\n\s*\n", text):     # blank line = paragraph break
+        lines = [l for l in (l.strip() for l in block.splitlines()) if l]
+        # Detect bullets before stripping emphasis, or "*" markers vanish first.
+        listy = any(BULLET.match(l) for l in lines)
+        out = []
+        for line in lines:
+            line = BULLET.sub("", line)          # the marker itself isn't speakable
+            line = re.sub(r"[*_#>]+", "", line)  # emphasis / headers / quotes
+            line = re.sub(r"[ \t]+", " ", line).strip()
+            if line:
+                out.append(line)
+        if out:
+            # One item per line reads as a list; a wrapped paragraph reads as prose.
+            blocks.append("\n".join(out) if listy else " ".join(out))
+    return "\n\n".join(blocks).strip()
 
 
 def agent_running():

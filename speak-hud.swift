@@ -195,7 +195,7 @@ enum Selection {
 // hotkey id — installing a handler per feature would fire all of them on any key.
 // ---------------------------------------------------------------------------
 
-enum HotKeyAction: UInt32 { case read = 1, togglePause = 2 }
+enum HotKeyAction: UInt32 { case read = 1, togglePause = 2, toggleHUD = 3 }
 
 final class HotKeyCenter {
     static let shared = HotKeyCenter()
@@ -305,6 +305,53 @@ final class SourceBadge: NSView {
     }
 }
 
+/// SpeakHUD runs as an accessory app: no Dock icon, and no menu bar to own an Edit
+/// menu. ⌘C is normally delivered *by* that menu, so without one a selection in the
+/// transcript looks copyable but silently isn't. Route the few editing keys the panel
+/// needs straight into the responder chain instead.
+final class HUDPanel: NSPanel {
+    override var canBecomeKey: Bool { true }   // …or it never sees a keystroke at all
+
+    /// The panel is deliberately non-activating, so it can appear mid-sentence without
+    /// stealing focus from whatever you're typing in. The cost is that an inactive app
+    /// receives no keyboard input at all — which is why selecting text and pressing ⌘C
+    /// did nothing. Clicking the HUD is an unambiguous "I want to use this", so take
+    /// focus at that point, and only then.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, !NSApp.isActive {
+            focusDonor = NSWorkspace.shared.frontmostApplication
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        super.sendEvent(event)
+    }
+
+    /// Whoever we took focus from. NSApp.deactivate() alone just leaves this app
+    /// frontmost with no windows, so the app has to be reactivated by name.
+    private var focusDonor: NSRunningApplication?
+
+    func returnFocus() {
+        guard NSApp.isActive, let donor = focusDonor,
+              donor.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        donor.activate(options: [])
+        focusDonor = nil
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mods == .command, let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let action: Selector?
+        switch key {
+        case "c": action = #selector(NSText.copy(_:))
+        case "a": action = #selector(NSText.selectAll(_:))
+        default:  action = nil
+        }
+        if let action = action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The HUD. Owns the queue: exactly one item speaks at a time, and a finished
 // Claude Code turn waits its turn instead of killing the one you're listening to.
@@ -323,7 +370,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     var log: (String) -> Void = { _ in }
     private var startedSpeaking = Date()
 
-    var panel: NSPanel!
+    var panel: HUDPanel!
     var statusLabel: NSTextField!
     var queueLabel: NSTextField!
     var sourceBadge: SourceBadge!
@@ -332,7 +379,22 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     var speedBtn: NSButton!
     var skipBtn: NSButton!
     var textView: NSTextView!
+    var hideBtn: NSButton!
     var closeTimer: Timer?
+
+    /// How long the panel sits there after the queue runs dry. Measured from your last
+    /// interaction, not from when speech ended.
+    var idleHideDelay: TimeInterval = 15
+    /// Last click, scroll, or keypress aimed at the panel. An auto-hide that fires while
+    /// you're mid-scroll is the whole "it vanished on me" complaint.
+    private var lastInteraction = Date.distantPast
+    private var interactionMonitor: Any?
+    /// The user put the HUD away. Sticky for the life of the agent, so a chatty session
+    /// can't keep shoving the panel back in front of them. Not persisted on purpose:
+    /// a hidden-forever HUD across restarts just looks like a broken app.
+    private(set) var isMinimized = false
+    /// Footer text. The agent appends the hotkeys it actually managed to register.
+    var hotkeyHint = "Pause / Resume anywhere:  ⌃⌥P"
 
     // Speed control. AVSpeech can't change rate mid-utterance, so changing speed
     // restarts speaking from the current word at the new rate. macOS default rate
@@ -386,7 +448,21 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     /// for it now, so it shouldn't sit behind Claude's narration.
     func playNow(_ item: SpeechItem) {
         closeTimer?.invalidate()
-        if let c = current { log("preempted \(c.source)"); retire(c) }
+        if let c = current {
+            // A spool-backed turn was interrupted, not finished — put it back at the head
+            // of the queue and keep its file, or a hotkey read silently destroys a Claude
+            // response mid-sentence. Two exceptions retire it instead: an ad-hoc read
+            // (no spool file) is superseded by the one you just asked for, and a session
+            // with a newer turn already waiting follows "newest per session wins".
+            if c.file != nil, !queue.contains(where: { $0.key == c.key }) {
+                log("preempted \(c.source) — requeued")
+                queue.insert(c, at: 0)
+            } else {
+                log("preempted \(c.source)")
+                retire(c)
+            }
+            current = nil
+        }
         start(item)
     }
 
@@ -402,7 +478,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
             statusLabel?.stringValue = "Done"
             clearHighlight()
             updateQueueUI()
-            scheduleAutoClose(after: 8)
+            scheduleAutoClose(after: idleHideDelay)
         } else {
             start(queue.removeFirst())
         }
@@ -416,12 +492,15 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         speakStart = 0
         lastWordStart = 0
         buildWindowIfNeeded()
-        textView.string = item.text
+        setTranscript(item.text)
         sourceBadge.text = item.source
         sourceBadge.accent = Accent.color(for: item.source)
         sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
         updateQueueUI()
-        panel.orderFrontRegardless()
+        // Content is kept current even while hidden, so restoring shows the real state
+        // rather than whatever was on screen when it was put away.
+        if !isMinimized { panel.orderFrontRegardless() }
+        onVisibilityChange()
         log("start \(item.source) (\(item.text.count) chars)")
         speak()
     }
@@ -521,10 +600,51 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         onIdle()
     }
 
+    /// Transient hide: stopped, or the standalone reader running dry. Distinct from
+    /// minimizing — the next thing to speak brings the panel back.
+    /// Clicking the HUD takes focus so ⌘C can work; hand it back on the way out, or the
+    /// next thing you type goes to an app with no windows left to receive it.
+    private func yieldFocus() {
+        panel?.returnFocus()
+    }
+
     func hidePanel() {
         closeTimer?.invalidate()
         panel?.orderOut(nil)
+        yieldFocus()
+        onVisibilityChange()
     }
+
+    /// Put the HUD away and keep it away. Speech carries on; only the panel goes.
+    @objc func minimize() {
+        guard !isMinimized else { return }
+        isMinimized = true
+        closeTimer?.invalidate()
+        panel?.orderOut(nil)
+        yieldFocus()
+        log("hud hidden")
+        onVisibilityChange()
+    }
+
+    /// Bring it back. No-op before anything has ever been spoken — there'd be nothing
+    /// in the panel to look at.
+    func restore() {
+        isMinimized = false
+        guard panel != nil else { onVisibilityChange(); return }
+        closeTimer?.invalidate()
+        panel.orderFrontRegardless()
+        log("hud shown")
+        onVisibilityChange()
+    }
+
+    /// Stop also leaves the panel off-screen, so "is it up right now" is the honest
+    /// question to toggle on — not whether the user pressed Hide.
+    var isPanelVisible: Bool { panel?.isVisible == true }
+
+    @objc func toggleMinimized() { isPanelVisible ? minimize() : restore() }
+
+    /// Lets the menu bar mirror whether the panel is currently up.
+    var onVisibilityChange: () -> Void = {}
 
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
         // A synth we already replaced can still deliver this; ignore it or we'd
@@ -556,8 +676,81 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
         if NSMaxRange(full) <= storage.length {
             storage.addAttribute(.backgroundColor, value: NSColor.findHighlightColor, range: full)
-            tv.scrollRangeToVisible(full)
+            scrollToSpokenWord(full, in: tv)
         }
+    }
+
+    /// Keep the spoken word in view with room to spare.
+    ///
+    /// `scrollRangeToVisible` alone isn't enough for two reasons: it scrolls the minimum
+    /// distance, so the word ends up jammed against the bottom edge (often half-clipped,
+    /// which reads as "it stopped following"), and glyphs are laid out lazily — on a long
+    /// response the line may have no layout yet, so the rect comes back wrong and the
+    /// view doesn't move at all.
+    private func scrollToSpokenWord(_ range: NSRange, in tv: NSTextView) {
+        guard let lm = tv.layoutManager, let tc = tv.textContainer else {
+            tv.scrollRangeToVisible(range)
+            return
+        }
+        lm.ensureLayout(forCharacterRange: range)
+        let glyphs = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var rect = lm.boundingRect(forGlyphRange: glyphs, in: tc)
+        rect.origin.x += tv.textContainerInset.width
+        rect.origin.y += tv.textContainerInset.height
+        // A couple of lines of context either side, so you can read ahead of the voice.
+        tv.scrollToVisible(rect.insetBy(dx: 0, dy: -44))
+    }
+
+    // Detection is cheap, but the detector isn't — build it once, not per response.
+    private static let linkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Show a response. Leading and paragraph spacing do most of the readability work —
+    /// a wall of tightly-set 12pt is hard to find your place in when the highlight is
+    /// moving. Attributes go on before `linkify()`, which would otherwise be wiped by
+    /// the blanket `addAttributes` here.
+    private func setTranscript(_ text: String) {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        tv.string = text
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 3
+        // No paragraphSpacing: the text already carries a blank line between paragraphs,
+        // and adding both doubles every gap and wastes the window.
+        style.paragraphSpacing = 0
+        storage.addAttributes([
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: style,
+        ], range: NSRange(location: 0, length: storage.length))
+        linkify()
+    }
+
+    /// Mark URLs in the transcript as real links. Only `.link` is added, so the karaoke
+    /// highlight (which only ever touches `.backgroundColor`) can't wipe them out.
+    private func linkify() {
+        guard let storage = textView?.textStorage, let detector = Self.linkDetector else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.link, range: full)
+        detector.enumerateMatches(in: storage.string, range: full) { match, _, _ in
+            guard let match = match, let url = match.url else { return }
+            storage.addAttribute(.link, value: url, range: match.range)
+        }
+    }
+
+    /// Clicks, scrolls, and keystrokes aimed at the panel, so the auto-hide can tell
+    /// "finished speaking a while ago" from "they're still reading it".
+    private func watchInteraction() {
+        interactionMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .scrollWheel, .keyDown]
+        ) { [weak self] event in
+            guard let self = self else { return event }
+            if event.window === self.panel { self.lastInteraction = Date() }
+            return event
+        }
+    }
+
+    deinit {
+        if let m = interactionMonitor { NSEvent.removeMonitor(m) }
     }
 
     private func clearHighlight() {
@@ -565,10 +758,20 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
     }
 
+    /// Hide once it's been quiet for `seconds` — counted from your last interaction, not
+    /// from when speech stopped. Scrolling, selecting, or clicking a link keeps it up;
+    /// so does leaving it paused, since pausing is how you ask for time to read.
     private func scheduleAutoClose(after seconds: TimeInterval) {
         closeTimer?.invalidate()
         closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
-            self?.onIdle()
+            guard let self = self else { return }
+            if self.synth.isPaused { self.scheduleAutoClose(after: seconds); return }
+            let quiet = Date().timeIntervalSince(self.lastInteraction)
+            guard quiet >= seconds else {
+                self.scheduleAutoClose(after: seconds - quiet)   // still being used
+                return
+            }
+            self.onIdle()
         }
     }
 
@@ -581,8 +784,8 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
 
     func buildWindowIfNeeded() {
         guard panel == nil else { return }
-        let w: CGFloat = 440, h: CGFloat = 330
-        let panel = NSPanel(
+        let w: CGFloat = 500, h: CGFloat = 330
+        let panel = HUDPanel(
             contentRect: NSRect(x: 0, y: 0, width: w, height: h),
             styleMask: [.nonactivatingPanel, .titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
@@ -593,7 +796,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.minSize = NSSize(width: 380, height: 260)
+        panel.minSize = NSSize(width: w, height: 260)   // narrower than this clips the button row
         panel.delegate = self
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
@@ -642,6 +845,12 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
         tv.textContainer?.widthTracksTextView = true
+        // Clicking a detected link hands it to NSWorkspace, i.e. your default browser.
+        tv.linkTextAttributes = [
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .cursor: NSCursor.pointingHand,
+        ]
         scroll.documentView = tv
         content.addSubview(scroll)
         textView = tv
@@ -657,7 +866,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         nextLabel = next
 
         // Hotkey hint (above buttons, pinned to bottom)
-        let hint = NSTextField(labelWithString: "Pause / Resume anywhere:  ⌃⌥P")
+        let hint = NSTextField(labelWithString: hotkeyHint)
         hint.frame = NSRect(x: 16, y: 58, width: w - 32, height: 14)
         hint.font = .systemFont(ofSize: 10)
         hint.textColor = .secondaryLabelColor
@@ -681,6 +890,10 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         skipBtn.isEnabled = false
         content.addSubview(skipBtn)
         content.addSubview(button("■ Stop", 330, 66, #selector(stopAll)))
+        // Hide, not Stop: the panel goes away, the speech keeps going, and the
+        // menu-bar item brings it back.
+        hideBtn = button("⌄ Hide", 400, 86, #selector(minimize))
+        content.addSubview(hideBtn)
 
         panel.contentView = content
 
@@ -689,6 +902,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
             panel.setFrameOrigin(NSPoint(x: vf.maxX - w - 20, y: vf.maxY - h - 20))
         }
         self.panel = panel
+        watchInteraction()
     }
 }
 
@@ -850,6 +1064,7 @@ final class Agent {
         Agent.shared = self
         hud.onIdle = { [weak self] in self?.hud.hidePanel() }
         hud.log = { [weak self] in self?.log($0) }
+        hud.hotkeyHint = "Anywhere:  ⌃⌥P pause / resume    ⌃⌥H show / hide this window"
         log("agent started (pid \(getpid()))")
         // The one thing you can't tell from outside the process: whether macOS will
         // let us see the text you've highlighted.
@@ -861,6 +1076,16 @@ final class Agent {
                                      keyCode: UInt32(kVK_ANSI_P),
                                      mods: UInt32(controlKey | optionKey)) { [weak self] in
             self?.hud.togglePause()
+        }
+        let shown = HotKeyCenter.shared.register(.toggleHUD,
+                                                 keyCode: UInt32(kVK_ANSI_H),
+                                                 mods: UInt32(controlKey | optionKey)) { [weak self] in
+            self?.hud.toggleMinimized()
+        }
+        if !shown {
+            // Without the hotkey the menu bar is the only way back; say so in the panel.
+            log("could not register ⌃⌥H — use the menu bar to show/hide the HUD")
+            hud.hotkeyHint = "Pause / Resume anywhere:  ⌃⌥P    (show / hide: menu bar)"
         }
         watchSpool()
         // SIGUSR1 also triggers a read — lets the install step self-test without keys.
@@ -956,18 +1181,27 @@ final class MenuController: NSObject, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var claudeItem: NSMenuItem!
     var axItem: NSMenuItem!
+    var hudItem: NSMenuItem!
     let hotkeyPresets = [("⌃⌥S", "ctrl+opt+s"), ("⌃⌥R", "ctrl+opt+r"),
                          ("⌃⌥Space", "ctrl+opt+space"), ("⌘⌥S", "cmd+opt+s")]
     var hotkeyItems: [NSMenuItem] = []
 
-    init(_ agent: Agent) { self.agent = agent; super.init(); build() }
+    init(_ agent: Agent) {
+        self.agent = agent
+        super.init()
+        build()
+        // Hiding via the panel's own button has to move the menu item too.
+        agent.hud.onVisibilityChange = { [weak self] in self?.refresh() }
+    }
 
     private func build() {
-        if let btn = statusItem.button {
-            btn.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "SpeakHUD")
-        }
         let menu = NSMenu()
         menu.delegate = self
+        // First item, because when the HUD is hidden this is what you came here for.
+        hudItem = item("Show HUD", #selector(toggleHUD))
+        hudItem.keyEquivalent = "h"
+        hudItem.keyEquivalentModifierMask = [.control, .option]
+        menu.addItem(hudItem)
         menu.addItem(item("Read Clipboard Aloud", #selector(readClipboard)))
         menu.addItem(.separator())
 
@@ -1005,12 +1239,21 @@ final class MenuController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) { refresh() }
 
     private func refresh() {
+        let hidden = !agent.hud.isPanelVisible
+        hudItem.title = hidden ? "Show HUD" : "Hide HUD"
+        // A hollow icon is the standing reminder that the panel is only hidden,
+        // not gone — otherwise a hidden HUD is indistinguishable from a broken one.
+        if let btn = statusItem.button {
+            btn.image = NSImage(systemSymbolName: hidden ? "speaker.wave.2" : "speaker.wave.2.fill",
+                                accessibilityDescription: hidden ? "SpeakHUD (hidden)" : "SpeakHUD")
+        }
         claudeItem.state = ClaudeHook.isInstalled() ? .on : .off
         axItem.isHidden = Selection.isTrusted
         let current = HotkeyConfig.load()
         for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
     }
 
+    @objc private func toggleHUD() { agent.hud.toggleMinimized() }
     @objc private func readClipboard() { agent.readClipboard() }
     @objc private func toggleClaude() {
         _ = ClaudeHook.isInstalled() ? ClaudeHook.remove() : ClaudeHook.install()

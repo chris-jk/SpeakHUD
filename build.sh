@@ -125,16 +125,30 @@ UID_NUM=$(id -u)
 launchctl bootout "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
 # bootout is asynchronous. Bootstrapping while the old job is still tearing down
 # fails with "Operation already in progress" and silently leaves nothing loaded.
+TORN_DOWN=""
 for _ in $(seq 25); do
-  launchctl print "gui/$UID_NUM/$AGENT_LABEL" >/dev/null 2>&1 || break
+  if ! launchctl print "gui/$UID_NUM/$AGENT_LABEL" >/dev/null 2>&1; then TORN_DOWN=1; break; fi
   sleep 0.2
 done
+# Bootstrapping a job that's still loaded fails with a generic "Operation already in
+# progress"; say plainly that teardown timed out rather than blaming the bootstrap.
+if [ -z "$TORN_DOWN" ]; then
+  echo "  ERROR: the old agent was still loaded after 5s; not bootstrapping over it." >&2
+  echo "         Try: launchctl bootout gui/$UID_NUM/$AGENT_LABEL" >&2
+  exit 1
+fi
 if ! launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
   echo "  ERROR: could not load the agent; the hotkey and speech queue won't work" >&2
   exit 1
 fi
 launchctl enable "gui/$UID_NUM/$AGENT_LABEL" 2>/dev/null || true
-launchctl kickstart "gui/$UID_NUM/$AGENT_LABEL" >/dev/null 2>&1 || true
+# RunAtLoad already started it, but kickstart is the step that proves it's runnable —
+# swallowing a failure here is how you end up with a "Done." and no agent.
+if ! launchctl kickstart "gui/$UID_NUM/$AGENT_LABEL" >/dev/null 2>&1; then
+  echo "  ERROR: the agent was loaded but would not start" >&2
+  echo "         Check: tail -n 20 $HOME/Library/Logs/speakhud-agent.log" >&2
+  exit 1
+fi
 echo "  agent loaded; global hotkey reads ~/.config/speakhud/config.json (default ctrl+opt+s)"
 echo "  change it with:  $DEST/Contents/MacOS/$EXEC --set-hotkey \"ctrl+opt+r\""
 

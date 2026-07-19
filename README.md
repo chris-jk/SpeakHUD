@@ -104,7 +104,7 @@ Manage the agent directly if needed:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.chris.speakhud.agent   # restart
-launchctl bootout   gui/$(id -u)/com.chris.speakhud.agent       # stop/disable
+launchctl bootout   gui/$(id -u)/com.chris.speakhud.agent       # stop/unload (until next login)
 tail -f ~/Library/Logs/speakhud-agent.log                       # what it's doing
 ```
 
@@ -131,9 +131,13 @@ Chrome and some terminals — a synthesized `⌘C` with your clipboard restored 
 ./build.sh
 ```
 
-Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications`) and refreshes
-`~/.claude/read-summary.py` + `~/.claude/bin/speak-hud` for the Claude Code hook.
-Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
+Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications` when it isn't
+writable) and refreshes `~/.claude/read-summary.py` + `~/.claude/bin/speak-hud` for the
+Claude Code hook. Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
+
+`build.sh` prints the path it installed to (`installed -> …`). If it fell back to
+`~/Applications`, use that prefix in the `speak-hud` commands on this page — for example
+`~/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --claude-status`.
 
 **Signing matters here.** macOS keys the Accessibility grant to the app's code signature,
 and an ad-hoc signature gets a new hash on every build — so a rebuild would silently
@@ -176,10 +180,17 @@ grabs the latest assistant response, strips code blocks/markdown, and hands it t
 agent's queue. Your other settings and hooks are preserved; removing it touches only the
 SpeakHUD entry. See `hook/` for the reference script.
 
+**If the agent isn't running** — or the spool can't be written — the hook doesn't go
+silent: it speaks the response directly, the way it did before the queue existed. It
+pipes the text to `~/.claude/bin/speak-hud` (a one-shot HUD), or falls back to the
+system `say` command if that binary is missing. You lose the queue in that mode, so
+simultaneous turns can talk over each other.
+
 ## Files
 
 - `speak-hud.swift` — the whole app: the queue-owning HUD, `--agent` (hotkey listener,
   spool watcher, menu bar), and `--set-hotkey`.
-- `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn.
+- `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn, or
+  speaks it directly when the agent isn't running.
 - `make-icon.swift` — build-time tool that renders `AppIcon.icns`; not part of the app.
 - `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.
