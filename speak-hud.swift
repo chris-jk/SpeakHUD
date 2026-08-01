@@ -780,6 +780,12 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         return false   // stopAll already hid (or terminated) us
     }
 
+    /// The title bar is transparent but still there, so the green button — or a
+    /// double-click anywhere along the top — zooms the panel to fill the screen. The
+    /// panel then keeps that frame for the life of the agent, and every later read
+    /// reopens as a full-screen HUD. Resizing by the edges is fine; zooming never is.
+    func windowShouldZoom(_ window: NSWindow, toFrame newFrame: NSRect) -> Bool { false }
+
     // -- window ------------------------------------------------------------
 
     func buildWindowIfNeeded() {
@@ -797,6 +803,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.minSize = NSSize(width: w, height: 260)   // narrower than this clips the button row
+        panel.standardWindowButton(.zoomButton)?.isHidden = true   // zoom is refused; don't advertise it
         panel.delegate = self
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
