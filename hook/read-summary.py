@@ -15,7 +15,11 @@ import sys, json, os, re, glob, time, subprocess
 
 WAIT_SECONDS = 3.0      # max time to wait for the final message to be flushed
 POLL_SECONDS = 0.1
-QUEUE_DIR = os.path.expanduser("~/.local/state/speakhud/queue")
+# Must match Spool.dir in speak-hud.swift, override included (tests/SpoolTests.swift
+# pins both). The variable is for tests: set it on one side only and turns go unheard.
+QUEUE_DIR = os.path.expanduser(
+    os.environ.get("SPEAKHUD_QUEUE_DIR") or "~/.local/state/speakhud/queue"
+)
 
 
 def find_transcript(data):
@@ -115,7 +119,11 @@ def agent_running():
 
 
 def enqueue(text, source, key):
-    """Hand the turn to the agent. Write-then-rename so it never reads a partial file."""
+    """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
+
+    The four fields are the contract with Spool.drain in speak-hud.swift, pinned by
+    tests/SpoolTests.swift: rename one here and that test fails.
+    """
     os.makedirs(QUEUE_DIR, exist_ok=True)
     # Zero-padded nanosecond prefix so a plain filename sort is arrival order; the
     # random tail keeps a same-instant tie between two terminals from clobbering.

@@ -41,7 +41,20 @@ Instead the hook writes one JSON file per finished turn into
   each other.
 - `key` is the **session id**, not the project path: the agent keeps only the newest
   pending item per key, and two terminals in the same repo are two conversations that
-  both deserve to be heard.
+  both deserve to be heard. A file with no `key` gets its own filename as the key, so it
+  is never merged with anything.
+- `created` is epoch seconds. If it's missing the agent uses the file's modification
+  time instead; if it's there but not a number, the item is dropped. Blank `text` is
+  dropped too, and so is anything older than 10 minutes. A missing `source` shows as
+  "Claude Code".
+- Nothing is dropped silently: each dropped item gets a `spool: dropped <file> — <reason>`
+  line in `~/Library/Logs/speakhud-agent.log`. The agent also deletes any `.tmp` older
+  than 10 minutes, which is what a hook killed mid-write leaves behind.
+- `SPEAKHUD_QUEUE_DIR` moves the queue for both the hook and the agent. It exists for
+  tests. Set it for only one side and the hook writes somewhere the agent never reads,
+  so the agent logs `spool: watching <dir>` at startup to show which one it chose.
+- `tests/SpoolTests.swift` pins this format. It runs the real `enqueue()` from this
+  hook and the real Swift drain on the same temp directory.
 
 The `--agent` process (installed by `build.sh` as a LaunchAgent) watches that directory
 and drains it one item at a time into the single HUD.

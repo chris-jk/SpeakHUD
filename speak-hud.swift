@@ -51,17 +51,53 @@ struct SpeechItem {
 // turn can never interrupt one that's already speaking. The hook writes `<name>.tmp`
 // and renames it to `<name>.json`, which is atomic within a filesystem — the agent
 // therefore never observes a half-written item.
+//
+// The contract with hook/read-summary.py (pinned by tests/SpoolTests.swift, which runs
+// the real Python `enqueue()` against the real `drain`):
+//   text     string, required; blank after trimming → dropped
+//   source   string, optional → "Claude Code"
+//   key      string, optional → the file stem (unique, so that item never coalesces)
+//   created  epoch seconds, optional → the file's mtime (when the hook wrote it);
+//            present but not a number → dropped. Either way older than maxAge → dropped.
+// Every dropped item comes back as a `Drop` with its reason, for the agent to log.
 enum Spool {
     static let maxAge: TimeInterval = 600   // a stopped agent shouldn't wake up and read you the backlog
-    static var dir: String { NSString(string: "~/.local/state/speakhud/queue").expandingTildeInPath }
+    /// Points both sides at another queue — the hook reads the same variable. For tests;
+    /// set it for one side only and the hook writes where nobody reads.
+    static let dirEnv = "SPEAKHUD_QUEUE_DIR"
+    static var dir: String {
+        let override = ProcessInfo.processInfo.environment[dirEnv] ?? ""
+        return NSString(string: override.isEmpty ? "~/.local/state/speakhud/queue" : override)
+            .expandingTildeInPath
+    }
 
-    static func ensure() {
+    enum DropReason: Equatable, CustomStringConvertible {
+        case malformed        // unreadable, or not a JSON object
+        case emptyText        // text missing, not a string, or only whitespace
+        case invalidCreated   // created present but not a number
+        case tooOld           // waited longer than maxAge
+        case staleTmp         // a hook died between writing and renaming
+
+        var description: String {
+            switch self {
+            case .malformed: return "malformed JSON"
+            case .emptyText: return "no text"
+            case .invalidCreated: return "created is not a number"
+            case .tooOld: return "older than \(Int(Spool.maxAge))s"
+            case .staleTmp: return "abandoned .tmp"
+            }
+        }
+    }
+    struct Drop: Equatable { let name: String; let reason: DropReason }
+    struct Batch { var items: [SpeechItem] = []; var dropped: [Drop] = [] }
+
+    static func ensure(_ dir: String = Spool.dir) {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     }
 
     /// Items a previous agent had picked up but never finished speaking — it was
     /// restarted or crashed mid-queue. Hand them back so they get another turn.
-    static func recover() {
+    static func recover(in dir: String = Spool.dir) {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
         for name in names where name.hasSuffix(".taken") {
@@ -72,29 +108,58 @@ enum Spool {
 
     /// Take every queued item, in arrival order. A taken item is renamed rather than
     /// deleted, so it still exists on disk until it has actually been spoken; `done()`
-    /// is what finally removes it.
-    static func drain() -> [SpeechItem] {
+    /// is what finally removes it. Also sweeps `.tmp` files older than maxAge: a hook
+    /// killed between open and rename leaves one, and nothing else ever would.
+    static func drain(in dir: String = Spool.dir, now: Date = Date()) -> Batch {
         let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
-        var out: [SpeechItem] = []
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return Batch() }
+        var batch = Batch()
+        func mtime(_ path: String) -> Date? {
+            (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        }
+        for name in names where name.hasSuffix(".tmp") {
+            let path = dir + "/" + name
+            // Young ones are a hook mid-write; leave those alone.
+            guard let m = mtime(path), now.timeIntervalSince(m) >= maxAge,
+                  (try? fm.removeItem(atPath: path)) != nil else { continue }
+            batch.dropped.append(Drop(name: name, reason: .staleTmp))
+        }
         for name in names.filter({ $0.hasSuffix(".json") }).sorted() {
             let stem = String(name.dropLast(5))
             let taken = dir + "/" + stem + ".taken"
             // Claim it atomically; if the rename loses, someone else has it.
             guard (try? fm.moveItem(atPath: dir + "/" + name, toPath: taken)) != nil else { continue }
+            func drop(_ reason: DropReason) {   // don't wedge the queue on a bad item
+                done(taken)
+                batch.dropped.append(Drop(name: name, reason: reason))
+            }
             guard let data = fm.contents(atPath: taken),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let text = obj["text"] as? String, !text.isEmpty
-            else { done(taken); continue }   // malformed: drop it, don't wedge the queue
-            let created = Date(timeIntervalSince1970: obj["created"] as? Double ?? 0)
-            guard Date().timeIntervalSince(created) < maxAge else { done(taken); continue }
-            out.append(SpeechItem(text: text,
-                                  source: obj["source"] as? String ?? "Claude Code",
-                                  key: obj["key"] as? String ?? stem,
-                                  created: created,
-                                  file: taken))
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { drop(.malformed); continue }
+            guard let text = obj["text"] as? String,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { drop(.emptyText); continue }
+            let created: Date
+            if let raw = obj["created"] {
+                // JSON booleans also bridge to NSNumber; they aren't timestamps.
+                guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                      n.doubleValue.isFinite
+                else { drop(.invalidCreated); continue }
+                created = Date(timeIntervalSince1970: n.doubleValue)
+            } else {
+                // Rename keeps mtime, so this is when the producer wrote the file.
+                created = mtime(taken) ?? now
+            }
+            guard now.timeIntervalSince(created) < maxAge else { drop(.tooOld); continue }
+            let source = obj["source"] as? String ?? ""
+            let key = obj["key"] as? String ?? ""
+            batch.items.append(SpeechItem(text: text,
+                                          source: source.isEmpty ? "Claude Code" : source,
+                                          key: key.isEmpty ? stem : key,
+                                          created: created,
+                                          file: taken))
         }
-        return out
+        return batch
     }
 
     /// This item will never be spoken again — finished, skipped, stopped, or superseded.
@@ -1277,6 +1342,7 @@ final class Agent {
     private func watchSpool() {
         Spool.ensure()
         Spool.recover()   // whatever the last agent died holding gets another turn
+        log("spool: watching \(Spool.dir)")   // if the hook writes elsewhere, this is where you'd see it
         let fd = open(Spool.dir, O_EVTONLY)
         if fd >= 0 {
             let src = DispatchSource.makeFileSystemObjectSource(
@@ -1294,7 +1360,9 @@ final class Agent {
     }
 
     private func drainSpool() {
-        for item in Spool.drain() {
+        let batch = Spool.drain()
+        for drop in batch.dropped { log("spool: dropped \(drop.name) — \(drop.reason)") }
+        for item in batch.items {
             if hud.enqueue(item) {
                 log("speaking \(item.source)")
             } else {

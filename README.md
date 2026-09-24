@@ -65,7 +65,9 @@ its turn, and the HUD shows what's behind it:
   it has actually been spoken, so killing or rebuilding the agent mid-queue replays what
   was pending instead of swallowing it.
 - Items that have waited more than 10 minutes are dropped unspoken, so an agent that
-  was stopped for a while doesn't come back and read you the whole morning.
+  was stopped for a while doesn't come back and read you the whole morning. Every
+  dropped item (too old, blank, or malformed) is logged with its reason. The file
+  format is described in [hook/README.md](hook/README.md).
 
 ## How it picks what to read
 
