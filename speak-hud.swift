@@ -567,10 +567,13 @@ final class Playback {
     private var startedAt = Date()
 
     /// `retire` releases an item that will never be spoken again (its spool file).
+    /// `later` runs work after the current event is done; tests run it inline.
     init(voice: Voice, rateIndex: Int = 1,
          retire: @escaping (SpeechItem) -> Void = { Spool.done($0.file) },
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         later: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }) {
         self.voice = voice
+        self.later = later
         self.rateIndex = Self.rateSteps.indices.contains(rateIndex) ? rateIndex : 1
         self.retire = retire
         self.now = now
@@ -590,8 +593,8 @@ final class Playback {
         } else {
             queue.append(item)
         }
-        // With nothing current, anything already in line is being held (mic or your
-        // pause), so advance() either starts this item or holds it too.
+        // Nothing current means the queue was empty: this item becomes current, and
+        // sounds unless the mic or your pause is holding us.
         let wasIdle = current == nil
         if wasIdle { advance() }
         publish()
@@ -706,7 +709,11 @@ final class Playback {
     }
 
     /// A stale finish (a dropped utterance) is ignored, so a stop can never advance
-    /// the queue a second time.
+    /// the queue a second time. Called from inside the synth's delegate callback: the
+    /// finish is recorded now, so a command arriving before the hop sees the item as
+    /// done (a hotkey read won't requeue it, Speed won't repeat its last word), but
+    /// starting the next item — which hands the voice a new utterance — waits for
+    /// `later`, because re-entering the synth from its own callback can drop audio.
     func voiceFinished(utterance id: Int) {
         guard id == utterance, sound != .silent, let c = current else { return }
         sound = .silent
@@ -714,12 +721,17 @@ final class Playback {
         retire(c)
         lastItem = c
         current = nil
-        advance()
         publish()
+        later { [weak self] in
+            guard let self = self, self.current == nil else { return }  // something started meanwhile
+            self.advance()
+            self.publish()
+        }
     }
 
     // -- policy ------------------------------------------------------------
 
+    private let later: (@escaping () -> Void) -> Void
     private var canSound: Bool { !userPaused && !micBusy }
 
     /// Something that was holding us let go (or took hold): act on it.
@@ -727,13 +739,14 @@ final class Playback {
         if current != nil { drive() } else if !queue.isEmpty { advance() }
     }
 
-    /// Nothing is current. Start the next item unless something is holding us.
+    /// Nothing is current. Make the next item current even if something is holding
+    /// us: the HUD shows what's up next, and drive() keeps it silent until we can sound.
     private func advance() {
         if queue.isEmpty {
             userPaused = false
             stopped = false
             onRanDry()
-        } else if canSound {
+        } else {
             start(queue.removeFirst())
         }
     }
@@ -813,6 +826,7 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
 
     func speak(_ text: String, from offset: Int, rate: Float, utterance id: Int) {
         stop()
+        request = (text, offset, rate, id)
         let ns = text as NSString
         sliceStart = min(max(offset, 0), ns.length)
         utterance = id
@@ -829,17 +843,44 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
         let s = AVSpeechSynthesizer()
         s.delegate = self
         synth = s
+        spoke = false
         s.speak(u)
     }
 
-    func pause(immediately: Bool) { synth?.pauseSpeaking(at: immediately ? .immediate : .word) }
-    func resume() { synth?.continueSpeaking() }
+    /// A fresh synth ignores a pause that arrives before its first word — it reports
+    /// isPaused and talks anyway, even if the pause is sent from didStart or a hop after
+    /// it (all verified on this machine) — and every utterance is a fresh synth. Nothing
+    /// has been heard yet in that window, so drop the synth and speak the same request
+    /// again on resume.
+    private var spoke = false
+    private var request: (text: String, offset: Int, rate: Float, id: Int)?
+    private var parked = false
+
+    func pause(immediately: Bool) {
+        if spoke {
+            synth?.pauseSpeaking(at: immediately ? .immediate : .word)
+        } else if synth != nil {
+            let r = request
+            stop()
+            request = r
+            parked = true
+        }
+    }
+    func resume() {
+        if parked, let r = request {
+            speak(r.text, from: r.offset, rate: r.rate, utterance: r.id)
+        } else {
+            synth?.continueSpeaking()
+        }
+    }
 
     /// stopSpeaking(.immediate) delivers didFinish — not didCancel — on both a speaking
     /// and a paused synth (verified on this machine). Letting go of the instance first
     /// makes that late finish come from a synth that isn't live, which is ignored; a
     /// stop must never reach Playback as "finished".
     func stop() {
+        parked = false
+        request = nil
         guard let s = synth else { return }
         synth = nil
         s.stopSpeaking(at: .immediate)
@@ -847,12 +888,10 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
         guard s === synth else { return }   // replaced or stopped: not ours to report
-        let id = utterance
-        // Never re-enter AVSpeechSynthesizer from inside its own delegate callback:
-        // finishing advances the queue, which replaces `synth`, deallocating the very
-        // instance calling us, and the next utterance can be dropped without a sound.
-        // Hop out of the callback. Playback drops the finish if it was superseded meanwhile.
-        DispatchQueue.main.async { [weak self] in self?.listener?.voiceFinished(utterance: id) }
+        // Playback records the finish now and hops out of this callback before starting
+        // the next item: that replaces `synth`, deallocating the very instance calling
+        // us, and the next utterance can be dropped without a sound.
+        listener?.voiceFinished(utterance: utterance)
     }
 
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {}
@@ -860,6 +899,7 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ s: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange,
                            utterance u: AVSpeechUtterance) {
         guard s === synth else { return }
+        spoke = true
         // Ranges are relative to the (possibly sliced) utterance; shift to full-text coords.
         listener?.voiceSpoke(NSRange(location: sliceStart + characterRange.location,
                                      length: characterRange.length), utterance: utterance)
@@ -1445,9 +1485,11 @@ enum ClaudeHook {
 
     /// Copy `src` over `dst` without ever leaving `dst` missing: copy to a temp name in the
     /// same dir, then rename(2) it into place. A no-op when they're already the same file
-    /// (`~/.claude/bin/speak-hud --setup-claude`). Returns nil on success, else why not.
-    private static func placeFile(from src: String, to dst: String, mode: Int) -> String? {
+    /// (`~/.claude/bin/speak-hud --setup-claude`). A symlinked `dst` (say, into a checkout)
+    /// is written through, not replaced by a plain file. Returns nil on success, else why not.
+    private static func placeFile(from src: String, to link: String, mode: Int) -> String? {
         let fm = FileManager.default
+        let dst = (link as NSString).resolvingSymlinksInPath
         if sameFile(src, dst) { return nil }
         guard fm.isReadableFile(atPath: src) else { return "can't read \(src)" }
         let tmp = (dst as NSString).deletingLastPathComponent
@@ -1474,8 +1516,13 @@ enum ClaudeHook {
     /// install would copy from; a nil source can't be compared, so only presence counts.
     static func check(script: URL? = bundledScript,
                       binary: URL? = runningExecutable) -> (status: Status, problems: [String]) {
-        guard case .ok(let root) = readSettings(), stopGroups(root).contains(where: groupHasOurs)
-        else { return (.notInstalled, []) }
+        let root: [String: Any]
+        switch readSettings() {
+        case .missing: return (.notInstalled, [])
+        case .invalid: return (.notInstalled, ["\(settingsPath) is not valid JSON"])
+        case .ok(let r): root = r
+        }
+        guard stopGroups(root).contains(where: groupHasOurs) else { return (.notInstalled, []) }
         let fm = FileManager.default
         var problems: [String] = []
         if !fm.fileExists(atPath: scriptPath) {
@@ -1493,6 +1540,25 @@ enum ClaudeHook {
 
     static func status(script: URL? = bundledScript, binary: URL? = runningExecutable) -> Status {
         check(script: script, binary: binary).status
+    }
+
+    /// Refresh the script and binary where copies already exist, without touching
+    /// settings.json. For a hook registered somewhere we don't read (settings.local.json,
+    /// a project's settings) or a settings.json we can't parse: a rebuild still shouldn't
+    /// leave those copies running old code. Returns what it did, or "error: …".
+    static func refreshFiles(script: URL? = bundledScript, binary: URL? = runningExecutable) -> String {
+        let fm = FileManager.default
+        var done: [String] = [], problems: [String] = []
+        if let s = script, fm.fileExists(atPath: scriptPath) {
+            if let e = placeFile(from: s.path, to: scriptPath, mode: 0o644) { problems.append("script: \(e)") }
+            else { done.append("script") }
+        }
+        if let b = binary, fm.fileExists(atPath: binPath) {
+            if let e = placeFile(from: b.path, to: binPath, mode: 0o755) { problems.append("binary: \(e)") }
+            else { done.append("binary") }
+        }
+        if !problems.isEmpty { return "error: " + problems.joined(separator: "; ") }
+        return done.isEmpty ? "nothing to refresh" : "refreshed " + done.joined(separator: ", ")
     }
 
     /// Install or repair all three pieces. Returns "installed", or "error: …" naming every
@@ -1696,6 +1762,8 @@ final class Agent {
         for item in batch.items {
             if hud.enqueue(item) {
                 log("speaking \(item.source)")
+            } else if hud.playback.current?.file == item.file {
+                log("holding \(item.source) — mic in use or paused")
             } else {
                 log("queued \(item.source) — \(hud.queue.count) waiting")
             }
@@ -1753,8 +1821,9 @@ final class MenuController: NSObject, NSMenuDelegate {
         self.agent = agent
         super.init()
         build()
-        // Hiding via the panel's own button has to move the menu item too.
-        agent.hud.onVisibilityChange = { [weak self] in self?.refresh() }
+        // Hiding via the panel's own button has to move the menu item too. Only the
+        // visibility bits: the hook check compares whole files, so it waits for the menu.
+        agent.hud.onVisibilityChange = { [weak self] in self?.refreshVisibility() }
     }
 
     private func build() {
@@ -1802,6 +1871,14 @@ final class MenuController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) { refresh() }
 
     private func refresh() {
+        refreshVisibility()
+        refreshHook()
+        axItem.isHidden = Selection.isTrusted
+        let current = HotkeyConfig.load()
+        for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
+    }
+
+    private func refreshVisibility() {
         let hidden = !agent.hud.isPanelVisible
         hudItem.title = hidden ? "Show HUD" : "Hide HUD"
         // A hollow icon is the standing reminder that the panel is only hidden,
@@ -1810,6 +1887,9 @@ final class MenuController: NSObject, NSMenuDelegate {
             btn.image = NSImage(systemSymbolName: hidden ? "speaker.wave.2" : "speaker.wave.2.fill",
                                 accessibilityDescription: hidden ? "SpeakHUD (hidden)" : "SpeakHUD")
         }
+    }
+
+    private func refreshHook() {
         let hook = ClaudeHook.check()
         claudeItem.title = hook.status == .stale ? "Read Claude Code Responses Aloud — Repair"
                                                  : "Read Claude Code Responses Aloud"
@@ -1819,10 +1899,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         case .notInstalled: claudeItem.state = .off
         }
         claudeItem.toolTip = hook.problems.isEmpty ? nil
-            : "Needs repair: " + hook.problems.joined(separator: "; ") + ". Click to reinstall."
-        axItem.isHidden = Selection.isTrusted
-        let current = HotkeyConfig.load()
-        for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
+            : hook.status == .stale ? "Needs repair: " + hook.problems.joined(separator: "; ") + ". Click to reinstall."
+            : hook.problems.joined(separator: "; ")
     }
 
     @objc private func toggleHUD() { agent.hud.toggleMinimized() }
@@ -1893,6 +1971,10 @@ enum Main {
 
         if argv.contains("--setup-claude") || argv.contains("--remove-claude") {
             let r = argv.contains("--setup-claude") ? ClaudeHook.install() : ClaudeHook.remove()
+            print(r); exit(r.hasPrefix("error") ? 1 : 0)
+        }
+        if argv.contains("--refresh-claude-files") {
+            let r = ClaudeHook.refreshFiles()
             print(r); exit(r.hasPrefix("error") ? 1 : 0)
         }
         if argv.contains("--claude-status") {

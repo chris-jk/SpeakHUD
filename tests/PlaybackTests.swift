@@ -37,11 +37,17 @@ final class Rig {
     private(set) var playback: Playback!
     var retired: [String] = []   // texts, in retirement order
     var ranDry = 0
+    var shown: [String] = []     // texts handed to the HUD via onStart
+    var deferred: [() -> Void] = []   // `later` work, when a test wants to hold it
+    var holdLater = false
     var stopped = 0
     var logs: [String] = []
 
     init() {
-        let p = Playback(voice: voice, rateIndex: 1, retire: { [unowned self] in self.retired.append($0.text) })
+        let p = Playback(voice: voice, rateIndex: 1, retire: { [unowned self] in self.retired.append($0.text) },
+                         later: { [unowned self] work in
+                             if self.holdLater { self.deferred.append(work) } else { work() } })
+        p.onStart = { [unowned self] in self.shown.append($0.text) }
         p.onRanDry = { [unowned self] in self.ranDry += 1 }
         p.onStopped = { [unowned self] in self.stopped += 1 }
         p.log = { [unowned self] in self.logs.append($0) }
@@ -283,9 +289,38 @@ let playbackSuite = Suite("Playback") { t in
         let r = Rig(), p = r.playback!
         p.micChanged(busy: true)
         t.expect(!p.enqueue(turn("a", key: "A")), "not reported as started while the mic holds it")
-        t.expectEqual(p.queue.count, 1, "it's waiting in the queue")
+        t.expectEqual(p.current?.text, "a", "it's current, so the HUD can show it")
+        t.expectEqual(r.shown, ["a"], "the HUD was told to show it")
         t.expectEqual(p.state.status, "🎙 Mic in use — waiting", "status says waiting")
         t.expectEqual(r.voice.take(), [], "nothing spoken")
+        p.micChanged(busy: false)
+        t.expectEqual(r.voice.take(), [.speak("a", from: 0, rate: r1)], "spoken once the mic lets go")
+    }
+
+    do {  // skipping under a mic hold shows the next item instead of leaving the skipped one up
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("a", key: "A")); p.enqueue(turn("b", key: "B"))
+        p.micChanged(busy: true)
+        _ = r.voice.take()
+        p.skip()
+        t.expectEqual(p.current?.text, "b", "next item is current (shown) while held")
+        t.expectEqual(r.shown, ["a", "b"], "the HUD was told to show it")
+        t.expectEqual(r.voice.take(), [.stop], "and nothing new is spoken")
+    }
+
+    // -- the hop between a finish and starting the next item ----------------
+
+    do {  // a hotkey read landing in the hop must not requeue the turn that just finished
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("a", key: "A"))
+        r.holdLater = true
+        r.voice.finish()
+        t.expect(p.current == nil, "the finish is recorded straight away")
+        t.expectEqual(r.retired, ["a"], "and its file released")
+        p.playNow(read("sel"))
+        t.expect(!p.queue.contains { $0.text == "a" }, "finished turn not requeued")
+        r.deferred.forEach { $0() }
+        t.expectEqual(p.current?.text, "sel", "the deferred advance doesn't clobber the read")
     }
 
     // -- defect 4: pause while an item waits on the mic ---------------------

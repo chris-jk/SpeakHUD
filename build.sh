@@ -99,8 +99,15 @@ case "$HOOK_STATUS" in
     else
       echo "  WARNING: Claude Code hook refresh failed: $HOOK_OUT" >&2
     fi ;;
-  "not installed")
-    echo "  not installed; enable it from the menu bar or with --setup-claude" ;;
+  "not installed"*)
+    # Not registered in ~/.claude/settings.json (or it won't parse), but copies may
+    # still be in use from elsewhere: refresh those, never register anything.
+    [ "$HOOK_STATUS" != "not installed" ] && echo "  WARNING: $HOOK_STATUS" >&2
+    if HOOK_OUT="$("$APPBIN" --refresh-claude-files 2>&1)"; then
+      echo "  not registered ($HOOK_OUT); enable it from the menu bar or with --setup-claude"
+    else
+      echo "  WARNING: couldn't refresh the hook's files: $HOOK_OUT" >&2
+    fi ;;
   *)
     echo "  WARNING: couldn't read the hook status ($HOOK_STATUS); left it alone" >&2 ;;
 esac

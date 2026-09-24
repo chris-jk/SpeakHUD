@@ -194,8 +194,14 @@ the output, and `--setup-claude` exits non-zero.
 
 `--claude-status` prints one of `installed`, `stale: <what's wrong>` (the hook is
 registered but the script or binary is missing or differs from this build — run
-`--setup-claude` to repair), or `not installed`. Run it from the app bundle: that's where
-the reference copy of `read-summary.py` lives. See `hook/` for the reference script.
+`--setup-claude` to repair), or `not installed` (with the reason if `settings.json` won't
+parse). Run it from the app bundle: that's where the reference copy of `read-summary.py`
+lives. See `hook/` for the reference script.
+
+`build.sh` refreshes the hook through the app: `--setup-claude` when it's registered, and
+otherwise `--refresh-claude-files`, which updates any existing script or binary copy in
+`~/.claude` (say, for a hook registered in `settings.local.json`) without registering
+anything. A symlinked copy is written through, not replaced.
 
 **If the agent isn't running** — or the spool can't be written — the hook doesn't go
 silent: it speaks the response directly, the way it did before the queue existed. It

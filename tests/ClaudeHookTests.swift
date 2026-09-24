@@ -132,6 +132,34 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
         t.expectEqual(try? String(contentsOfFile: ClaudeHook.settingsPath, encoding: .utf8), bad, "still untouched")
     }
 
+    // Not registered here, but copies exist: refresh them without registering.
+    sandbox { _, script, binary in
+        t.expectEqual(ClaudeHook.refreshFiles(script: script, binary: binary), "nothing to refresh", "no copies")
+        try? fm.createDirectory(atPath: ClaudeHook.binDir, withIntermediateDirectories: true)
+        try? "print('old')\n".write(toFile: ClaudeHook.scriptPath, atomically: true, encoding: .utf8)
+        t.expectEqual(ClaudeHook.refreshFiles(script: script, binary: binary), "refreshed script", "only what exists")
+        t.expect(fm.contentsEqual(atPath: ClaudeHook.scriptPath, andPath: script.path), "script refreshed")
+        t.expect(!fm.fileExists(atPath: ClaudeHook.binPath), "binary not created")
+        t.expect(!fm.fileExists(atPath: ClaudeHook.settingsPath), "nothing registered")
+        try? "{ not json".write(toFile: ClaudeHook.settingsPath, atomically: true, encoding: .utf8)
+        let c = ClaudeHook.check(script: script, binary: binary)
+        t.expectEqual(c.status, .notInstalled, "unparseable settings")
+        t.expect(c.problems.first?.contains("not valid JSON") == true, "and says why")
+    }
+
+    // A symlinked install target is written through, not replaced by a plain file.
+    sandbox { dir, script, binary in
+        _ = ClaudeHook.install(script: script, binary: binary)
+        let real = dir + "/checkout-read-summary.py"
+        try? "print('old')\n".write(toFile: real, atomically: true, encoding: .utf8)
+        try? fm.removeItem(atPath: ClaudeHook.scriptPath)
+        try? fm.createSymbolicLink(atPath: ClaudeHook.scriptPath, withDestinationPath: real)
+        t.expectEqual(ClaudeHook.install(script: script, binary: binary), "installed", "install through link")
+        let isLink = (try? fm.destinationOfSymbolicLink(atPath: ClaudeHook.scriptPath)) != nil
+        t.expect(isLink, "still a symlink")
+        t.expect(fm.contentsEqual(atPath: real, andPath: script.path), "its target was updated")
+    }
+
     // Outside a test dir the command keeps its portable ~ form.
     unsetenv("SPEAKHUD_CLAUDE_DIR")
     t.expectEqual(ClaudeHook.hookCommand, "python3 ~/.claude/read-summary.py", "default command")
