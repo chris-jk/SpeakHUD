@@ -435,22 +435,384 @@ final class HUDPanel: NSPanel {
 }
 
 // ---------------------------------------------------------------------------
-// The HUD. Owns the queue: exactly one item speaks at a time, and a finished
-// Claude Code turn waits its turn instead of killing the one you're listening to.
+// Playback: every decision about what speaks, when, and from where. The queue,
+// whose pause it is (yours or the mic's), the resume point, the speed. No AppKit
+// and no AVFoundation — it drives a `Voice` and publishes one `State` for the HUD
+// to render, so the rules run in tests against a fake voice.
 // ---------------------------------------------------------------------------
 
-final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate {
-    // Replaced on every (re)start: stopSpeaking(.immediate) poisons an instance so
-    // the next utterance silently finishes with no audio. A fresh synth avoids that.
-    var synth = AVSpeechSynthesizer()
+/// What Playback needs from a speech engine. Offsets are UTF-16 positions in the
+/// full item text. Progress and finishes come back tagged with the `utterance` they
+/// belong to, so anything from an utterance Playback has since dropped is stale.
+protocol Voice: AnyObject {
+    /// Say `text` from `offset` at `rate`, replacing whatever was going.
+    func speak(_ text: String, from offset: Int, rate: Float, utterance: Int)
+    /// Hold mid-utterance: `immediately` cuts off mid-word (the mic is opening);
+    /// otherwise at the next word boundary.
+    func pause(immediately: Bool)
+    func resume()
+    /// Silence and forget the current utterance. Never reported back as finished.
+    func stop()
+}
+
+final class Playback {
+    /// Everything the HUD shows about playback, derived in one place so no label can
+    /// drift from another.
+    struct State: Equatable {
+        var status = ""
+        var pauseTitle = "❚❚ Pause"
+        var speedTitle = ""
+        var queued: [String] = []   // sources waiting behind the current item, in order
+        var isActive = false        // something is current or waiting: don't auto-hide
+        var canSkip = false
+    }
+
+    // macOS default rate (0.5) == 1×; the steps scale around it.
+    static let rateSteps: [Float] = [0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+    static let rateLabels = ["0.75×", "1×", "1.25×", "1.5×", "1.75×", "2×"]
 
     private(set) var current: SpeechItem?
     private(set) var queue: [SpeechItem] = []
+    private(set) var rateIndex: Int
+    private(set) var state = State()
+
+    var onChange: (State) -> Void = { _ in }
+    /// A new item became current: show its text.
+    var onStart: (SpeechItem) -> Void = { _ in }
+    /// The word being spoken, in full-text coordinates.
+    var onWord: (NSRange) -> Void = { _ in }
+    var onRanDry: () -> Void = {}
+    var onStopped: () -> Void = {}
+    var log: (String) -> Void = { _ in }
+
+    private let voice: Voice
+    private let retire: (SpeechItem) -> Void
+    private let now: () -> Date
+
+    private enum Sound { case silent, speaking, paused }
+    /// What the voice is doing. Only Playback's own calls change it — never read back
+    /// from the engine, whose idea of "speaking" lags and lies around stops.
+    private var sound = Sound.silent
+    private var utterance = 0      // id of the last utterance handed to the voice
+    private var resumeAt = 0       // start of the word being spoken: where a restart picks up
+    private var userPaused = false // yours; the mic never clears it
+    private var micBusy = false
+    private var lastItem: SpeechItem?   // what Replay replays once the queue has run dry
+    private var stopped = false    // the HUD was emptied by Stop, not by running dry
+    private var startedAt = Date()
+
+    /// `retire` releases an item that will never be spoken again (its spool file).
+    init(voice: Voice, rateIndex: Int = 1,
+         retire: @escaping (SpeechItem) -> Void = { Spool.done($0.file) },
+         now: @escaping () -> Date = Date.init) {
+        self.voice = voice
+        self.rateIndex = Self.rateSteps.indices.contains(rateIndex) ? rateIndex : 1
+        self.retire = retire
+        self.now = now
+        state = makeState()
+    }
+
+    // -- commands ----------------------------------------------------------
+
+    /// Wait your turn. A second turn from the same session replaces the first one
+    /// still waiting in line — you want the latest answer, not a stale one.
+    /// Returns true only if this item is now actually being spoken.
+    @discardableResult
+    func enqueue(_ item: SpeechItem) -> Bool {
+        if let i = queue.firstIndex(where: { $0.key == item.key }) {
+            retire(queue[i])  // the stale turn is never spoken; let go of its file
+            queue[i] = item   // keep its place in line; a chatty session shouldn't jump the queue
+        } else {
+            queue.append(item)
+        }
+        // With nothing current, anything already in line is being held (mic or your
+        // pause), so advance() either starts this item or holds it too.
+        let wasIdle = current == nil
+        if wasIdle { advance() }
+        publish()
+        return wasIdle && sound == .speaking
+    }
+
+    /// Jump the queue: you highlighted that text and asked for it now. It becomes
+    /// current even while the mic is busy (so you can see it), but waits to be heard.
+    func playNow(_ item: SpeechItem) {
+        if let c = current {
+            silence()
+            // A spool-backed turn was interrupted, not finished — put it back at the head
+            // of the queue and keep its file, or a hotkey read silently destroys a Claude
+            // response mid-sentence. Two exceptions retire it instead: an ad-hoc read
+            // (no spool file) is superseded by the one you just asked for, and a session
+            // with a newer turn already waiting follows "newest per session wins".
+            if c.file != nil, !queue.contains(where: { $0.key == c.key }) {
+                log("preempted \(c.source) — requeued")
+                queue.insert(c, at: 0)
+            } else {
+                log("preempted \(c.source)")
+                retire(c)
+            }
+            current = nil
+        }
+        userPaused = false   // asking for something now is not asking for silence
+        start(item)
+        publish()
+    }
+
+    /// Drop the current item and move on. Clears your pause: skipping is asking for
+    /// the next one. The mic still holds it.
+    func skip() {
+        guard let c = current else { return }
+        log("skipped \(c.source)")
+        retire(c)
+        silence()
+        lastItem = c
+        current = nil
+        userPaused = false
+        advance()
+        publish()
+    }
+
+    /// Stop everything and throw the queue away. "Skip" is the one that moves on.
+    func stop() {
+        silence()
+        log("stop: discarded \(queue.count) queued item(s)")
+        if let c = current { retire(c); lastItem = c }
+        queue.forEach(retire)
+        queue.removeAll()
+        current = nil
+        userPaused = false
+        stopped = true
+        publish()
+        onStopped()
+    }
+
+    /// Pause or resume. Also works while an item is waiting on the mic: a pause made
+    /// then is kept when the mic frees up. Resuming while the mic is busy hands the
+    /// hold back to the mic, which resumes on release.
+    func togglePause() {
+        guard current != nil || !queue.isEmpty else { return }
+        userPaused.toggle()
+        proceed()
+        publish()
+    }
+
+    /// Cycle the speed. AVSpeech can't change rate mid-utterance, so a live utterance
+    /// is dropped and restarted from the current word — immediately if we're sounding,
+    /// otherwise on the next resume. Never un-pauses.
+    func cycleSpeed() {
+        rateIndex = (rateIndex + 1) % Self.rateSteps.count
+        silence()
+        drive()
+        publish()
+    }
+
+    /// From the top. Like Speed, it doesn't un-pause. Once the queue has run dry it
+    /// brings the last item back as current (without its spool file, which is gone),
+    /// so a turn arriving meanwhile queues behind it instead of cutting it off.
+    func replay() {
+        if current == nil {
+            guard var last = lastItem else { return }
+            last.file = nil
+            start(last)
+        } else {
+            silence()
+            resumeAt = 0
+            drive()
+        }
+        publish()
+    }
+
+    /// Something else is (or stopped) recording. Mid-speech this pauses on the spot
+    /// and resumes on release; nothing new starts while it's busy. Debouncing the
+    /// release is the caller's job.
+    func micChanged(busy: Bool) {
+        guard busy != micBusy else { return }
+        micBusy = busy
+        log(busy ? "mic in use — holding speech" : "mic released")
+        proceed()
+        publish()
+    }
+
+    // -- from the voice ----------------------------------------------------
+
+    func voiceSpoke(_ range: NSRange, utterance id: Int) {
+        guard id == utterance, sound != .silent else { return }
+        resumeAt = range.location
+        onWord(range)
+    }
+
+    /// A stale finish (a dropped utterance) is ignored, so a stop can never advance
+    /// the queue a second time.
+    func voiceFinished(utterance id: Int) {
+        guard id == utterance, sound != .silent, let c = current else { return }
+        sound = .silent
+        log(String(format: "finish %@ after %.1fs", c.source, now().timeIntervalSince(startedAt)))
+        retire(c)
+        lastItem = c
+        current = nil
+        advance()
+        publish()
+    }
+
+    // -- policy ------------------------------------------------------------
+
+    private var canSound: Bool { !userPaused && !micBusy }
+
+    /// Something that was holding us let go (or took hold): act on it.
+    private func proceed() {
+        if current != nil { drive() } else if !queue.isEmpty { advance() }
+    }
+
+    /// Nothing is current. Start the next item unless something is holding us.
+    private func advance() {
+        if queue.isEmpty {
+            userPaused = false
+            stopped = false
+            onRanDry()
+        } else if canSound {
+            start(queue.removeFirst())
+        }
+    }
+
+    private func start(_ item: SpeechItem) {
+        current = item
+        resumeAt = 0
+        stopped = false
+        startedAt = now()
+        log("start \(item.source) (\(item.text.count) chars)")
+        onStart(item)
+        drive()
+    }
+
+    /// Make the voice match the policy.
+    private func drive() {
+        guard let c = current else { return }
+        if canSound {
+            switch sound {
+            case .silent:
+                utterance += 1
+                sound = .speaking
+                voice.speak(c.text, from: resumeAt, rate: Self.rateSteps[rateIndex], utterance: utterance)
+            case .paused:
+                sound = .speaking
+                voice.resume()
+            case .speaking:
+                break
+            }
+        } else if sound == .speaking {
+            sound = .paused
+            // A synth that's spoken one more syllable has already been heard by the mic.
+            voice.pause(immediately: micBusy)
+        }
+    }
+
+    private func silence() {
+        guard sound != .silent else { return }
+        sound = .silent
+        voice.stop()
+    }
+
+    private func publish() {
+        state = makeState()
+        onChange(state)
+    }
+
+    private func makeState() -> State {
+        var s = State()
+        s.queued = queue.map(\.source)
+        s.isActive = current != nil || !queue.isEmpty
+        s.canSkip = current != nil && !queue.isEmpty
+        s.speedTitle = "⏩ \(Self.rateLabels[rateIndex])"
+        s.pauseTitle = userPaused ? "▶ Resume" : "❚❚ Pause"
+        if !s.isActive {
+            s.status = stopped ? "■ Stopped" : (lastItem == nil ? "" : "Done")
+        } else if userPaused {
+            s.status = "⏸ Paused"
+        } else if micBusy {
+            s.status = sound == .paused ? "🎙 Mic in use — paused" : "🎙 Mic in use — waiting"
+        } else {
+            s.status = "🔊 Speaking…  \(Self.rateLabels[rateIndex])"
+        }
+        return s
+    }
+}
+
+/// The app's voice: AVSpeechSynthesizer behind the `Voice` seam.
+final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
+    weak var listener: Playback?
+
+    // Replaced on every (re)start: stopSpeaking(.immediate) poisons an instance so
+    // the next utterance silently finishes with no audio. A fresh synth avoids that.
+    private var synth: AVSpeechSynthesizer?
+    private var utterance = 0
+    private var sliceStart = 0   // where in the full text the live utterance begins
+
+    func speak(_ text: String, from offset: Int, rate: Float, utterance id: Int) {
+        stop()
+        let ns = text as NSString
+        sliceStart = min(max(offset, 0), ns.length)
+        utterance = id
+        // Speak from the resume point so a speed change picks up where we left off
+        // rather than restarting from the top.
+        let u = AVSpeechUtterance(string: ns.substring(from: sliceStart))
+        let env = ProcessInfo.processInfo.environment
+        if let v = env["SPEAK_VOICE"], !v.isEmpty {
+            // Accept either a voice identifier or a name; fall back gracefully.
+            if let voice = AVSpeechSynthesisVoice(identifier: v) { u.voice = voice }
+            else if let voice = AVSpeechSynthesisVoice.speechVoices().first(where: { $0.name == v }) { u.voice = voice }
+        }
+        u.rate = rate
+        let s = AVSpeechSynthesizer()
+        s.delegate = self
+        synth = s
+        s.speak(u)
+    }
+
+    func pause(immediately: Bool) { synth?.pauseSpeaking(at: immediately ? .immediate : .word) }
+    func resume() { synth?.continueSpeaking() }
+
+    /// stopSpeaking(.immediate) delivers didFinish — not didCancel — on both a speaking
+    /// and a paused synth (verified on this machine). Letting go of the instance first
+    /// makes that late finish come from a synth that isn't live, which is ignored; a
+    /// stop must never reach Playback as "finished".
+    func stop() {
+        guard let s = synth else { return }
+        synth = nil
+        s.stopSpeaking(at: .immediate)
+    }
+
+    func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
+        guard s === synth else { return }   // replaced or stopped: not ours to report
+        let id = utterance
+        // Never re-enter AVSpeechSynthesizer from inside its own delegate callback:
+        // finishing advances the queue, which replaces `synth`, deallocating the very
+        // instance calling us, and the next utterance can be dropped without a sound.
+        // Hop out of the callback. Playback drops the finish if it was superseded meanwhile.
+        DispatchQueue.main.async { [weak self] in self?.listener?.voiceFinished(utterance: id) }
+    }
+
+    func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {}
+
+    func speechSynthesizer(_ s: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange,
+                           utterance u: AVSpeechUtterance) {
+        guard s === synth else { return }
+        // Ranges are relative to the (possibly sliced) utterance; shift to full-text coords.
+        listener?.voiceSpoke(NSRange(location: sliceStart + characterRange.location,
+                                     length: characterRange.length), utterance: utterance)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The HUD: renders Playback's state and wires the buttons, hotkeys and mic to it.
+// ---------------------------------------------------------------------------
+
+final class Controller: NSObject, NSWindowDelegate {
+    let playback: Playback
+    var queue: [SpeechItem] { playback.queue }
+
     /// Standalone reader exits; the agent just hides the panel and keeps listening.
     var onIdle: () -> Void = { NSApp.terminate(nil) }
     /// Where queue transitions go. The agent points this at its log file.
     var log: (String) -> Void = { _ in }
-    private var startedSpeaking = Date()
 
     var panel: HUDPanel!
     var statusLabel: NSTextField!
@@ -478,230 +840,68 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     /// Footer text. The agent appends the hotkeys it actually managed to register.
     var hotkeyHint = "Pause / Resume anywhere:  ⌃⌥P"
 
-    // Speed control. AVSpeech can't change rate mid-utterance, so changing speed
-    // restarts speaking from the current word at the new rate. macOS default rate
-    // (0.5) == 1×; the steps below scale around it.
-    let rateSteps: [Float]  = [0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
-    let rateLabels: [String] = ["0.75×", "1×", "1.25×", "1.5×", "1.75×", "2×"]
     static let rateKey = "speakRateIndex"   // UserDefaults key for persisted speed
-    var rateIndex = 1
-    var nsText: NSString = ""
-    var speakStart = 0     // char offset in the current item where the utterance begins
-    var lastWordStart = 0  // char offset of the word currently being spoken
 
     // Mic hold: something else is recording, so we're silent until it stops.
     private var micWatch: AnyObject?
-    private(set) var micBusy = false
-    /// We paused mid-sentence for the mic, so releasing it should pick back up. A pause
-    /// you made yourself is left alone.
-    private var pausedForMic = false
-    /// Something was due to start while the mic was open; start it on release.
-    private var pendingSpeak = false
     private var micRelease: DispatchWorkItem?
 
     override init() {
+        let voice = SpeechVoice()
+        playback = Playback(voice: voice, rateIndex: Self.initialRateIndex())
+        voice.listener = playback
         super.init()
-        synth.delegate = self
-        // Restore the last speed the user picked…
-        if let saved = prefs.object(forKey: Self.rateKey) as? Int,
-           saved >= 0, saved < rateSteps.count {
-            rateIndex = saved
+        playback.log = { [weak self] in self?.log($0) }
+        playback.onChange = { [weak self] in self?.render($0) }
+        playback.onStart = { [weak self] in self?.show($0) }
+        playback.onWord = { [weak self] in self?.highlight($0) }
+        playback.onRanDry = { [weak self] in
+            guard let self = self else { return }
+            self.clearHighlight()
+            self.scheduleAutoClose(after: self.idleHideDelay)
         }
-        // …but let an explicit SPEAK_RATE env override win for this invocation.
+        playback.onStopped = { [weak self] in
+            self?.closeTimer?.invalidate()
+            self?.clearHighlight()
+            self?.onIdle()
+        }
+    }
+
+    /// The last speed the user picked, unless an explicit SPEAK_RATE env wins for
+    /// this invocation.
+    private static func initialRateIndex() -> Int {
+        var index = 1
+        if let saved = prefs.object(forKey: rateKey) as? Int,
+           Playback.rateSteps.indices.contains(saved) {
+            index = saved
+        }
         if let r = ProcessInfo.processInfo.environment["SPEAK_RATE"], let f = Float(r), f > 0 {
-            rateIndex = rateSteps.enumerated().min(by: { abs($0.1 - f) < abs($1.1 - f) })!.0
+            index = Playback.rateSteps.enumerated().min(by: { abs($0.1 - f) < abs($1.1 - f) })!.0
         }
+        return index
     }
 
-    // -- queue -------------------------------------------------------------
+    // -- commands ----------------------------------------------------------
 
-    /// An item that will never be spoken again releases its spool file.
-    private func retire(_ item: SpeechItem?) { Spool.done(item?.file) }
-
-    /// Wait your turn. A second turn from the same session replaces the first one
-    /// still waiting in line — you want the latest answer, not a stale one.
-    /// Returns true if nothing was speaking and this item started straight away.
+    /// Returns true only if the item started speaking straight away.
     @discardableResult
-    func enqueue(_ item: SpeechItem) -> Bool {
-        if let i = queue.firstIndex(where: { $0.key == item.key }) {
-            retire(queue[i])  // the stale turn is never spoken; let go of its file
-            queue[i] = item   // keep its place in line; a chatty session shouldn't jump the queue
-        } else {
-            queue.append(item)
-        }
-        guard current == nil else { updateQueueUI(); return false }
-        // current == nil only ever happens with an empty queue, so advance() picks
-        // up the item we just appended.
-        advance()
-        return true
-    }
+    func enqueue(_ item: SpeechItem) -> Bool { playback.enqueue(item) }
 
-    /// Jump the queue. Used for hotkey reads: you highlighted that text and asked
-    /// for it now, so it shouldn't sit behind Claude's narration.
-    func playNow(_ item: SpeechItem) {
-        closeTimer?.invalidate()
-        if let c = current {
-            // A spool-backed turn was interrupted, not finished — put it back at the head
-            // of the queue and keep its file, or a hotkey read silently destroys a Claude
-            // response mid-sentence. Two exceptions retire it instead: an ad-hoc read
-            // (no spool file) is superseded by the one you just asked for, and a session
-            // with a newer turn already waiting follows "newest per session wins".
-            if c.file != nil, !queue.contains(where: { $0.key == c.key }) {
-                log("preempted \(c.source) — requeued")
-                queue.insert(c, at: 0)
-            } else {
-                log("preempted \(c.source)")
-                retire(c)
-            }
-            current = nil
-        }
-        start(item)
-    }
+    /// Jump the queue. Used for hotkey reads.
+    func playNow(_ item: SpeechItem) { playback.playNow(item) }
 
-    @objc func skip() {
-        if let c = current { log("skipped \(c.source)"); retire(c) }
-        synth.stopSpeaking(at: .immediate)
-        advance()
-    }
+    @objc func skip() { playback.skip() }
+    @objc func replay() { playback.replay() }
+    @objc func togglePause() { playback.togglePause() }
 
-    private func advance() {
-        if queue.isEmpty {
-            current = nil
-            pendingSpeak = false   // nothing left to start when the mic frees up
-            pausedForMic = false
-            statusLabel?.stringValue = "Done"
-            clearHighlight()
-            updateQueueUI()
-            scheduleAutoClose(after: idleHideDelay)
-        } else {
-            start(queue.removeFirst())
-        }
-    }
-
-    private func start(_ item: SpeechItem) {
-        closeTimer?.invalidate()
-        current = item
-        startedSpeaking = Date()
-        nsText = item.text as NSString
-        speakStart = 0
-        lastWordStart = 0
-        buildWindowIfNeeded()
-        setTranscript(item.text)
-        sourceBadge.text = item.source
-        sourceBadge.accent = Accent.color(for: item.source)
-        sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
-        updateQueueUI()
-        // Content is kept current even while hidden, so restoring shows the real state
-        // rather than whatever was on screen when it was put away.
-        if !isMinimized { panel.orderFrontRegardless() }
-        onVisibilityChange()
-        log("start \(item.source) (\(item.text.count) chars)")
-        speak()
-    }
-
-    private func updateQueueUI() {
-        guard queueLabel != nil else { return }
-        queueLabel.stringValue = queue.isEmpty ? "" : "▸ \(queue.count) queued"
-        nextLabel.attributedStringValue = queuePreview()
-        skipBtn.isEnabled = !queue.isEmpty
-    }
-
-    /// "next: Alpha, Beta", each name in its project's color.
-    private func queuePreview() -> NSAttributedString {
-        guard !queue.isEmpty else { return NSAttributedString(string: "") }
-        let dim: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10),
-            .foregroundColor: NSColor.tertiaryLabelColor,
-        ]
-        let out = NSMutableAttributedString(string: "next: ", attributes: dim)
-        for (i, item) in queue.prefix(3).enumerated() {
-            if i > 0 { out.append(NSAttributedString(string: ", ", attributes: dim)) }
-            out.append(NSAttributedString(string: item.source, attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                .foregroundColor: Accent.color(for: item.source),
-            ]))
-        }
-        if queue.count > 3 { out.append(NSAttributedString(string: "…", attributes: dim)) }
-        return out
-    }
-
-    // -- speech ------------------------------------------------------------
-
-    private func utterance() -> AVSpeechUtterance {
-        // Speak from the current resume point so a mid-stream speed change picks up
-        // where we left off rather than restarting from the top.
-        let start = nsText.length > 0 ? min(speakStart, nsText.length) : 0
-        let slice = nsText.substring(from: start)
-        let u = AVSpeechUtterance(string: slice)
-        let env = ProcessInfo.processInfo.environment
-        if let id = env["SPEAK_VOICE"], !id.isEmpty {
-            // Accept either a voice identifier or a name; fall back gracefully.
-            if let v = AVSpeechSynthesisVoice(identifier: id) { u.voice = v }
-            else if let v = AVSpeechSynthesisVoice.speechVoices().first(where: { $0.name == id }) { u.voice = v }
-        }
-        u.rate = rateSteps[rateIndex]
-        return u
-    }
-
-    func speak() {
-        closeTimer?.invalidate()
-        pausedForMic = false
-        if micBusy {
-            // Don't even start: a synth that's spoken one syllable has already been heard.
-            // Swap it out too: stopping delivers didFinish, not didCancel, and on the live
-            // synth that would retire the item we're holding and advance the queue.
-            synth.stopSpeaking(at: .immediate)
-            synth = AVSpeechSynthesizer()
-            synth.delegate = self
-            pendingSpeak = true
-            statusLabel?.stringValue = "🎙 Mic in use — waiting"
-            pauseBtn?.title = "❚❚ Pause"
-            return
-        }
-        pendingSpeak = false
-        // Swap in a fresh synthesizer — reusing one after .immediate stop drops audio.
-        synth.stopSpeaking(at: .immediate)
-        synth = AVSpeechSynthesizer()
-        synth.delegate = self
-        statusLabel?.stringValue = "🔊 Speaking…  \(rateLabels[rateIndex])"
-        pauseBtn?.title = "❚❚ Pause"
-        synth.speak(utterance())
-    }
-
-    @objc func replay() { speakStart = 0; lastWordStart = 0; speak() }
-
-    // Cycle the playback speed; resume speaking from the current word at the new rate.
     @objc func changeSpeed() {
-        rateIndex = (rateIndex + 1) % rateSteps.count
-        prefs.set(rateIndex, forKey: Self.rateKey)   // remember it
-        speedBtn?.title = "⏩ \(rateLabels[rateIndex])"
-        let wasActive = synth.isSpeaking || synth.isPaused
-        if wasActive {
-            speakStart = lastWordStart   // pick up from the word we were on
-            speak()
-        }
+        playback.cycleSpeed()
+        prefs.set(playback.rateIndex, forKey: Self.rateKey)   // remember it
     }
 
-    @objc func togglePause() {
-        if pausedForMic {
-            // You paused on top of our mic pause: it's yours now, so releasing the mic
-            // doesn't resume it.
-            pausedForMic = false
-            statusLabel?.stringValue = "⏸ Paused"
-            pauseBtn?.title = "▶ Resume"
-            return
-        }
-        if micBusy { return }   // resuming now would talk straight into the recording
-        if synth.isPaused {
-            synth.continueSpeaking()
-            statusLabel?.stringValue = "🔊 Speaking…  \(rateLabels[rateIndex])"
-            pauseBtn?.title = "❚❚ Pause"
-        } else if synth.isSpeaking {
-            synth.pauseSpeaking(at: .word)
-            statusLabel?.stringValue = "⏸ Paused"
-            pauseBtn?.title = "▶ Resume"
-        }
-    }
+    /// Stop everything and throw the queue away. Note this discards what's waiting —
+    /// "Skip" is the one that moves on to the next item.
+    @objc func stopAll() { playback.stop() }
 
     /// Start listening for other apps recording. Silently a no-op before macOS 14.
     func watchMic() {
@@ -711,49 +911,58 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
 
     private func micChanged(_ busy: Bool) {
         micRelease?.cancel()
-        if busy {
-            guard !micBusy else { return }
-            micBusy = true
-            log("mic in use — holding speech")
-            if synth.isSpeaking && !synth.isPaused {
-                synth.pauseSpeaking(at: .immediate)
-                pausedForMic = true
-                statusLabel?.stringValue = "🎙 Mic in use — paused"
-            }
-            return
-        }
+        if busy { playback.micChanged(busy: true); return }
         // Wait a beat before talking again: recorders often drop and reopen the mic
         // between chunks, and you may just be pausing for breath.
-        let release = DispatchWorkItem { [weak self] in
-            guard let self = self, self.micBusy else { return }
-            self.micBusy = false
-            self.log("mic released")
-            if self.pendingSpeak {
-                self.speak()
-            } else if self.pausedForMic {
-                self.pausedForMic = false
-                self.synth.continueSpeaking()
-                self.statusLabel?.stringValue = "🔊 Speaking…  \(self.rateLabels[self.rateIndex])"
-            }
-        }
+        let release = DispatchWorkItem { [weak self] in self?.playback.micChanged(busy: false) }
         micRelease = release
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: release)
     }
 
-    /// Stop everything and throw the queue away. Note this discards what's waiting —
-    /// "Skip" is the one that moves on to the next item.
-    @objc func stopAll() {
+    // -- rendering ---------------------------------------------------------
+
+    /// A new item is current: put its text up. Content is kept current even while
+    /// hidden, so restoring shows the real state rather than whatever was on screen
+    /// when it was put away.
+    private func show(_ item: SpeechItem) {
         closeTimer?.invalidate()
-        synth.stopSpeaking(at: .immediate)
-        pendingSpeak = false
-        pausedForMic = false
-        log("stop: discarded \(queue.count) queued item(s)")
-        retire(current)
-        queue.forEach { retire($0) }
-        queue.removeAll()
-        current = nil
-        updateQueueUI()
-        onIdle()
+        buildWindowIfNeeded()
+        setTranscript(item.text)
+        sourceBadge.text = item.source
+        sourceBadge.accent = Accent.color(for: item.source)
+        sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
+        if !isMinimized { panel.orderFrontRegardless() }
+        onVisibilityChange()
+    }
+
+    /// The only place the playback labels and buttons are written.
+    private func render(_ s: Playback.State) {
+        guard panel != nil else { return }
+        statusLabel.stringValue = s.status
+        pauseBtn.title = s.pauseTitle
+        speedBtn.title = s.speedTitle
+        queueLabel.stringValue = s.queued.isEmpty ? "" : "▸ \(s.queued.count) queued"
+        nextLabel.attributedStringValue = queuePreview(s.queued)
+        skipBtn.isEnabled = s.canSkip
+    }
+
+    /// "next: Alpha, Beta", each name in its project's color.
+    private func queuePreview(_ sources: [String]) -> NSAttributedString {
+        guard !sources.isEmpty else { return NSAttributedString(string: "") }
+        let dim: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+        ]
+        let out = NSMutableAttributedString(string: "next: ", attributes: dim)
+        for (i, source) in sources.prefix(3).enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: ", ", attributes: dim)) }
+            out.append(NSAttributedString(string: source, attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: Accent.color(for: source),
+            ]))
+        }
+        if sources.count > 3 { out.append(NSAttributedString(string: "…", attributes: dim)) }
+        return out
     }
 
     /// Transient hide: stopped, or the standalone reader running dry. Distinct from
@@ -783,13 +992,15 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     }
 
     /// Bring it back. No-op before anything has ever been spoken — there'd be nothing
-    /// in the panel to look at.
+    /// in the panel to look at. Brought back with nothing playing (after Stop, or once
+    /// the queue ran dry), it auto-hides like any idle panel.
     func restore() {
         isMinimized = false
         guard panel != nil else { onVisibilityChange(); return }
         closeTimer?.invalidate()
         panel.orderFrontRegardless()
         log("hud shown")
+        if !playback.state.isActive { scheduleAutoClose(after: idleHideDelay) }
         onVisibilityChange()
     }
 
@@ -802,37 +1013,13 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     /// Lets the menu bar mirror whether the panel is currently up.
     var onVisibilityChange: () -> Void = {}
 
-    func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        // A synth we already replaced can still deliver this; ignore it or we'd
-        // advance the queue twice for one item.
-        guard s === synth else { return }
-        let elapsed = Date().timeIntervalSince(startedSpeaking)
-        if let c = current {
-            log(String(format: "finish %@ after %.1fs", c.source, elapsed))
-            retire(c)
-        }
-        // Never re-enter AVSpeechSynthesizer from inside its own delegate callback:
-        // advance() replaces `synth`, deallocating the very instance calling us, and
-        // the next utterance can be dropped without a sound. Hop out of the callback.
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, s === self.synth else { return }  // superseded meanwhile
-            self.advance()
-        }
-    }
-
-    func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {}
-
     // Karaoke-style follow: highlight + scroll to the word currently being spoken.
-    func speechSynthesizer(_ s: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
-        guard s === synth else { return }
-        // Ranges are relative to the (possibly sliced) utterance; shift to full-text coords.
-        let full = NSRange(location: speakStart + characterRange.location, length: characterRange.length)
-        lastWordStart = full.location
+    private func highlight(_ range: NSRange) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
-        if NSMaxRange(full) <= storage.length {
-            storage.addAttribute(.backgroundColor, value: NSColor.findHighlightColor, range: full)
-            scrollToSpokenWord(full, in: tv)
+        if NSMaxRange(range) <= storage.length {
+            storage.addAttribute(.backgroundColor, value: NSColor.findHighlightColor, range: range)
+            scrollToSpokenWord(range, in: tv)
         }
     }
 
@@ -916,12 +1103,12 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
 
     /// Hide once it's been quiet for `seconds` — counted from your last interaction, not
     /// from when speech stopped. Scrolling, selecting, or clicking a link keeps it up;
-    /// so does leaving it paused, since pausing is how you ask for time to read.
+    /// so does anything still current or waiting (paused, or held by the mic).
     private func scheduleAutoClose(after seconds: TimeInterval) {
         closeTimer?.invalidate()
         closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            if self.synth.isPaused || self.micBusy { self.scheduleAutoClose(after: seconds); return }
+            if self.playback.state.isActive { self.scheduleAutoClose(after: seconds); return }
             let quiet = Date().timeIntervalSince(self.lastInteraction)
             guard quiet >= seconds else {
                 self.scheduleAutoClose(after: seconds - quiet)   // still being used
@@ -982,7 +1169,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         queueLabel = queued
 
         // Playback state, demoted below the source.
-        let label = NSTextField(labelWithString: "🔊 Speaking…")
+        let label = NSTextField(labelWithString: "")
         label.frame = NSRect(x: 18, y: h - 58, width: w - 36, height: 18)
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.textColor = .secondaryLabelColor
@@ -1045,12 +1232,12 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
             return b
         }
         content.addSubview(button("↻ Replay", 14, 78, #selector(replay)))
-        pauseBtn = button("❚❚ Pause", 96, 86, #selector(togglePause))
+        // Titles and enabled state come from render(), the one writer.
+        pauseBtn = button("", 96, 86, #selector(togglePause))
         content.addSubview(pauseBtn)
-        speedBtn = button("⏩ \(rateLabels[rateIndex])", 186, 70, #selector(changeSpeed))
+        speedBtn = button("", 186, 70, #selector(changeSpeed))
         content.addSubview(speedBtn)
         skipBtn = button("⏭ Skip", 260, 66, #selector(skip))
-        skipBtn.isEnabled = false
         content.addSubview(skipBtn)
         content.addSubview(button("■ Stop", 330, 66, #selector(stopAll)))
         // Hide, not Stop: the panel goes away, the speech keeps going, and the
@@ -1065,6 +1252,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
             panel.setFrameOrigin(NSPoint(x: vf.maxX - w - 20, y: vf.maxY - h - 20))
         }
         self.panel = panel
+        render(playback.state)
         watchInteraction()
     }
 }
