@@ -4,7 +4,9 @@
 hook. When Claude finishes a turn it reads the transcript, extracts the latest assistant
 message, strips code blocks / markdown, and hands the text to SpeakHUD.
 
-Wire it up in `~/.claude/settings.json`:
+The app installs it for you (menu bar, or `speak-hud --setup-claude` from the app
+bundle), copying this script to `~/.claude/read-summary.py`. To wire it up by hand, copy
+the script there and add this to `~/.claude/settings.json`:
 
 ```json
 {

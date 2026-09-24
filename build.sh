@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build SpeakHUD.app from source, sign it, and install it.
 #  - Installs the .app to /Applications (falls back to ~/Applications).
-#  - Also refreshes ~/.claude/bin/speak-hud, the binary the Claude Code Stop hook runs.
+#  - If the Claude Code hook is installed, refreshes it via the new app's --setup-claude.
 # Stock-macOS tools only: swiftc, codesign, sips, iconutil.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -87,16 +87,23 @@ touch "$DEST"
 echo "  installed -> $DEST"
 
 echo "== Refresh Claude Code hook =="
-if [ -d "$HOME/.claude/bin" ]; then
-  cp "$STAGE/Contents/MacOS/$EXEC" "$HOME/.claude/bin/$EXEC"
-  echo "  refreshed -> ~/.claude/bin/$EXEC"
-fi
-# The script is what decides to queue rather than kill; a stale copy silently
-# keeps the old "last turn wins" behaviour.
-if [ -f "$HOME/.claude/read-summary.py" ]; then
-  cp hook/read-summary.py "$HOME/.claude/read-summary.py"
-  echo "  refreshed -> ~/.claude/read-summary.py"
-fi
+# The app owns installation (ClaudeHook in speak-hud.swift); build.sh only asks it to
+# refresh an existing install, so the script, the binary and settings.json all go
+# through one code path. A stale script silently keeps old behaviour, so this matters.
+APPBIN="$DEST/Contents/MacOS/$EXEC"
+HOOK_STATUS="$("$APPBIN" --claude-status 2>&1 || true)"
+case "$HOOK_STATUS" in
+  installed|stale*)
+    if HOOK_OUT="$("$APPBIN" --setup-claude 2>&1)"; then
+      echo "  $HOOK_OUT (was: $HOOK_STATUS)"
+    else
+      echo "  WARNING: Claude Code hook refresh failed: $HOOK_OUT" >&2
+    fi ;;
+  "not installed")
+    echo "  not installed; enable it from the menu bar or with --setup-claude" ;;
+  *)
+    echo "  WARNING: couldn't read the hook status ($HOOK_STATUS); left it alone" >&2 ;;
+esac
 
 echo "== Install global-hotkey agent (LaunchAgent) =="
 AGENT_LABEL="com.chris.speakhud.agent"
