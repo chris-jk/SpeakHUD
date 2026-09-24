@@ -138,6 +138,9 @@ Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications` when 
 writable) and refreshes `~/.claude/read-summary.py` + `~/.claude/bin/speak-hud` for the
 Claude Code hook. Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
 
+Tests: `./tests/run.sh`. It compiles `speak-hud.swift` with `-D TESTING` (the entry
+point drops out) alongside `tests/*.swift` — no XCTest, so bare Command Line Tools are enough.
+
 `build.sh` prints the path it installed to (`installed -> …`). If it fell back to
 `~/Applications`, use that prefix in the `speak-hud` commands on this page — for example
 `~/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --claude-status`.

@@ -648,7 +648,11 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         pausedForMic = false
         if micBusy {
             // Don't even start: a synth that's spoken one syllable has already been heard.
+            // Swap it out too: stopping delivers didFinish, not didCancel, and on the live
+            // synth that would retire the item we're holding and advance the queue.
             synth.stopSpeaking(at: .immediate)
+            synth = AVSpeechSynthesizer()
+            synth.delegate = self
             pendingSpeak = true
             statusLabel?.stringValue = "🎙 Mic in use — waiting"
             pauseBtn?.title = "❚❚ Pause"
@@ -1443,61 +1447,71 @@ final class MenuController: NSObject, NSMenuDelegate {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point: dispatch on mode.
+// Entry point: dispatch on mode. Compiled out for tests (tests/run.sh builds with
+// -D TESTING), so a test main can link everything above without launching the app.
+// @main rather than top-level code, because Swift rejects top-level statements in
+// any file but main.swift, even inside an inactive #if.
 // ---------------------------------------------------------------------------
-let argv = CommandLine.arguments
+#if !TESTING
+@main
+enum Main {
+    static func main() {
+        let argv = CommandLine.arguments
 
-if let i = argv.firstIndex(of: "--set-hotkey") {
-    guard i + 1 < argv.count, parseHotkey(argv[i + 1]) != nil else {
-        FileHandle.standardError.write(
-            "usage: speak-hud --set-hotkey \"ctrl+opt+s\"  (need ≥1 modifier + a key)\n".data(using: .utf8)!)
-        exit(2)
+        if let i = argv.firstIndex(of: "--set-hotkey") {
+            guard i + 1 < argv.count, parseHotkey(argv[i + 1]) != nil else {
+                FileHandle.standardError.write(
+                    "usage: speak-hud --set-hotkey \"ctrl+opt+s\"  (need ≥1 modifier + a key)\n".data(using: .utf8)!)
+                exit(2)
+            }
+            let spec = argv[i + 1]
+            HotkeyConfig.save(spec)
+            // Restart the agent so it picks up the new combo (no-op if it isn't installed).
+            let kick = Process()
+            kick.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            kick.arguments = ["kickstart", "-k", "gui/\(getuid())/com.chris.speakhud.agent"]
+            try? kick.run(); kick.waitUntilExit()
+            print("hotkey set to \(spec)")
+            exit(0)
+        }
+
+        if argv.contains("--setup-claude")  { print(ClaudeHook.install()); exit(0) }
+        if argv.contains("--remove-claude") { print(ClaudeHook.remove());  exit(0) }
+        if argv.contains("--claude-status") { print(ClaudeHook.isInstalled() ? "installed" : "not installed"); exit(0) }
+
+        if argv.contains("--agent") {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            let agent = Agent()
+            let agentDelegate = AgentDelegate(agent)
+            app.delegate = agentDelegate          // handles double-click "reopen" -> read clipboard
+            agent.run()
+            let menuController = MenuController(agent)   // menu-bar settings surface
+            _ = menuController
+            app.run()
+            exit(0)
+        }
+
+        // Default: a one-shot reader HUD. Used for `speak-hud "text"` and as the Claude
+        // Code hook's fallback when the agent isn't running to serialize things for us.
+        let text = resolveText(argv).trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { exit(0) }
+
+        var sourceName = "Claude Code"
+        if let i = argv.firstIndex(of: "--source"), i + 1 < argv.count { sourceName = argv[i + 1] }
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)   // no Dock icon, doesn't steal focus
+        let controller = Controller()
+        controller.onIdle = { NSApp.terminate(nil) }
+        controller.watchMic()
+        HotKeyCenter.shared.register(.togglePause,
+                                     keyCode: UInt32(kVK_ANSI_P),
+                                     mods: UInt32(controlKey | optionKey)) { [weak controller] in
+            controller?.togglePause()
+        }
+        controller.enqueue(SpeechItem(text: text, source: sourceName, key: UUID().uuidString, created: Date()))
+        app.run()
     }
-    let spec = argv[i + 1]
-    HotkeyConfig.save(spec)
-    // Restart the agent so it picks up the new combo (no-op if it isn't installed).
-    let kick = Process()
-    kick.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    kick.arguments = ["kickstart", "-k", "gui/\(getuid())/com.chris.speakhud.agent"]
-    try? kick.run(); kick.waitUntilExit()
-    print("hotkey set to \(spec)")
-    exit(0)
 }
-
-if argv.contains("--setup-claude")  { print(ClaudeHook.install()); exit(0) }
-if argv.contains("--remove-claude") { print(ClaudeHook.remove());  exit(0) }
-if argv.contains("--claude-status") { print(ClaudeHook.isInstalled() ? "installed" : "not installed"); exit(0) }
-
-if argv.contains("--agent") {
-    let app = NSApplication.shared
-    app.setActivationPolicy(.accessory)
-    let agent = Agent()
-    let agentDelegate = AgentDelegate(agent)
-    app.delegate = agentDelegate          // handles double-click "reopen" -> read clipboard
-    agent.run()
-    let menuController = MenuController(agent)   // menu-bar settings surface
-    _ = menuController
-    app.run()
-    exit(0)
-}
-
-// Default: a one-shot reader HUD. Used for `speak-hud "text"` and as the Claude
-// Code hook's fallback when the agent isn't running to serialize things for us.
-let text = resolveText(argv).trimmingCharacters(in: .whitespacesAndNewlines)
-if text.isEmpty { exit(0) }
-
-var sourceName = "Claude Code"
-if let i = argv.firstIndex(of: "--source"), i + 1 < argv.count { sourceName = argv[i + 1] }
-
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)   // no Dock icon, doesn't steal focus
-let controller = Controller()
-controller.onIdle = { NSApp.terminate(nil) }
-controller.watchMic()
-HotKeyCenter.shared.register(.togglePause,
-                             keyCode: UInt32(kVK_ANSI_P),
-                             mods: UInt32(controlKey | optionKey)) { [weak controller] in
-    controller?.togglePause()
-}
-controller.enqueue(SpeechItem(text: text, source: sourceName, key: UUID().uuidString, created: Date()))
-app.run()
+#endif

@@ -13,7 +13,7 @@ STAGE="$(mktemp -d)/$APPNAME.app"
 
 echo "== Compiling =="
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
-swiftc -O "$EXEC.swift" -o "$STAGE/Contents/MacOS/$EXEC"
+swiftc -O -parse-as-library "$EXEC.swift" -o "$STAGE/Contents/MacOS/$EXEC"
 echo "  $(file -b "$STAGE/Contents/MacOS/$EXEC")"
 
 echo "== Icon =="
