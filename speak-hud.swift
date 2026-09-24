@@ -1094,80 +1094,223 @@ enum HotkeyConfig {
 }
 
 // Installs/removes the Claude Code "Stop" hook that reads each response aloud, so
-// a downloaded copy can replicate the author's setup with one click. All edits to
-// ~/.claude/settings.json are idempotent merges — existing keys are preserved.
+// a downloaded copy can replicate the author's setup with one click. This is the one
+// install path: the menu item, --setup-claude, and build.sh (which shells out to
+// --setup-claude) all land here. An install is three pieces — read-summary.py, the
+// reader binary the hook falls back to, and the settings.json entry — and status()
+// checks all three, so a missing or out-of-date file shows up as `.stale` rather than
+// hiding behind a present settings entry. Edits to settings.json are merges: other keys,
+// groups and sibling hooks are preserved.
 // Set SPEAKHUD_CLAUDE_DIR to point at a different dir (used by tests).
 enum ClaudeHook {
+    enum Status: String {
+        case installed
+        case stale                          // entry present, but a file is missing or out of date
+        case notInstalled = "not installed"
+    }
+
+    static var defaultDir: String { NSString(string: "~/.claude").expandingTildeInPath }
     static var dir: String {
         if let d = ProcessInfo.processInfo.environment["SPEAKHUD_CLAUDE_DIR"], !d.isEmpty {
             return NSString(string: d).expandingTildeInPath
         }
-        return NSString(string: "~/.claude").expandingTildeInPath
+        return defaultDir
     }
     static var settingsPath: String { dir + "/settings.json" }
     static var scriptPath: String { dir + "/read-summary.py" }
     static var binDir: String { dir + "/bin" }
     static var binPath: String { binDir + "/speak-hud" }
-    static let hookCommand = "python3 ~/.claude/read-summary.py"
+
+    /// The command registered in settings.json. For the real dir it stays the portable
+    /// `~` form; with SPEAKHUD_CLAUDE_DIR set it names the overridden script, so the entry
+    /// and the file it runs never disagree. (read-summary.py's own fallback still looks
+    /// for ~/.claude/bin/speak-hud — the override exists for tests, which never run it.)
+    static var hookCommand: String {
+        if dir == defaultDir { return "python3 ~/.claude/read-summary.py" }
+        return "python3 '" + scriptPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// read-summary.py shipped inside SpeakHUD.app. Nil when running outside the bundle
+    /// (e.g. as ~/.claude/bin/speak-hud).
+    static var bundledScript: URL? { Bundle.main.url(forResource: "read-summary", withExtension: "py") }
+
+    /// The file this process is running from, absolute and with symlinks resolved.
+    /// argv[0] isn't good enough: it's relative when invoked via PATH or `./`.
+    static var runningExecutable: URL? {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        var buf = [CChar](repeating: 0, count: Int(size) + 1)
+        if _NSGetExecutablePath(&buf, &size) == 0, let real = realpath(buf, nil) {
+            defer { free(real) }
+            return URL(fileURLWithPath: String(cString: real))
+        }
+        return Bundle.main.executableURL?.resolvingSymlinksInPath()
+    }
+
+    // MARK: settings.json
+
+    private enum Settings { case missing, invalid, ok([String: Any]) }
+
+    private static func readSettings() -> Settings {
+        guard let data = FileManager.default.contents(atPath: settingsPath) else { return .missing }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .invalid }
+        return .ok(root)
+    }
 
     private static func stopGroups(_ root: [String: Any]) -> [[String: Any]] {
         (root["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]] ?? []
     }
+    /// One hook entry (not a group) is ours if it runs read-summary.py.
+    private static func isOurs(_ entry: [String: Any]) -> Bool {
+        (entry["command"] as? String)?.contains("read-summary.py") == true
+    }
     private static func groupHasOurs(_ group: [String: Any]) -> Bool {
-        guard let inner = group["hooks"] as? [[String: Any]] else { return false }
-        return inner.contains { ($0["command"] as? String)?.contains("read-summary.py") == true }
+        (group["hooks"] as? [[String: Any]])?.contains(where: isOurs) == true
     }
 
-    static func isInstalled() -> Bool {
-        guard let data = FileManager.default.contents(atPath: settingsPath),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return false }
-        return stopGroups(root).contains(where: groupHasOurs)
+    // MARK: files
+
+    /// True when both paths name the same file on disk (same device + inode), whatever
+    /// the spelling — /tmp vs /private/tmp, symlinks, hard links.
+    static func sameFile(_ a: String, _ b: String) -> Bool {
+        var sa = stat(), sb = stat()
+        guard stat(a, &sa) == 0, stat(b, &sb) == 0 else { return false }
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
     }
 
-    @discardableResult
-    static func install() -> String {
+    private static func sameContents(_ a: String, _ b: String) -> Bool {
+        if sameFile(a, b) { return true }
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: binDir, withIntermediateDirectories: true)
-        // 1) Drop read-summary.py and the reader binary into ~/.claude.
-        if let src = Bundle.main.url(forResource: "read-summary", withExtension: "py"),
-           let data = try? Data(contentsOf: src) {
-            try? data.write(to: URL(fileURLWithPath: scriptPath))
+        guard let sa = (try? fm.attributesOfItem(atPath: a))?[.size] as? NSNumber,
+              let sb = (try? fm.attributesOfItem(atPath: b))?[.size] as? NSNumber,
+              sa == sb,
+              let da = try? Data(contentsOf: URL(fileURLWithPath: a), options: .alwaysMapped),
+              let db = try? Data(contentsOf: URL(fileURLWithPath: b), options: .alwaysMapped)
+        else { return false }
+        return da == db
+    }
+
+    /// Copy `src` over `dst` without ever leaving `dst` missing: copy to a temp name in the
+    /// same dir, then rename(2) it into place. A no-op when they're already the same file
+    /// (`~/.claude/bin/speak-hud --setup-claude`). Returns nil on success, else why not.
+    private static func placeFile(from src: String, to dst: String, mode: Int) -> String? {
+        let fm = FileManager.default
+        if sameFile(src, dst) { return nil }
+        guard fm.isReadableFile(atPath: src) else { return "can't read \(src)" }
+        let tmp = (dst as NSString).deletingLastPathComponent
+            + "/.\((dst as NSString).lastPathComponent).tmp-\(getpid())"
+        try? fm.removeItem(atPath: tmp)
+        do {
+            try fm.copyItem(atPath: src, toPath: tmp)
+            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: tmp)
+        } catch {
+            try? fm.removeItem(atPath: tmp)
+            return "copy \(src) failed: \(error.localizedDescription)"
         }
-        try? fm.removeItem(atPath: binPath)
-        try? fm.copyItem(atPath: CommandLine.arguments[0], toPath: binPath)
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binPath)
-        // 2) Merge the Stop hook into settings.json (preserving everything else).
+        guard rename(tmp, dst) == 0 else {
+            let why = String(cString: strerror(errno))
+            try? fm.removeItem(atPath: tmp)
+            return "couldn't replace \(dst): \(why)"
+        }
+        return nil
+    }
+
+    // MARK: public surface
+
+    /// Three-way status plus, when stale, what's wrong. `script`/`binary` are what an
+    /// install would copy from; a nil source can't be compared, so only presence counts.
+    static func check(script: URL? = bundledScript,
+                      binary: URL? = runningExecutable) -> (status: Status, problems: [String]) {
+        guard case .ok(let root) = readSettings(), stopGroups(root).contains(where: groupHasOurs)
+        else { return (.notInstalled, []) }
+        let fm = FileManager.default
+        var problems: [String] = []
+        if !fm.fileExists(atPath: scriptPath) {
+            problems.append("script missing")
+        } else if let s = script, !sameContents(s.path, scriptPath) {
+            problems.append("script differs from bundled copy")
+        }
+        if !fm.isExecutableFile(atPath: binPath) {
+            problems.append("binary missing")
+        } else if let b = binary, !sameContents(b.path, binPath) {
+            problems.append("binary differs from this build")
+        }
+        return (problems.isEmpty ? .installed : .stale, problems)
+    }
+
+    static func status(script: URL? = bundledScript, binary: URL? = runningExecutable) -> Status {
+        check(script: script, binary: binary).status
+    }
+
+    /// Install or repair all three pieces. Returns "installed", or "error: …" naming every
+    /// step that failed. Idempotent: re-running refreshes the files and leaves an existing
+    /// settings entry alone.
+    @discardableResult
+    static func install(script: URL? = bundledScript, binary: URL? = runningExecutable) -> String {
+        let fm = FileManager.default
+        // Settings first: if the file can't be parsed, touch nothing at all.
         var root: [String: Any] = [:]
-        if let data = fm.contents(atPath: settingsPath) {
-            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return "error: ~/.claude/settings.json is not valid JSON — left it untouched"
-            }
-            root = parsed
+        switch readSettings() {
+        case .invalid: return "error: \(settingsPath) is not valid JSON — left it untouched"
+        case .ok(let r): root = r
+        case .missing: break
         }
+        do { try fm.createDirectory(atPath: binDir, withIntermediateDirectories: true) }
+        catch { return "error: couldn't create \(binDir): \(error.localizedDescription)" }
+
+        var problems: [String] = []
+        if let s = script {
+            if let e = placeFile(from: s.path, to: scriptPath, mode: 0o644) { problems.append("script: \(e)") }
+        } else if !fm.fileExists(atPath: scriptPath) {
+            problems.append("script: no bundled read-summary.py to install (run this from SpeakHUD.app)")
+        }
+        // Registering a hook that points at nothing is the silent failure we're avoiding.
+        guard fm.fileExists(atPath: scriptPath) else {
+            return "error: " + problems.joined(separator: "; ") + " — hook not registered"
+        }
+        if let b = binary {
+            if let e = placeFile(from: b.path, to: binPath, mode: 0o755) { problems.append("binary: \(e)") }
+        } else {
+            problems.append("binary: couldn't locate the running executable")
+        }
+
         var hooks = root["hooks"] as? [String: Any] ?? [:]
         var stop = hooks["Stop"] as? [[String: Any]] ?? []
         if !stop.contains(where: groupHasOurs) {
             stop.append(["hooks": [["type": "command", "command": hookCommand, "async": true]]])
+            hooks["Stop"] = stop
+            root["hooks"] = hooks
+            if !write(root) { problems.append("settings: couldn't write \(settingsPath)") }
         }
-        hooks["Stop"] = stop
-        root["hooks"] = hooks
-        return write(root) ? "installed" : "error: could not write settings.json"
+        return problems.isEmpty ? "installed" : "error: " + problems.joined(separator: "; ")
     }
 
+    /// Remove only our entry. Sibling hooks in the same group stay; a group is dropped
+    /// only once it's empty. The script and binary are left in place.
     @discardableResult
     static func remove() -> String {
-        let fm = FileManager.default
-        guard let data = fm.contents(atPath: settingsPath),
-              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return "nothing to remove" }
-        if var hooks = root["hooks"] as? [String: Any],
-           var stop = hooks["Stop"] as? [[String: Any]] {
-            stop.removeAll(where: groupHasOurs)
-            if stop.isEmpty { hooks.removeValue(forKey: "Stop") } else { hooks["Stop"] = stop }
-            if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
+        var root: [String: Any]
+        switch readSettings() {
+        case .missing: return "nothing to remove"
+        case .invalid: return "error: \(settingsPath) is not valid JSON — left it untouched"
+        case .ok(let r): root = r
         }
-        return write(root) ? "removed" : "error: could not write settings.json"
+        guard var hooks = root["hooks"] as? [String: Any],
+              let stop = hooks["Stop"] as? [[String: Any]],
+              stop.contains(where: groupHasOurs)
+        else { return "nothing to remove" }
+        let kept: [[String: Any]] = stop.compactMap { group in
+            guard var inner = group["hooks"] as? [[String: Any]], inner.contains(where: isOurs)
+            else { return group }
+            inner.removeAll(where: isOurs)
+            if inner.isEmpty { return nil }
+            var g = group
+            g["hooks"] = inner
+            return g
+        }
+        if kept.isEmpty { hooks.removeValue(forKey: "Stop") } else { hooks["Stop"] = kept }
+        if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
+        return write(root) ? "removed" : "error: couldn't write \(settingsPath)"
     }
 
     private static func write(_ root: [String: Any]) -> Bool {
@@ -1411,7 +1554,16 @@ final class MenuController: NSObject, NSMenuDelegate {
             btn.image = NSImage(systemSymbolName: hidden ? "speaker.wave.2" : "speaker.wave.2.fill",
                                 accessibilityDescription: hidden ? "SpeakHUD (hidden)" : "SpeakHUD")
         }
-        claudeItem.state = ClaudeHook.isInstalled() ? .on : .off
+        let hook = ClaudeHook.check()
+        claudeItem.title = hook.status == .stale ? "Read Claude Code Responses Aloud — Repair"
+                                                 : "Read Claude Code Responses Aloud"
+        switch hook.status {
+        case .installed:    claudeItem.state = .on
+        case .stale:        claudeItem.state = .mixed    // "–": present but broken
+        case .notInstalled: claudeItem.state = .off
+        }
+        claudeItem.toolTip = hook.problems.isEmpty ? nil
+            : "Needs repair: " + hook.problems.joined(separator: "; ") + ". Click to reinstall."
         axItem.isHidden = Selection.isTrusted
         let current = HotkeyConfig.load()
         for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
@@ -1420,7 +1572,15 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func toggleHUD() { agent.hud.toggleMinimized() }
     @objc private func readClipboard() { agent.readClipboard() }
     @objc private func toggleClaude() {
-        _ = ClaudeHook.isInstalled() ? ClaudeHook.remove() : ClaudeHook.install()
+        // Installed -> remove. Stale -> reinstall (a repair, not an uninstall). Off -> install.
+        let result = ClaudeHook.status() == .installed ? ClaudeHook.remove() : ClaudeHook.install()
+        if result.hasPrefix("error") {
+            let alert = NSAlert()
+            alert.messageText = "Claude Code hook"
+            alert.informativeText = result
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
         refresh()
     }
     @objc private func grantAccessibility() {
@@ -1475,9 +1635,17 @@ enum Main {
             exit(0)
         }
 
-        if argv.contains("--setup-claude")  { print(ClaudeHook.install()); exit(0) }
-        if argv.contains("--remove-claude") { print(ClaudeHook.remove());  exit(0) }
-        if argv.contains("--claude-status") { print(ClaudeHook.isInstalled() ? "installed" : "not installed"); exit(0) }
+        if argv.contains("--setup-claude") || argv.contains("--remove-claude") {
+            let r = argv.contains("--setup-claude") ? ClaudeHook.install() : ClaudeHook.remove()
+            print(r); exit(r.hasPrefix("error") ? 1 : 0)
+        }
+        if argv.contains("--claude-status") {
+            // "installed" | "stale: <why>" | "not installed" — build.sh matches on these.
+            let c = ClaudeHook.check()
+            print(c.problems.isEmpty ? c.status.rawValue
+                                     : c.status.rawValue + ": " + c.problems.joined(separator: "; "))
+            exit(0)
+        }
 
         if argv.contains("--agent") {
             let app = NSApplication.shared

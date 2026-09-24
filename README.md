@@ -135,8 +135,9 @@ Chrome and some terminals — a synthesized `⌘C` with your clipboard restored 
 ```
 
 Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications` when it isn't
-writable) and refreshes `~/.claude/read-summary.py` + `~/.claude/bin/speak-hud` for the
-Claude Code hook. Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
+writable). If the Claude Code hook is installed (even partly), it then runs the new
+app's `--setup-claude` to refresh `~/.claude/read-summary.py` and `~/.claude/bin/speak-hud`,
+so a rebuild never leaves a stale copy behind. Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
 
 Tests: `./tests/run.sh`. It compiles `speak-hud.swift` with `-D TESTING` (the entry
 point drops out) alongside `tests/*.swift` — no XCTest, so bare Command Line Tools are enough.
@@ -164,7 +165,8 @@ The background agent shows a small **speaker icon** in the menu bar:
 
 - **Read Clipboard Aloud**
 - **Read Claude Code Responses Aloud** — a checkbox that installs/removes the Claude
-  Code `Stop` hook for you (see below).
+  Code `Stop` hook for you (see below). If the hook is registered but its script or
+  binary is missing or out of date, it shows a dash and "— Repair"; clicking reinstalls.
 - **Global Hotkey** — pick a preset or open the config file.
 - **Grant Accessibility Access…** — shown only until the permission is granted.
 - **SpeakHUD on GitHub** / **Quit**.
@@ -175,7 +177,7 @@ SpeakHUD can read each Claude Code response aloud the moment a turn finishes. En
 the easy way from the menu bar (**Read Claude Code Responses Aloud**), or from the CLI:
 
 ```sh
-/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --setup-claude    # install
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --setup-claude    # install or repair
 /Applications/SpeakHUD.app/Contents/MacOS/speak-hud --remove-claude   # uninstall
 /Applications/SpeakHUD.app/Contents/MacOS/speak-hud --claude-status   # check
 ```
@@ -183,8 +185,15 @@ the easy way from the menu bar (**Read Claude Code Responses Aloud**), or from t
 Setup is a safe, idempotent merge into `~/.claude/settings.json`: it copies
 `read-summary.py` and the reader binary into `~/.claude`, then adds a `Stop` hook that
 grabs the latest assistant response, strips code blocks/markdown, and hands it to the
-agent's queue. Your other settings and hooks are preserved; removing it touches only the
-SpeakHUD entry. See `hook/` for the reference script.
+agent's queue. Your other settings and hooks are preserved; removing it deletes only the
+SpeakHUD entry, keeping any other hooks in the same group. If `settings.json` isn't valid
+JSON, setup and removal leave it untouched and say so. Each step that fails is named in
+the output, and `--setup-claude` exits non-zero.
+
+`--claude-status` prints one of `installed`, `stale: <what's wrong>` (the hook is
+registered but the script or binary is missing or differs from this build — run
+`--setup-claude` to repair), or `not installed`. Run it from the app bundle: that's where
+the reference copy of `read-summary.py` lives. See `hook/` for the reference script.
 
 **If the agent isn't running** — or the spool can't be written — the hook doesn't go
 silent: it speaks the response directly, the way it did before the queue existed. It
