@@ -22,6 +22,9 @@ a standalone app.
 - **Remembers your speed** across launches (shared `UserDefaults` suite, so the app,
   the hook, and the hotkey all agree).
 - **Pause / Resume anywhere** with a system-wide `⌃⌥P` hotkey.
+- **Shuts up while you talk.** When anything else opens the mic — Claude Code's
+  hold-space dictation, a call, system dictation — speech pauses, and picks back up
+  a moment after the mic is released (macOS 14+).
 - **Global hotkey to read your highlighted text** from any app (default `⌃⌥S`), with
   play / pause / speed controls in the HUD. The combo is **user-configurable**.
 - **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,

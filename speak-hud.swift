@@ -2,6 +2,7 @@ import Cocoa
 import AVFoundation
 import ApplicationServices
 import Carbon.HIToolbox
+import CoreAudio
 
 // Shared prefs domain so the speed setting is the same no matter how the reader
 // was launched (double-click app, Claude Code hook, or the global hotkey).
@@ -187,6 +188,87 @@ enum Selection {
             return item
         }
         if !items.isEmpty { pb.writeObjects(items) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The mic. When something else starts recording — Claude Code's hold-space
+// dictation, a call, system dictation — we shut up until it stops, or whatever
+// we're saying ends up in the transcript.
+// ---------------------------------------------------------------------------
+
+/// Who's recording comes from CoreAudio's per-process "running input" flag (macOS 14+).
+/// Deliberately not the device-wide "running somewhere" flag as the answer: a headset
+/// is one device for mic and speaker, so that flips the moment we start talking.
+/// But the per-process flag never notifies, so the device flag, the process list, and
+/// the default-input choice are just triggers to go and look again.
+@available(macOS 14.0, *)
+final class MicWatch {
+    private(set) var busy = false
+    private let onChange: (Bool) -> Void
+    private var inputDevice = AudioObjectID(kAudioObjectUnknown)
+    private var trigger: AudioObjectPropertyListenerBlock!
+    private var deviceChanged: AudioObjectPropertyListenerBlock!
+    private let system = AudioObjectID(kAudioObjectSystemObject)
+
+    init(onChange: @escaping (Bool) -> Void) {
+        self.onChange = onChange
+        trigger = { [weak self] _, _ in self?.recheck() }
+        deviceChanged = { [weak self] _, _ in self?.followDefaultInput() }
+        var list = Self.address(kAudioHardwarePropertyProcessObjectList)
+        AudioObjectAddPropertyListenerBlock(system, &list, .main, trigger)
+        var def = Self.address(kAudioHardwarePropertyDefaultInputDevice)
+        AudioObjectAddPropertyListenerBlock(system, &def, .main, deviceChanged)
+        followDefaultInput()
+    }
+
+    private static func address(_ sel: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain)
+    }
+
+    private static func read<T: FixedWidthInteger>(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector) -> T? {
+        var addr = address(sel)
+        var value: T = 0
+        var size = UInt32(MemoryLayout<T>.size)
+        return AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &value) == noErr ? value : nil
+    }
+
+    /// Plugging in a headset moves the default input; the old device goes quiet on us.
+    private func followDefaultInput() {
+        var running = Self.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
+        if inputDevice != kAudioObjectUnknown {
+            AudioObjectRemovePropertyListenerBlock(inputDevice, &running, .main, trigger)
+        }
+        inputDevice = Self.read(system, kAudioHardwarePropertyDefaultInputDevice) ?? AudioObjectID(kAudioObjectUnknown)
+        if inputDevice != kAudioObjectUnknown {
+            AudioObjectAddPropertyListenerBlock(inputDevice, &running, .main, trigger)
+        }
+        recheck()
+    }
+
+    private func recheck() {
+        look()
+        // A recorder's process shows up a beat before its input is actually running;
+        // look once more so that ordering can't leave us talking.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.look() }
+    }
+
+    private func look() {
+        var addr = Self.address(kAudioHardwarePropertyProcessObjectList)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr else { return }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return }
+        let me = getpid()
+        let now = ids.contains { id in
+            let pid: Int32? = Self.read(id, kAudioProcessPropertyPID)
+            let running: UInt32? = Self.read(id, kAudioProcessPropertyIsRunningInput)
+            return pid != me && (running ?? 0) != 0
+        }
+        guard now != busy else { return }
+        busy = now
+        onChange(now)
     }
 }
 
@@ -407,6 +489,16 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     var speakStart = 0     // char offset in the current item where the utterance begins
     var lastWordStart = 0  // char offset of the word currently being spoken
 
+    // Mic hold: something else is recording, so we're silent until it stops.
+    private var micWatch: AnyObject?
+    private(set) var micBusy = false
+    /// We paused mid-sentence for the mic, so releasing it should pick back up. A pause
+    /// you made yourself is left alone.
+    private var pausedForMic = false
+    /// Something was due to start while the mic was open; start it on release.
+    private var pendingSpeak = false
+    private var micRelease: DispatchWorkItem?
+
     override init() {
         super.init()
         synth.delegate = self
@@ -475,6 +567,8 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     private func advance() {
         if queue.isEmpty {
             current = nil
+            pendingSpeak = false   // nothing left to start when the mic frees up
+            pausedForMic = false
             statusLabel?.stringValue = "Done"
             clearHighlight()
             updateQueueUI()
@@ -551,6 +645,16 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
 
     func speak() {
         closeTimer?.invalidate()
+        pausedForMic = false
+        if micBusy {
+            // Don't even start: a synth that's spoken one syllable has already been heard.
+            synth.stopSpeaking(at: .immediate)
+            pendingSpeak = true
+            statusLabel?.stringValue = "🎙 Mic in use — waiting"
+            pauseBtn?.title = "❚❚ Pause"
+            return
+        }
+        pendingSpeak = false
         // Swap in a fresh synthesizer — reusing one after .immediate stop drops audio.
         synth.stopSpeaking(at: .immediate)
         synth = AVSpeechSynthesizer()
@@ -575,6 +679,15 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
     }
 
     @objc func togglePause() {
+        if pausedForMic {
+            // You paused on top of our mic pause: it's yours now, so releasing the mic
+            // doesn't resume it.
+            pausedForMic = false
+            statusLabel?.stringValue = "⏸ Paused"
+            pauseBtn?.title = "▶ Resume"
+            return
+        }
+        if micBusy { return }   // resuming now would talk straight into the recording
         if synth.isPaused {
             synth.continueSpeaking()
             statusLabel?.stringValue = "🔊 Speaking…  \(rateLabels[rateIndex])"
@@ -586,11 +699,50 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         }
     }
 
+    /// Start listening for other apps recording. Silently a no-op before macOS 14.
+    func watchMic() {
+        guard micWatch == nil, #available(macOS 14.0, *) else { return }
+        micWatch = MicWatch { [weak self] busy in self?.micChanged(busy) }
+    }
+
+    private func micChanged(_ busy: Bool) {
+        micRelease?.cancel()
+        if busy {
+            guard !micBusy else { return }
+            micBusy = true
+            log("mic in use — holding speech")
+            if synth.isSpeaking && !synth.isPaused {
+                synth.pauseSpeaking(at: .immediate)
+                pausedForMic = true
+                statusLabel?.stringValue = "🎙 Mic in use — paused"
+            }
+            return
+        }
+        // Wait a beat before talking again: recorders often drop and reopen the mic
+        // between chunks, and you may just be pausing for breath.
+        let release = DispatchWorkItem { [weak self] in
+            guard let self = self, self.micBusy else { return }
+            self.micBusy = false
+            self.log("mic released")
+            if self.pendingSpeak {
+                self.speak()
+            } else if self.pausedForMic {
+                self.pausedForMic = false
+                self.synth.continueSpeaking()
+                self.statusLabel?.stringValue = "🔊 Speaking…  \(self.rateLabels[self.rateIndex])"
+            }
+        }
+        micRelease = release
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: release)
+    }
+
     /// Stop everything and throw the queue away. Note this discards what's waiting —
     /// "Skip" is the one that moves on to the next item.
     @objc func stopAll() {
         closeTimer?.invalidate()
         synth.stopSpeaking(at: .immediate)
+        pendingSpeak = false
+        pausedForMic = false
         log("stop: discarded \(queue.count) queued item(s)")
         retire(current)
         queue.forEach { retire($0) }
@@ -765,7 +917,7 @@ final class Controller: NSObject, AVSpeechSynthesizerDelegate, NSWindowDelegate 
         closeTimer?.invalidate()
         closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            if self.synth.isPaused { self.scheduleAutoClose(after: seconds); return }
+            if self.synth.isPaused || self.micBusy { self.scheduleAutoClose(after: seconds); return }
             let quiet = Date().timeIntervalSince(self.lastInteraction)
             guard quiet >= seconds else {
                 self.scheduleAutoClose(after: seconds - quiet)   // still being used
@@ -1071,6 +1223,7 @@ final class Agent {
         Agent.shared = self
         hud.onIdle = { [weak self] in self?.hud.hidePanel() }
         hud.log = { [weak self] in self?.log($0) }
+        hud.watchMic()
         hud.hotkeyHint = "Anywhere:  ⌃⌥P pause / resume    ⌃⌥H show / hide this window"
         log("agent started (pid \(getpid()))")
         // The one thing you can't tell from outside the process: whether macOS will
@@ -1340,6 +1493,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)   // no Dock icon, doesn't steal focus
 let controller = Controller()
 controller.onIdle = { NSApp.terminate(nil) }
+controller.watchMic()
 HotKeyCenter.shared.register(.togglePause,
                              keyCode: UInt32(kVK_ANSI_P),
                              mods: UInt32(controlKey | optionKey)) { [weak controller] in
