@@ -86,32 +86,6 @@ rm -rf "$DEST"; cp -R "$STAGE" "$DEST"
 touch "$DEST"
 echo "  installed -> $DEST"
 
-echo "== Refresh Claude Code hook =="
-# The app owns installation (ClaudeHook in speak-hud.swift); build.sh only asks it to
-# refresh an existing install, so the script, the binary and settings.json all go
-# through one code path. A stale script silently keeps old behaviour, so this matters.
-APPBIN="$DEST/Contents/MacOS/$EXEC"
-HOOK_STATUS="$("$APPBIN" --claude-status 2>&1 || true)"
-case "$HOOK_STATUS" in
-  installed|stale*)
-    if HOOK_OUT="$("$APPBIN" --setup-claude 2>&1)"; then
-      echo "  $HOOK_OUT (was: $HOOK_STATUS)"
-    else
-      echo "  WARNING: Claude Code hook refresh failed: $HOOK_OUT" >&2
-    fi ;;
-  "not installed"*)
-    # Not registered in ~/.claude/settings.json (or it won't parse), but copies may
-    # still be in use from elsewhere: refresh those, never register anything.
-    [ "$HOOK_STATUS" != "not installed" ] && echo "  WARNING: $HOOK_STATUS" >&2
-    if HOOK_OUT="$("$APPBIN" --refresh-claude-files 2>&1)"; then
-      echo "  not registered ($HOOK_OUT); enable it from the menu bar or with --setup-claude"
-    else
-      echo "  WARNING: couldn't refresh the hook's files: $HOOK_OUT" >&2
-    fi ;;
-  *)
-    echo "  WARNING: couldn't read the hook status ($HOOK_STATUS); left it alone" >&2 ;;
-esac
-
 echo "== Install global-hotkey agent (LaunchAgent) =="
 AGENT_LABEL="com.chris.speakhud.agent"
 PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
@@ -165,5 +139,33 @@ if ! launchctl kickstart "gui/$UID_NUM/$AGENT_LABEL" >/dev/null 2>&1; then
 fi
 echo "  agent loaded; global hotkey reads ~/.config/speakhud/config.json (default ctrl+opt+s)"
 echo "  change it with:  $DEST/Contents/MacOS/$EXEC --set-hotkey \"ctrl+opt+r\""
+
+echo "== Refresh Claude Code hook =="
+# After the agent is up: the new hook trusts only the new agent's heartbeat, so
+# refreshing it first would send every turn around a live old agent in the gap.
+# The app owns installation (ClaudeHook in speak-hud.swift); build.sh only asks it to
+# refresh an existing install, so the script, the binary and settings.json all go
+# through one code path. A stale script silently keeps old behaviour, so this matters.
+APPBIN="$DEST/Contents/MacOS/$EXEC"
+HOOK_STATUS="$("$APPBIN" --claude-status 2>&1 || true)"
+case "$HOOK_STATUS" in
+  installed|stale*)
+    if HOOK_OUT="$("$APPBIN" --setup-claude 2>&1)"; then
+      echo "  $HOOK_OUT (was: $HOOK_STATUS)"
+    else
+      echo "  WARNING: Claude Code hook refresh failed: $HOOK_OUT" >&2
+    fi ;;
+  "not installed"*)
+    # Not registered in ~/.claude/settings.json (or it won't parse), but copies may
+    # still be in use from elsewhere: refresh those, never register anything.
+    [ "$HOOK_STATUS" != "not installed" ] && echo "  WARNING: $HOOK_STATUS" >&2
+    if HOOK_OUT="$("$APPBIN" --refresh-claude-files 2>&1)"; then
+      echo "  not registered ($HOOK_OUT); enable it from the menu bar or with --setup-claude"
+    else
+      echo "  WARNING: couldn't refresh the hook's files: $HOOK_OUT" >&2
+    fi ;;
+  *)
+    echo "  WARNING: couldn't read the hook status ($HOOK_STATUS); left it alone" >&2 ;;
+esac
 
 echo "Done."

@@ -29,6 +29,9 @@ private struct Sandbox {
     var rec: String { root + "/rec" }
     var hud: String { home + "/.claude/bin/speak-hud" }
 
+    /// Seconds the hook keeps looking for a fresh heartbeat; 0 so a dead agent is quick.
+    var grace = "0"
+
     init(_ label: String, say: Bool = true) {
         root = fm.temporaryDirectory.appendingPathComponent("speakhud-hook-\(label)-\(UUID().uuidString)").path
         for d in [home, queue, bin, rec] { try? fm.createDirectory(atPath: d, withIntermediateDirectories: true) }
@@ -70,7 +73,8 @@ private struct Sandbox {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: argv[0])
         p.arguments = Array(argv.dropFirst())
-        p.environment = ["HOME": home, "PATH": bin, Spool.dirEnv: queue]
+        p.environment = ["HOME": home, "PATH": bin, Spool.dirEnv: queue,
+                         "SPEAKHUD_HEARTBEAT_GRACE": grace]
         let input = Pipe(), err = Pipe()
         p.standardInput = stdin == nil ? FileHandle.nullDevice : input
         p.standardOutput = FileHandle.nullDevice
@@ -169,6 +173,33 @@ let hookSuite = Suite("Hook") { t in
         sb.cleanup()
     }
 
+    // -- a HUD that dies at launch on a SHORT turn (no broken pipe) falls back to say --
+    do {
+        let sb = Sandbox("hud-dies")
+        sb.executable(sb.hud, "#!/bin/sh\nsleep 0.1\nexit 1\n")
+        clean(sb.run(speak, args: ["Short turn.", "proj"]), "HUD dies at launch")
+        t.expect(sb.waitFor("say"), "a HUD that exits non-zero at launch falls back to say")
+        t.expectEqual(sb.input("say"), "Short turn.", "…with the full text")
+        sb.cleanup()
+    }
+
+    // -- a heartbeat that goes fresh during the grace period counts (wake from sleep) --
+    do {
+        var sb = Sandbox("grace")
+        sb.grace = "3"
+        let beat = sb.queue + "/" + Spool.heartbeatName
+        fm.createFile(atPath: beat, contents: nil)
+        try? fm.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: beat)
+        let code = """
+        import sys, threading, os
+        threading.Timer(0.6, lambda: os.utime(os.path.join(hook.QUEUE_DIR, hook.HEARTBEAT))).start()
+        print('ALIVE' if hook.agent_running() else 'DEAD', file=sys.stderr)
+        """
+        t.expectEqual(sb.run(code).err.trimmingCharacters(in: .whitespacesAndNewlines), "ALIVE",
+                      "a stale beat that the agent refreshes within the grace period is alive")
+        sb.cleanup()
+    }
+
     // -- nothing can speak: log it, don't raise ------------------------------------
     do {
         let sb = Sandbox("mute", say: false)
@@ -202,6 +233,10 @@ let hookSuite = Suite("Hook") { t in
         t.expectEqual(state(), "DEAD", "a stale heartbeat (hung or dead agent) is not alive")
         t.expect(Spool.beat(in: sb.queue), "beat() on an existing file succeeds")
         t.expectEqual(state(), "ALIVE", "the next beat revives it")
+
+        try? fm.removeItem(atPath: sb.queue)
+        t.expect(Spool.beat(in: sb.queue), "beat() recreates a removed spool dir")
+        t.expectEqual(state(), "ALIVE", "…so the hook sees the agent again")
 
         // The spool must never treat the heartbeat as an item or as litter.
         let batch = Spool.drain(in: sb.queue, now: Date().addingTimeInterval(2 * Spool.maxAge))

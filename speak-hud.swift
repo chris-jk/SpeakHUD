@@ -187,6 +187,9 @@ enum Spool {
     static func beat(in dir: String = Spool.dir, now: Date = Date()) -> Bool {
         let fm = FileManager.default
         let path = dir + "/" + heartbeatName
+        // The dir can be removed from under a live agent; the hook only recreates it when
+        // it queues, which it won't do while the heartbeat is missing. So bring it back here.
+        if !fm.fileExists(atPath: dir) { ensure(dir) }
         if !fm.fileExists(atPath: path), !fm.createFile(atPath: path, contents: nil) { return false }
         return (try? fm.setAttributes([.modificationDate: now], ofItemAtPath: path)) != nil
     }
@@ -1497,8 +1500,9 @@ enum HotkeyConfig {
         guard let data = FileManager.default.contents(atPath: path) else { return fallback("can't be read") }
         guard let json = try? JSONSerialization.jsonObject(with: data) else { return fallback("isn't valid JSON") }
         guard let obj = json as? [String: Any] else { return fallback("isn't a JSON object") }
-        guard let hk = (obj["hotkey"] as? String)?.trimmingCharacters(in: .whitespaces), !hk.isEmpty else {
-            return fallback("has no \"hotkey\" setting")
+        guard let value = obj["hotkey"] else { return fallback("has no \"hotkey\" setting") }
+        guard let hk = (value as? String)?.trimmingCharacters(in: .whitespaces), !hk.isEmpty else {
+            return fallback("\"hotkey\" isn't a non-empty string")
         }
         guard parseHotkey(hk) != nil else {
             return fallback("hotkey \"\(hk)\" isn't a valid combo (need ≥1 modifier + a key)")
@@ -1932,6 +1936,10 @@ final class Agent {
         usr1 = s
     }
 
+    /// The read hotkey actually live right now. Editing config.json doesn't change it
+    /// until the agent re-registers, so the menu reports this, not the file.
+    private(set) var registeredSpec: String?
+
     func registerReadHotKey() {
         let loaded = HotkeyConfig.load()
         if let why = loaded.problem {
@@ -1946,6 +1954,7 @@ final class Agent {
         let ok = HotKeyCenter.shared.register(.read, keyCode: hk.keyCode, mods: hk.mods) { [weak self] in
             self?.readSelection()
         }
+        registeredSpec = ok ? spec : nil   // register() drops the old binding first
         log(ok ? "listening for \(spec)" : "could not register \(spec) — another app owns it")
     }
 
@@ -2129,9 +2138,10 @@ final class MenuController: NSObject, NSMenuDelegate {
         let loaded = HotkeyConfig.load()
         for it in hotkeyItems { it.state = (it.representedObject as? String == loaded.spec) ? .on : .off }
         hotkeyWarning.isHidden = loaded.problem == nil
-        hotkeyWarning.title = "⚠ config.json invalid — using \(HotkeyConfig.label(loaded.spec))"
+        hotkeyWarning.title = "⚠ config.json invalid — "
+            + (agent.registeredSpec.map { "using \(HotkeyConfig.label($0))" } ?? "no hotkey registered")
         hotkeyWarning.toolTip = loaded.problem.map { "\(HotkeyConfig.path) \($0)" }
-        micItem.state = agent.hud.pauseWhileRecording ? .on : .off
+        micItem.state = micItem.isEnabled && agent.hud.pauseWhileRecording ? .on : .off
     }
 
     private func refreshVisibility() {

@@ -23,6 +23,11 @@ QUEUE_DIR = os.path.expanduser(
 SPOOL_VERSION = 1       # Spool.version: the agent drops any other `v` rather than misread it
 HEARTBEAT = "agent.heartbeat"   # Spool.heartbeatName, touched by the agent every 3s
 HEARTBEAT_STALE = 10.0  # seconds; see agent_running()
+# How long to keep looking for a fresh beat before speaking directly. Covers a Mac just
+# woken from sleep (the last beat predates it until the agent's timer next fires) and a
+# spool dir the agent is about to recreate. The hook is async, so waiting costs nothing
+# heard; speaking directly next to a live agent is a second voice. Tests set it to 0.
+HEARTBEAT_GRACE = float(os.environ.get("SPEAKHUD_HEARTBEAT_GRACE") or 4.0)
 
 
 def find_transcript(data):
@@ -125,6 +130,16 @@ def agent_running():
     before giving up on it. If the agent died inside that window, the turn waits in
     the spool for the restarted agent (up to Spool.maxAge), as it always has.
     """
+    deadline = time.time() + HEARTBEAT_GRACE
+    while True:
+        if heartbeat_fresh():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def heartbeat_fresh():
     try:
         beat = os.stat(os.path.join(QUEUE_DIR, HEARTBEAT)).st_mtime
     except OSError:
@@ -162,9 +177,13 @@ def enqueue(text, source, key):
 
 
 def pipe_to(argv, text):
-    """Start argv and hand it `text` on stdin. False if it won't start or stops reading."""
+    """Start argv and hand it `text` on stdin. False if it won't start, stops reading,
+    or exits with an error straight away."""
     try:
-        p = subprocess.Popen(argv, stdin=subprocess.PIPE)
+        # Its output isn't ours to show, and holding our stdout/stderr open would make
+        # the hook look busy until the speech ends.
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as e:    # missing, not executable, bad #! line
         print(f"speakhud: could not start {argv[0]} ({e})", file=sys.stderr)
         return False
@@ -180,7 +199,16 @@ def pipe_to(argv, text):
             except OSError:
                 pass
         return False
-    return True
+    # A short turn fits in the pipe buffer, so a reader that dies at launch (dyld,
+    # signature, crash) never raises BrokenPipe. Give it a moment to fail: exiting
+    # non-zero in that window means it didn't take the turn; still running means it did.
+    try:
+        rc = p.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        return True
+    if rc != 0:
+        print(f"speakhud: {argv[0]} exited {rc} at launch", file=sys.stderr)
+    return rc == 0
 
 
 def speak_directly(text, source):
