@@ -67,7 +67,7 @@ its turn, and the HUD shows what's behind it:
   was pending instead of swallowing it.
 - Items that have waited more than 10 minutes are dropped unspoken, so an agent that
   was stopped for a while doesn't come back and read you the whole morning. Every
-  dropped item (too old, blank, or malformed) is logged with its reason. The file
+  dropped item (too old, blank, malformed, or written by a newer hook) is logged with its reason. The file
   format is described in [hook/README.md](hook/README.md).
 
 ## How it picks what to read
@@ -215,10 +215,12 @@ otherwise `--refresh-claude-files`, which updates any existing script or binary 
 anything. A symlinked copy is written through, not replaced.
 
 **If the agent isn't running** — or the spool can't be written — the hook doesn't go
-silent: it speaks the response directly, the way it did before the queue existed. It
-pipes the text to `~/.claude/bin/speak-hud` (a one-shot HUD), or falls back to the
-system `say` command if that binary is missing. You lose the queue in that mode, so
-simultaneous turns can talk over each other.
+silent: it speaks the response directly, the way it did before the queue existed.
+"Running" means the agent has touched its heartbeat file in the queue directory within
+the last 10 seconds (it does so every 3), so a hung agent counts as not running. The
+hook pipes the text to `~/.claude/bin/speak-hud` (a one-shot HUD). If that binary is
+missing, won't start, or stops reading, it pipes the text to the system `say` command
+instead. You lose the queue in that mode, so simultaneous turns can talk over each other.
 
 ## Files
 
