@@ -20,6 +20,9 @@ POLL_SECONDS = 0.1
 QUEUE_DIR = os.path.expanduser(
     os.environ.get("SPEAKHUD_QUEUE_DIR") or "~/.local/state/speakhud/queue"
 )
+SPOOL_VERSION = 1       # Spool.version: the agent drops any other `v` rather than misread it
+HEARTBEAT = "agent.heartbeat"   # Spool.heartbeatName, touched by the agent every 3s
+HEARTBEAT_STALE = 10.0  # seconds; see agent_running()
 
 
 def find_transcript(data):
@@ -112,17 +115,31 @@ def clean(text):
 
 
 def agent_running():
-    return subprocess.run(
-        ["pgrep", "-f", "speak-hud --agent"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode == 0
+    """True only if the agent has proved recently that it is draining the spool.
+
+    The agent touches HEARTBEAT from the same main-thread timer that polls the spool,
+    so a fresh mtime means "alive and not hung", which a process-list match (the old
+    `pgrep -f "speak-hud --agent"`) couldn't say: a wedged agent, or any command line
+    containing that string, passed it, and turns were queued where nobody would read
+    them. It beats every 3s; HEARTBEAT_STALE allows two missed beats plus timer slack
+    before giving up on it. If the agent died inside that window, the turn waits in
+    the spool for the restarted agent (up to Spool.maxAge), as it always has.
+    """
+    try:
+        beat = os.stat(os.path.join(QUEUE_DIR, HEARTBEAT)).st_mtime
+    except OSError:
+        return False    # never started, or not since the spool dir was cleared
+    age = time.time() - beat
+    # A beat from the "future" is a clock set back; the next real beat corrects it.
+    return -HEARTBEAT_STALE < age < HEARTBEAT_STALE
 
 
 def enqueue(text, source, key):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
-    The four fields are the contract with Spool.drain in speak-hud.swift, pinned by
-    tests/SpoolTests.swift: rename one here and that test fails.
+    The fields are the contract with Spool.drain in speak-hud.swift, pinned by
+    tests/SpoolTests.swift: rename one here and that test fails. Changing what they
+    mean means bumping `v` on both sides.
     """
     os.makedirs(QUEUE_DIR, exist_ok=True)
     # Zero-padded nanosecond prefix so a plain filename sort is arrival order; the
@@ -131,7 +148,8 @@ def enqueue(text, source, key):
     tmp = os.path.join(QUEUE_DIR, stem + ".tmp")
     try:
         with open(tmp, "w") as f:
-            json.dump({"text": text, "source": source, "key": key, "created": time.time()}, f)
+            json.dump({"v": SPOOL_VERSION, "text": text, "source": source, "key": key,
+                       "created": time.time()}, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
     except OSError:
         # Don't leave a partial .tmp behind to accumulate; the agent ignores them,
@@ -143,15 +161,39 @@ def enqueue(text, source, key):
         raise
 
 
-def speak_directly(text, source):
-    """No agent to queue behind: read it here, as this hook used to."""
-    hud = os.path.expanduser("~/.claude/bin/speak-hud")
-    if os.path.exists(hud):
-        p = subprocess.Popen([hud, "--source", source], stdin=subprocess.PIPE)
-        p.stdin.write(text.encode("utf-8"))
+def pipe_to(argv, text):
+    """Start argv and hand it `text` on stdin. False if it won't start or stops reading."""
+    try:
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE)
+    except OSError as e:    # missing, not executable, bad #! line
+        print(f"speakhud: could not start {argv[0]} ({e})", file=sys.stderr)
+        return False
+    try:
+        # "replace": a lone surrogate from the transcript shouldn't cost the whole turn.
+        p.stdin.write(text.encode("utf-8", "replace"))
         p.stdin.close()
-    else:
-        subprocess.Popen(["say", text])
+    except OSError as e:    # BrokenPipeError: it exited without reading
+        print(f"speakhud: {argv[0]} stopped reading ({e})", file=sys.stderr)
+        for step in (p.stdin.close, p.kill):
+            try:
+                step()
+            except OSError:
+                pass
+        return False
+    return True
+
+
+def speak_directly(text, source):
+    """No agent to queue behind: read it here, as this hook used to. Never raises.
+
+    `say` gets the text on stdin (`-f -`, per `man say`), never in argv: a turn that
+    starts with "-" would otherwise be parsed as options.
+    """
+    hud = os.path.expanduser("~/.claude/bin/speak-hud")
+    if os.path.exists(hud) and pipe_to([hud, "--source", source], text):
+        return
+    if not pipe_to(["say", "-f", "-"], text):
+        print("speakhud: nothing could speak this turn", file=sys.stderr)
 
 
 def main():

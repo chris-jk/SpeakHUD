@@ -74,6 +74,13 @@ let spoolSuite = Suite("Spool") { t in
         t.expectEqual(status, 0, "python enqueue() ran cleanly (\(err.trimmingCharacters(in: .whitespacesAndNewlines)))")
         t.expect(!fm.fileExists(atPath: home + "/.local"), "nothing was written under HOME")
         t.expectEqual(files(queue).filter { $0.hasSuffix(".tmp") }, [], "the hook leaves no .tmp behind")
+        let versions = files(queue).map { name -> Int? in
+            guard let data = fm.contents(atPath: queue + "/" + name),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return obj["v"] as? Int
+        }
+        t.expectEqual(versions, Array(repeating: Spool.version, count: sent.count),
+                      "every item the hook writes carries v=\(Spool.version), the version drain reads")
         // Age the files, so a hook that stopped writing `created` can't pass on the
         // mtime fallback: that item would now be too old and dropped.
         for name in files(queue) {
@@ -131,6 +138,13 @@ let spoolSuite = Suite("Spool") { t in
             ("06.json", ["text": "hi", "created": "yesterday"], .invalidCreated),
             ("07.json", ["text": "hi", "created": true], .invalidCreated),
             ("08.json", ["text": "hi", "created": fresh - 1000], .tooOld),
+            // A newer hook may have moved or renamed fields: don't guess, drop.
+            ("09.json", ["v": Spool.version + 1, "text": "hi", "created": fresh], .unsupportedVersion),
+            ("10.json", ["v": "1", "text": "hi", "created": fresh], .unsupportedVersion),
+            ("11.json", ["v": true, "text": "hi", "created": fresh], .unsupportedVersion),
+            ("12.json", ["v": 0, "text": "hi", "created": fresh], .unsupportedVersion),
+            // Version is checked first: a v2 item with no "text" is a version drop, not a text one.
+            ("13.json", ["v": 2, "body": "hi", "created": fresh], .unsupportedVersion),
         ]
         for (name, body, _) in cases { write(q, name, body) }
         let batch = Spool.drain(in: q, now: now)
@@ -139,6 +153,20 @@ let spoolSuite = Suite("Spool") { t in
             t.expectEqual(batch.dropped.first { $0.name == name }?.reason, reason, "\(name) dropped as \(reason)")
         }
         t.expectEqual(files(q), [], "dropped items are deleted, not left to wedge the queue")
+        try? fm.removeItem(atPath: q)
+    }
+
+    // -- schema version: missing (legacy) and current are read ---------------------
+    do {
+        let q = tempDir("version")
+        write(q, "1.json", ["text": "legacy, no v", "created": fresh])
+        write(q, "2.json", ["v": Spool.version, "text": "current v", "created": fresh])
+        write(q, "3.json", "{\"v\": 1.0, \"text\": \"v as 1.0\", \"created\": \(fresh)}")
+        let batch = Spool.drain(in: q, now: now)
+        t.expectEqual(batch.items.map(\.text), ["legacy, no v", "current v", "v as 1.0"], "a missing or current v is read")
+        t.expectEqual(batch.dropped, [], "…and nothing is dropped")
+        t.expect(Spool.DropReason.unsupportedVersion.description.contains("v\(Spool.version)"),
+                 "the drop log names the version this agent reads")
         try? fm.removeItem(atPath: q)
     }
 

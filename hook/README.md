@@ -29,7 +29,7 @@ Instead the hook writes one JSON file per finished turn into
 `~/.local/state/speakhud/queue/`:
 
 ```json
-{"text": "…", "source": "SpeakHUD", "key": "<session_id>", "created": 1783642610.69}
+{"v": 1, "text": "…", "source": "SpeakHUD", "key": "<session_id>", "created": 1783642610.69}
 ```
 
 - Files are written as `<name>.tmp` and then `rename`d to `<name>.json`. Rename is atomic
@@ -45,6 +45,11 @@ Instead the hook writes one JSON file per finished turn into
   pending item per key, and two terminals in the same repo are two conversations that
   both deserve to be heard. A file with no `key` gets its own filename as the key, so it
   is never merged with anything.
+- `v` is the schema version. An item with no `v` is read as version 1 (files from
+  before it existed); any other value is dropped (`unsupported schema version`) rather
+  than misread, so a newer hook can't feed an older agent fields it doesn't understand.
+  Bump it on both sides (`SPOOL_VERSION` here, `Spool.version` in the app) when the
+  fields change meaning.
 - `created` is epoch seconds. If it's missing the agent uses the file's modification
   time instead; if it's there but not a number, the item is dropped. Blank `text` is
   dropped too, and so is anything older than 10 minutes. A missing `source` shows as
@@ -61,8 +66,28 @@ Instead the hook writes one JSON file per finished turn into
 The `--agent` process (installed by `build.sh` as a LaunchAgent) watches that directory
 and drains it one item at a time into the single HUD.
 
+## Is the agent there?
+
+The hook queues a turn only if the agent has shown recently that it's draining. The
+agent touches `agent.heartbeat` in the queue directory when it starts and then every 3
+seconds, from the same main-thread timer that polls the queue (App Nap is off for it, and
+it keeps running while a menu is open). The hook treats the agent as alive only if that
+file's modification time is less than 10 seconds old, which allows two missed beats plus
+some timer slack.
+
+The name is deliberately not `.json`, `.tmp` or `.taken`, so the agent's drain and
+recovery never touch it. This replaced `pgrep -f "speak-hud --agent"`, which was also
+true for a hung agent or any unrelated command line containing that string, so turns
+were queued where nothing would read them. If the agent dies within 10 seconds of its
+last beat, a turn can still be queued. It then waits for the restarted agent, which reads
+it if that happens within 10 minutes.
+
 ## Fallback
 
-If no agent is running there's nothing to queue behind, so the hook falls back to
-speaking directly: `~/.claude/bin/speak-hud --source <project>` if that binary exists,
-otherwise plain `say`.
+If the heartbeat is missing or stale there's nothing to queue behind, so the hook falls
+back to speaking directly. It pipes the text to `~/.claude/bin/speak-hud --source
+<project>` if that binary exists. Otherwise, or if that binary won't start or exits
+without reading the text, it pipes the text to `say -f -`. The text always goes in on
+stdin, never as an argument, so a turn that starts with `-` can't be read as an option.
+If nothing can speak, the hook logs `speakhud: …` to stderr and exits normally.
+`tests/HookTests.swift` runs the real hook against a stub `say` to pin this.

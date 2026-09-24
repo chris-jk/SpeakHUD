@@ -54,14 +54,24 @@ struct SpeechItem {
 //
 // The contract with hook/read-summary.py (pinned by tests/SpoolTests.swift, which runs
 // the real Python `enqueue()` against the real `drain`):
+//   v        schema version, optional → legacy (read as 1); anything but 1 → dropped,
+//            so a newer hook's items are never misread by an older agent
 //   text     string, required; blank after trimming → dropped
 //   source   string, optional → "Claude Code"
 //   key      string, optional → the file stem (unique, so that item never coalesces)
 //   created  epoch seconds, optional → the file's mtime (when the hook wrote it);
 //            present but not a number → dropped. Either way older than maxAge → dropped.
 // Every dropped item comes back as a `Drop` with its reason, for the agent to log.
+//
+// Liveness: the agent touches `heartbeatName` in the spool dir at startup and every
+// `heartbeatInterval`; the hook queues only while that mtime is fresh, and otherwise
+// speaks the turn itself (tests/HookTests.swift pins both sides).
 enum Spool {
     static let maxAge: TimeInterval = 600   // a stopped agent shouldn't wake up and read you the backlog
+    static let version = 1                  // the `v` this agent reads
+    /// Deliberately not .json/.tmp/.taken, so drain and recover never touch it.
+    static let heartbeatName = "agent.heartbeat"
+    static let heartbeatInterval: TimeInterval = 3
     /// Points both sides at another queue — the hook reads the same variable. For tests;
     /// set it for one side only and the hook writes where nobody reads.
     static let dirEnv = "SPEAKHUD_QUEUE_DIR"
@@ -77,9 +87,11 @@ enum Spool {
         case invalidCreated   // created present but not a number
         case tooOld           // waited longer than maxAge
         case staleTmp         // a hook died between writing and renaming
+        case unsupportedVersion  // `v` present but not the version this agent reads
 
         var description: String {
             switch self {
+            case .unsupportedVersion: return "unsupported schema version (this agent reads v\(Spool.version)) — update SpeakHUD"
             case .malformed: return "malformed JSON"
             case .emptyText: return "no text"
             case .invalidCreated: return "created is not a number"
@@ -136,6 +148,12 @@ enum Spool {
             guard let data = fm.contents(atPath: taken),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { drop(.malformed); continue }
+            // Before any field is read: a newer schema may have moved them all.
+            if let raw = obj["v"] {
+                guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                      n.doubleValue == Double(version)
+                else { drop(.unsupportedVersion); continue }
+            }
             guard let text = obj["text"] as? String,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { drop(.emptyText); continue }
@@ -160,6 +178,17 @@ enum Spool {
                                           file: taken))
         }
         return batch
+    }
+
+    /// "The agent is alive and draining": touch the heartbeat's mtime. Only its first
+    /// write creates a directory entry; after that it's a pure mtime change, which the
+    /// spool's directory watcher doesn't see, so beating never triggers a drain.
+    @discardableResult
+    static func beat(in dir: String = Spool.dir, now: Date = Date()) -> Bool {
+        let fm = FileManager.default
+        let path = dir + "/" + heartbeatName
+        if !fm.fileExists(atPath: path), !fm.createFile(atPath: path, contents: nil) { return false }
+        return (try? fm.setAttributes([.modificationDate: now], ofItemAtPath: path)) != nil
     }
 
     /// This item will never be spoken again — finished, skipped, stopped, or superseded.
@@ -1677,6 +1706,8 @@ final class Agent {
     let hud = Controller()
     var spoolSource: DispatchSourceFileSystemObject?
     var pollTimer: Timer?
+    var napGuard: NSObjectProtocol?
+    var heartbeatOK = true
     var usr1: DispatchSourceSignal?
 
     /// launchd routes stderr to ~/Library/Logs/speakhud-agent.log (see build.sh).
@@ -1750,10 +1781,30 @@ final class Agent {
             spoolSource = src
         }
         // Safety net: the vnode source goes deaf if the directory is ever replaced.
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        // Also the heartbeat: the hook queues only while it's fresh, so it beats from
+        // this main-thread timer (a hung main thread goes stale) in .common modes (an
+        // open menu mustn't stop it), with App Nap off (an accessory app with no window
+        // gets napped, and its timers stretched past the hook's threshold).
+        napGuard = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep, reason: "spool heartbeat")
+        let timer = Timer(timeInterval: Spool.heartbeatInterval, repeats: true) { [weak self] _ in
+            self?.heartbeat()
             self?.drainSpool()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+        heartbeat()   // alive from the first drain, not 3s later
         drainSpool()
+    }
+
+    private func heartbeat() {
+        let ok = Spool.beat()
+        // Log transitions only: every 3s would drown the log.
+        if ok != heartbeatOK {
+            log(ok ? "spool: heartbeat restored"
+                   : "spool: can't write \(Spool.heartbeatName) in \(Spool.dir) — hooks will speak turns directly")
+        }
+        heartbeatOK = ok
     }
 
     private func drainSpool() {
