@@ -24,7 +24,8 @@ a standalone app.
 - **Pause / Resume anywhere** with a system-wide `⌃⌥P` hotkey.
 - **Shuts up while you talk.** When anything else opens the mic — Claude Code's
   hold-space dictation, a call, system dictation — speech pauses, and picks back up
-  a moment after the mic is released (macOS 14+).
+  a moment after the mic is released (macOS 14+). Want speech during calls? Untick
+  **Pause While Recording** in the menu bar.
 - **Global hotkey to read your highlighted text** from any app (default `⌃⌥S`), with
   play / pause / speed controls in the HUD. The combo is **user-configurable**.
 - **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,
@@ -91,8 +92,15 @@ Set your own combo (one or more of `cmd`/`ctrl`/`opt`/`shift` plus a key):
 /Applications/SpeakHUD.app/Contents/MacOS/speak-hud --set-hotkey "ctrl+opt+r"
 ```
 
-This writes `~/.config/speakhud/config.json` and restarts the agent. Invalid combos
+This writes `~/.config/speakhud/config.json` and restarts the agent, and says which
+happened: restarted, or saved but the agent isn't running (it takes effect when it
+starts). A failed save or restart exits non-zero with the reason. Invalid combos
 (no modifier, unknown key) are rejected and leave the current setting untouched.
+
+If you edit `config.json` by hand and break it (bad JSON, no `"hotkey"`, a combo that
+doesn't parse), SpeakHUD falls back to `⌃⌥S`, logs why, and shows
+**⚠ config.json invalid** in the menu's Global Hotkey submenu. Your file is left alone
+for you to fix.
 
 > **If you pick `⌘⌥S`,** know that macOS's own **Accessibility → Spoken Content → Speak
 > selection** claims that combo by default. Both will then read your selection at once,
@@ -169,7 +177,10 @@ The background agent shows a small **speaker icon** in the menu bar:
 - **Read Claude Code Responses Aloud** — a checkbox that installs/removes the Claude
   Code `Stop` hook for you (see below). If the hook is registered but its script or
   binary is missing or out of date, it shows a dash and "— Repair"; clicking reinstalls.
-- **Global Hotkey** — pick a preset or open the config file.
+- **Pause While Recording** — on by default: speech holds while another app uses the
+  mic. Turning it off releases a hold at once. Shared with the standalone reader.
+- **Global Hotkey** — pick a preset or open the config file (a warning line appears
+  here if the file is invalid).
 - **Grant Accessibility Access…** — shown only until the permission is granted.
 - **SpeakHUD on GitHub** / **Quit**.
 

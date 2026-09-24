@@ -337,6 +337,74 @@ final class MicWatch {
     }
 }
 
+/// Between MicWatch and Playback: whether "someone's recording" should hold speech.
+/// Owns the "Pause While Recording" setting and the release debounce. A hold starts at
+/// once; a release from the mic waits a beat (recorders drop and reopen the mic between
+/// chunks, and you may just be pausing for breath); a release because you switched the
+/// setting off is immediate. `deliver` only ever sees transitions.
+final class MicHold {
+    /// Key in the shared prefs suite, so the agent and the standalone reader agree.
+    static let prefKey = "pauseWhileRecording"
+    static let releaseDelay: TimeInterval = 0.6
+
+    /// On unless you've turned it off.
+    static func storedEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: prefKey) as? Bool ?? true
+    }
+    static func store(_ on: Bool, in defaults: UserDefaults) { defaults.set(on, forKey: prefKey) }
+
+    private(set) var enabled: Bool
+    private(set) var recording = false   // what MicWatch last said, whatever the setting
+    private(set) var holding = false     // what Playback was last told
+    private var cancelRelease: (() -> Void)?
+    private let deliver: (Bool) -> Void
+    private let debounce: (@escaping () -> Void) -> () -> Void
+
+    /// `debounce` runs work after `releaseDelay` and returns its cancel; tests run it by hand.
+    init(enabled: Bool,
+         deliver: @escaping (Bool) -> Void,
+         debounce: @escaping (@escaping () -> Void) -> () -> Void = { work in
+             let item = DispatchWorkItem(block: work)
+             DispatchQueue.main.asyncAfter(deadline: .now() + MicHold.releaseDelay, execute: item)
+             return item.cancel
+         }) {
+        self.enabled = enabled
+        self.deliver = deliver
+        self.debounce = debounce
+    }
+
+    func recordingChanged(_ busy: Bool) {
+        recording = busy
+        guard enabled else { return }
+        if busy { hold() } else if holding, cancelRelease == nil {
+            cancelRelease = debounce { [weak self] in
+                self?.cancelRelease = nil
+                self?.release()
+            }
+        }
+    }
+
+    func setEnabled(_ on: Bool) {
+        guard on != enabled else { return }
+        enabled = on
+        if !on { release() } else if recording { hold() }
+    }
+
+    private func hold() {
+        cancelRelease?(); cancelRelease = nil
+        guard !holding else { return }
+        holding = true
+        deliver(true)
+    }
+
+    private func release() {
+        cancelRelease?(); cancelRelease = nil
+        guard holding else { return }
+        holding = false
+        deliver(false)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Global hotkeys. One Carbon handler for the whole process, dispatching on the
 // hotkey id — installing a handler per feature would fire all of them on any key.
@@ -949,13 +1017,27 @@ final class Controller: NSObject, NSWindowDelegate {
 
     // Mic hold: something else is recording, so we're silent until it stops.
     private var micWatch: AnyObject?
-    private var micRelease: DispatchWorkItem?
+    private var micHold: MicHold!
+
+    /// "Pause While Recording". Off releases any hold now; on while something's
+    /// recording holds now. Persisted in the shared suite.
+    var pauseWhileRecording: Bool {
+        get { micHold.enabled }
+        set {
+            micHold.setEnabled(newValue)
+            MicHold.store(newValue, in: prefs)
+            log("pause while recording: \(newValue ? "on" : "off")")
+        }
+    }
 
     override init() {
         let voice = SpeechVoice()
         playback = Playback(voice: voice, rateIndex: Self.initialRateIndex())
         voice.listener = playback
         super.init()
+        micHold = MicHold(enabled: MicHold.storedEnabled(in: prefs)) { [weak self] busy in
+            self?.playback.micChanged(busy: busy)
+        }
         playback.log = { [weak self] in self?.log($0) }
         playback.onChange = { [weak self] in self?.render($0) }
         playback.onStart = { [weak self] in self?.show($0) }
@@ -1014,15 +1096,8 @@ final class Controller: NSObject, NSWindowDelegate {
         micWatch = MicWatch { [weak self] busy in self?.micChanged(busy) }
     }
 
-    private func micChanged(_ busy: Bool) {
-        micRelease?.cancel()
-        if busy { playback.micChanged(busy: true); return }
-        // Wait a beat before talking again: recorders often drop and reopen the mic
-        // between chunks, and you may just be pausing for breath.
-        let release = DispatchWorkItem { [weak self] in self?.playback.micChanged(busy: false) }
-        micRelease = release
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: release)
-    }
+    /// The setting and the release debounce live in MicHold.
+    private func micChanged(_ busy: Bool) { micHold.recordingChanged(busy) }
 
     // -- rendering ---------------------------------------------------------
 
@@ -1367,22 +1442,126 @@ final class Controller: NSObject, NSWindowDelegate {
 // ---------------------------------------------------------------------------
 
 // Stored at ~/.config/speakhud/config.json so you can set your own combo.
+// Set SPEAKHUD_CONFIG_DIR to point at a different dir (used by tests).
 enum HotkeyConfig {
     static let defaultSpec = "ctrl+opt+s"
-    static var dir: String { NSString(string: "~/.config/speakhud").expandingTildeInPath }
-    static var path: String { dir + "/config.json" }
-    static func load() -> String {
-        if let data = FileManager.default.contents(atPath: path),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let hk = (obj["hotkey"] as? String)?.trimmingCharacters(in: .whitespaces),
-           !hk.isEmpty { return hk }
-        return defaultSpec
+    static let dirEnv = "SPEAKHUD_CONFIG_DIR"
+    static var dir: String {
+        if let d = ProcessInfo.processInfo.environment[dirEnv], !d.isEmpty {
+            return NSString(string: d).expandingTildeInPath
+        }
+        return NSString(string: "~/.config/speakhud").expandingTildeInPath
     }
+    static var path: String { dir + "/config.json" }
+
+    /// The combo to use, and why it isn't yours when the file is broken. A missing file
+    /// is not a problem (you just haven't picked one); anything unusable in a file that
+    /// exists is, because otherwise your edit is silently ignored.
+    struct Loaded: Equatable {
+        let spec: String
+        let problem: String?
+    }
+
+    static func load() -> Loaded {
+        let fallback = { (why: String) in Loaded(spec: defaultSpec, problem: why) }
+        guard FileManager.default.fileExists(atPath: path) else { return Loaded(spec: defaultSpec, problem: nil) }
+        guard let data = FileManager.default.contents(atPath: path) else { return fallback("can't be read") }
+        guard let json = try? JSONSerialization.jsonObject(with: data) else { return fallback("isn't valid JSON") }
+        guard let obj = json as? [String: Any] else { return fallback("isn't a JSON object") }
+        guard let hk = (obj["hotkey"] as? String)?.trimmingCharacters(in: .whitespaces), !hk.isEmpty else {
+            return fallback("has no \"hotkey\" setting")
+        }
+        guard parseHotkey(hk) != nil else {
+            return fallback("hotkey \"\(hk)\" isn't a valid combo (need ≥1 modifier + a key)")
+        }
+        return Loaded(spec: hk, problem: nil)
+    }
+
     @discardableResult
     static func save(_ spec: String) -> Bool {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let json = "{\n  \"hotkey\": \"\(spec)\"\n}\n"
         return (try? json.write(toFile: path, atomically: true, encoding: .utf8)) != nil
+    }
+
+    /// Write the default only if there's no file yet — never over one you're editing,
+    /// broken or not.
+    @discardableResult
+    static func ensureFile() -> Bool {
+        FileManager.default.fileExists(atPath: path) || save(defaultSpec)
+    }
+
+    /// "ctrl+opt+s" → "⌃⌥S", in the order macOS menus draw modifiers.
+    static func label(_ spec: String) -> String {
+        var mods = Set<String>(), key = ""
+        for raw in spec.lowercased().split(separator: "+") {
+            switch raw.trimmingCharacters(in: .whitespaces) {
+            case "cmd", "command", "⌘": mods.insert("⌘")
+            case "ctrl", "control", "⌃": mods.insert("⌃")
+            case "opt", "option", "alt", "⌥": mods.insert("⌥")
+            case "shift", "⇧": mods.insert("⇧")
+            case let k: key = k
+            }
+        }
+        let isFKey = key.count > 1 && key.hasPrefix("f") && key.dropFirst().allSatisfy(\.isNumber)
+        let shown = key.count == 1 || isFKey ? key.uppercased() : key.capitalized
+        return ["⌃", "⌥", "⇧", "⌘"].filter(mods.contains).joined() + shown
+    }
+}
+
+// `--set-hotkey`: save the combo, then restart the agent so it takes effect. Says what
+// actually happened at each step instead of "hotkey set" regardless. The launchctl call
+// is injected so the decision is testable without touching the live LaunchAgent.
+enum SetHotkey {
+    static let agentLabel = "com.chris.speakhud.agent"
+    /// What `launchctl kickstart` said. launchctl exits 113 when the label isn't loaded.
+    struct Kick: Equatable {
+        let status: Int32
+        let output: String
+    }
+    static let notLoadedStatus: Int32 = 113
+
+    struct Outcome: Equatable {
+        let message: String
+        let exitCode: Int32
+    }
+
+    static func run(_ spec: String,
+                    save: (String) -> Bool = { HotkeyConfig.save($0) },
+                    kick: () throws -> Kick = kickAgent) -> Outcome {
+        guard save(spec) else {
+            return Outcome(message: "error: couldn't save \(spec) to \(HotkeyConfig.path) — nothing changed", exitCode: 1)
+        }
+        let result: Kick
+        do { result = try kick() } catch {
+            return Outcome(message: "error: saved \(spec), but couldn't run launchctl to restart the agent: \(error.localizedDescription)",
+                           exitCode: 1)
+        }
+        let said = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch result.status {
+        case 0:
+            return Outcome(message: "hotkey set to \(spec) — agent restarted", exitCode: 0)
+        case notLoadedStatus:
+            return Outcome(message: "hotkey saved as \(spec); agent not running, takes effect when it starts", exitCode: 0)
+        default:
+            return Outcome(message: "error: saved \(spec), but restarting the agent failed (launchctl exit \(result.status))"
+                                    + (said.isEmpty ? "" : ": \(said)"),
+                           exitCode: 1)
+        }
+    }
+
+    /// The real restart. Only `Main` calls this; tests inject their own.
+    static func kickAgent() throws -> Kick {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["kickstart", "-k", "gui/\(getuid())/\(agentLabel)"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return Kick(status: p.terminationStatus, output: String(data: data, encoding: .utf8) ?? "")
     }
 }
 
@@ -1723,7 +1902,12 @@ final class Agent {
     }
 
     func registerReadHotKey() {
-        let spec = HotkeyConfig.load()
+        let loaded = HotkeyConfig.load()
+        if let why = loaded.problem {
+            // Left as is: it's yours to fix, and the menu shows the same warning.
+            log("\(HotkeyConfig.path) \(why) — using \(loaded.spec)")
+        }
+        let spec = loaded.spec
         guard let hk = parseHotkey(spec) else {
             log("invalid hotkey \"\(spec)\" — not registered")
             return
@@ -1816,6 +2000,8 @@ final class MenuController: NSObject, NSMenuDelegate {
     let hotkeyPresets = [("⌃⌥S", "ctrl+opt+s"), ("⌃⌥R", "ctrl+opt+r"),
                          ("⌃⌥Space", "ctrl+opt+space"), ("⌘⌥S", "cmd+opt+s")]
     var hotkeyItems: [NSMenuItem] = []
+    var hotkeyWarning: NSMenuItem!
+    var micItem: NSMenuItem!
 
     init(_ agent: Agent) {
         self.agent = agent
@@ -1829,6 +2015,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     private func build() {
         let menu = NSMenu()
         menu.delegate = self
+        menu.autoenablesItems = false   // so a disabled Pause While Recording (pre-14) stays disabled
         // First item, because when the HUD is hidden this is what you came here for.
         hudItem = item("Show HUD", #selector(toggleHUD))
         hudItem.keyEquivalent = "h"
@@ -1840,7 +2027,21 @@ final class MenuController: NSObject, NSMenuDelegate {
         claudeItem = item("Read Claude Code Responses Aloud", #selector(toggleClaude))
         menu.addItem(claudeItem)
 
+        micItem = item("Pause While Recording", #selector(toggleMicHold))
+        if #available(macOS 14.0, *) {
+            micItem.toolTip = "Hold speech while another app uses the microphone"
+        } else {
+            micItem.isEnabled = false
+            micItem.toolTip = "Needs macOS 14 or later"
+        }
+        menu.addItem(micItem)
+
         let hk = NSMenu()
+        hk.autoenablesItems = false   // keep the warning line disabled
+        // Only shown while config.json is broken; the tooltip says how.
+        hotkeyWarning = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        hotkeyWarning.isEnabled = false
+        hk.addItem(hotkeyWarning)
         for (label, spec) in hotkeyPresets {
             let it = item(label, #selector(pickHotkey(_:))); it.representedObject = spec
             hk.addItem(it); hotkeyItems.append(it)
@@ -1874,8 +2075,12 @@ final class MenuController: NSObject, NSMenuDelegate {
         refreshVisibility()
         refreshHook()
         axItem.isHidden = Selection.isTrusted
-        let current = HotkeyConfig.load()
-        for it in hotkeyItems { it.state = (it.representedObject as? String == current) ? .on : .off }
+        let loaded = HotkeyConfig.load()
+        for it in hotkeyItems { it.state = (it.representedObject as? String == loaded.spec) ? .on : .off }
+        hotkeyWarning.isHidden = loaded.problem == nil
+        hotkeyWarning.title = "⚠ config.json invalid — using \(HotkeyConfig.label(loaded.spec))"
+        hotkeyWarning.toolTip = loaded.problem.map { "\(HotkeyConfig.path) \($0)" }
+        micItem.state = agent.hud.pauseWhileRecording ? .on : .off
     }
 
     private func refreshVisibility() {
@@ -1930,8 +2135,12 @@ final class MenuController: NSObject, NSMenuDelegate {
         agent.registerReadHotKey()   // re-register live; no restart needed
         refresh()
     }
+    @objc private func toggleMicHold() {
+        agent.hud.pauseWhileRecording.toggle()
+        refresh()
+    }
     @objc private func openHotkeyConfig() {
-        HotkeyConfig.save(HotkeyConfig.load())   // make sure the file exists first
+        HotkeyConfig.ensureFile()   // create it if missing; never overwrite a broken one you're fixing
         NSWorkspace.shared.open(URL(fileURLWithPath: HotkeyConfig.path))
     }
     @objc private func openGitHub() {
@@ -1958,15 +2167,13 @@ enum Main {
                     "usage: speak-hud --set-hotkey \"ctrl+opt+s\"  (need ≥1 modifier + a key)\n".data(using: .utf8)!)
                 exit(2)
             }
-            let spec = argv[i + 1]
-            HotkeyConfig.save(spec)
-            // Restart the agent so it picks up the new combo (no-op if it isn't installed).
-            let kick = Process()
-            kick.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            kick.arguments = ["kickstart", "-k", "gui/\(getuid())/com.chris.speakhud.agent"]
-            try? kick.run(); kick.waitUntilExit()
-            print("hotkey set to \(spec)")
-            exit(0)
+            let outcome = SetHotkey.run(argv[i + 1])
+            if outcome.exitCode == 0 {
+                print(outcome.message)
+            } else {
+                FileHandle.standardError.write((outcome.message + "\n").data(using: .utf8)!)
+            }
+            exit(outcome.exitCode)
         }
 
         if argv.contains("--setup-claude") || argv.contains("--remove-claude") {
