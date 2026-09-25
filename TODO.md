@@ -11,24 +11,25 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - Agent liveness is a heartbeat: the agent touches `agent.heartbeat` in the spool every 3s; the hook queues only if it's <10s old (waiting up to 4s for a fresh one, e.g. after wake), else speaks directly (HUD binary, then `say -f -`). tests/HookTests.swift runs the real hook against a stub `say`.
 
 ## ⏭️ Next session — start here
-- (nothing open that an agent can do; see 🙋 Owner only)
+- (nothing open)
 
 ## 🚨 Blocking
 - (none)
 
 ## 🙋 Owner only
-- [ ] Delete the merged branches? Local `hud-visibility-and-readability`, `queue-speech-and-read-selection`, and `origin/hud-visibility-and-readability`
+- (none)
 
 ## 🟡 Next up
 - (none)
 
 ## 🧊 Later
-- [ ] The ⚠ "config.json invalid" menu line is unit-tested but not yet seen live; break config.json once and look
+- (none)
 
 ## ⏳ Waiting on others
 - (none)
 
 ## ✅ Recently shipped (trim as it ages)
+- 2026-09-24 — Deleted merged branches; checked the ⚠ config.json menu line live
 - 2026-09-24 — Review fixes: HUD that dies at launch falls back to `say`; heartbeat recreates a removed spool dir; hook waits up to 4s for a fresh beat; build.sh refreshes the hook after the new agent is up; ⚠ line names the live hotkey
 - 2026-09-24 — Settings fixes: `--set-hotkey` reports save + restart truthfully (not-running agent is a non-error); invalid config.json is logged and flagged in the menu, file left alone; Pause While Recording toggle
 - 2026-09-24 — Hook hardening: heartbeat replaces `pgrep` for agent liveness; direct fallback pipes text to `say -f -` and falls back past a broken HUD binary without raising; spool schema version `v`
