@@ -2,12 +2,14 @@
 
 Running tab. Current state at top, then next up, waiting-on, recently shipped. Prune every session.
 
-## Where things stand (2026-09-24)
-- main pushed; installed build matches it (build.sh run 2026-09-24). LaunchAgent running; Claude Code hook `installed`.
-- Tests: `./tests/run.sh`, 283 checks, all passing. No CI; run them before committing.
+## Where things stand (2026-10-01)
+- Branch `clickable-hud` (not pushed, not merged) holds click-to-terminal + clickable text; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
+- Tests: `./tests/run.sh`, 389 checks, all passing. No CI; run them before committing.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
 - Mic hold: speech pauses while any other process records (macOS 14+), resumes 0.6s after release. Menu toggle **Pause While Recording** (shared prefs, on by default) turns it off.
 - Spool contract (hook ↔ agent) pinned by a test that runs the real Python `enqueue()`; items carry `v: 1`, other versions are dropped with a logged reason.
+- Click-to-terminal: the hook writes `origin` (TERM_PROGRAM, iTerm2 session UUID, tty, host app pid) into each spool item; clicking the HUD's source pill runs an AppleScript that selects that iTerm2 pane / Terminal.app tab (switching desktops), else activates the app. Pill clicks are caught in `HUDPanel.sendEvent` because the pill sits under the transparent title bar. Needs the `apple-events` entitlement (build.sh) and the Automation grant for iTerm2 (already given).
+- Clickable text: the hook marks inline-code commands and paths (plus bare existing `/…`, `~/…` paths) as `links` + `cwd` in the spool item; the HUD makes them links. Folder → shown selected in its parent; file → default app (Finder if that app would run it); gone → nearest folder; command → new iTerm2 window in cwd, typed with `newline no`, never run. Clicked live: reveal and iTerm load both logged OK.
 - Agent liveness is a heartbeat: the agent touches `agent.heartbeat` in the spool every 3s; the hook queues only if it's <10s old (waiting up to 4s for a fresh one, e.g. after wake), else speaks directly (HUD binary, then `say -f -`). tests/HookTests.swift runs the real hook against a stub `say`.
 
 ## ⏭️ Next session — start here
@@ -20,7 +22,9 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## 🟡 Next up
-- (none)
+- [ ] Fenced ```bash blocks are still dropped from the HUD, so only inline-code commands are clickable (in progress)
+- [ ] Merge `clickable-hud` into main and push
+- [ ] Terminal.app path is untested live (no Terminal windows open); iTerm2 verified
 
 ## 🧊 Later
 - (none)
@@ -29,6 +33,8 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## ✅ Recently shipped (trim as it ages)
+- 2026-10-01 — Paths, commands and URLs in the HUD text are clickable: folder shown in its parent, file opens, command typed into a new iTerm2 window (never run)
+- 2026-10-01 — Click the source pill to jump to the terminal that's talking (iTerm2 pane / Terminal.app tab, across desktops); hotkey reads go back to their app
 - 2026-09-24 — Deleted merged branches; checked the ⚠ config.json menu line live
 - 2026-09-24 — Review fixes: HUD that dies at launch falls back to `say`; heartbeat recreates a removed spool dir; hook waits up to 4s for a fresh beat; build.sh refreshes the hook after the new agent is up; ⚠ line names the live hotkey
 - 2026-09-24 — Settings fixes: `--set-hotkey` reports save + restart truthfully (not-running agent is a non-error); invalid config.json is logged and flagged in the menu, file left alone; Pause While Recording toggle

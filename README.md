@@ -52,6 +52,17 @@ its turn, and the HUD shows what's behind it:
   color every time (a stable hash of the name, not Swift's per-process `hashValue`),
   so four terminals become four colors you recognize rather than four names you read.
   The `next:` line colors each waiting project the same way.
+- **Click the pill to go to that terminal.** A `↗` after the name means SpeakHUD knows
+  where it came from: clicking switches to that iTerm2 pane or Terminal.app tab, on
+  whatever desktop it's on. Other terminals (VS Code, Ghostty, …) get their app brought
+  forward; a hotkey read goes back to the app you read it from. The first click asks
+  for permission to control iTerm2 (System Settings › Privacy & Security › Automation).
+- **Paths, commands and URLs in the text are links.** A folder is shown selected in the
+  folder above it; a file opens in its default app (shown in Finder instead if that app
+  would run it, e.g. a script); a path that's gone opens the nearest folder still there.
+  A command (inline code whose first word is on Claude's PATH, `./script`, or `! cmd`)
+  is typed into a new iTerm2 window in the turn's directory and left there — never run.
+  URLs open in your browser. Relative paths resolve against the turn's directory.
 - **Claude Code turns queue.** Each finished turn is written to a spool directory
   (`~/.local/state/speakhud/queue/`) and drained one at a time by the background agent.
 - **Newest per session wins.** If one terminal finishes two turns while you're still

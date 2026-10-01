@@ -150,6 +150,20 @@ let hookSuite = Suite("Hook") { t in
         sb.cleanup()
     }
 
+    // -- the direct path passes the origin to the HUD -------------------------------
+    do {
+        let sb = Sandbox("hud-origin")
+        sb.stub(sb.hud, name: "hud")
+        let code = "hook.speak_directly('Hi.', 'proj', {'term': 'iTerm.app', 'tty': '/dev/ttys004'})"
+        clean(sb.run(code), "HUD with origin")
+        t.expect(sb.waitFor("hud"), "the HUD binary is run")
+        let args = sb.args("hud")
+        t.expectEqual(Array(args.prefix(3)), ["--source", "proj", "--origin"], "HUD gets --origin after --source")
+        t.expectEqual(args.count == 4 ? Origin(jsonString: args[3]) : nil,
+                      Origin(term: "iTerm.app", tty: "/dev/ttys004"), "…as JSON the HUD parses")
+        sb.cleanup()
+    }
+
     // -- a HUD binary that can't launch falls back to say --------------------------
     do {
         let sb = Sandbox("hud-noexec")
@@ -243,6 +257,55 @@ let hookSuite = Suite("Hook") { t in
         Spool.recover(in: sb.queue)
         t.expect(batch.items.isEmpty && batch.dropped.isEmpty, "drain ignores the heartbeat")
         t.expect(fm.fileExists(atPath: beat), "drain and recover leave the heartbeat alone")
+        sb.cleanup()
+    }
+
+    // -- origin: where the turn came from ------------------------------------------
+    do {
+        let sb = Sandbox("origin")
+        // A table shaped like real `ps -axo pid=,ppid=,tty=,comm=` output: a Claude in
+        // VS Code's terminal, under a nested helper .app. Spaces in comm are kept.
+        let ps = """
+          1     0 ??       /sbin/launchd
+        500     1 ??       /Applications/Visual Studio Code.app/Contents/MacOS/Electron
+        510   500 ??       /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper
+        520   510 ttys007  -zsh
+        530   520 ttys007  claude
+        540   530 ??       /bin/sh
+        550   540 ??       python3
+        """
+        let code = """
+        import sys, json
+        print(json.dumps([hook.ancestry(sys.argv[2], 550), hook.ancestry(sys.argv[2], 9),
+                          hook.ancestry("garbage\\n1 2", 550)]), file=sys.stderr)
+        """
+        let out = sb.run(code, args: [ps]).err.trimmingCharacters(in: .whitespacesAndNewlines)
+        t.expectEqual(out, #"[["/dev/ttys007", 500], [null, null], [null, null]]"#,
+                      "ancestry finds the first tty and the outermost .app; unknown pids and junk give nothing")
+
+        let env = "import os, sys, json\n"
+        let iterm = sb.run(env + """
+        os.environ.update(TERM_PROGRAM="iTerm.app", ITERM_SESSION_ID="w4t0p0:41e78242-1097-4ff8-beff-75dd1d8cc4aa")
+        print(json.dumps(hook.origin()), file=sys.stderr)
+        """).err
+        let o = Origin(jsonString: iterm)
+        t.expectEqual(o?.term, "iTerm.app", "origin() records TERM_PROGRAM")
+        t.expectEqual(o?.session, "41E78242-1097-4FF8-BEFF-75DD1D8CC4AA", "…and the iTerm2 session UUID, upper-cased")
+        let bare = sb.run(env + """
+        os.environ.pop("TERM_PROGRAM", None); os.environ["ITERM_SESSION_ID"] = "not-a-session"
+        o = hook.origin(); print(json.dumps([o.get("term"), o.get("session")]), file=sys.stderr)
+        """).err.trimmingCharacters(in: .whitespacesAndNewlines)
+        t.expectEqual(bare, "[null, null]", "no TERM_PROGRAM and a junk session id leave both out")
+
+        // Real producer, real consumer: the origin survives the spool.
+        clean(sb.run("hook.enqueue('Hi.', 'proj', 'k', {'term': 'Apple_Terminal', 'tty': '/dev/ttys009', 'app_pid': 321})"),
+              "enqueue with origin")
+        let batch = Spool.drain(in: sb.queue)
+        t.expectEqual(batch.items.first?.origin, Origin(term: "Apple_Terminal", tty: "/dev/ttys009", appPID: 321),
+                      "the origin the hook writes is the origin the agent reads")
+        clean(sb.run("hook.enqueue('Hi.', 'proj', 'k')"), "enqueue without origin")
+        let plain = Spool.drain(in: sb.queue)
+        t.expect(plain.items.count == 1 && plain.items[0].origin == nil, "no origin: the item is still read, with none")
         sb.cleanup()
     }
 

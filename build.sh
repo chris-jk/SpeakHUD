@@ -49,10 +49,24 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSUIElement</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Clicking a project name in the HUD switches to the terminal it came from.</string>
 </dict>
 </plist>
 PLIST
 printf 'APPL????' > "$STAGE/Contents/PkgInfo"
+
+# The hardened runtime blocks Apple Events without this, and clicking the source pill
+# asks iTerm2 / Terminal.app for the pane by AppleScript.
+ENTITLEMENTS="$(dirname "$STAGE")/entitlements.plist"
+cat > "$ENTITLEMENTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>
+PLIST
 
 echo "== Code signing =="
 # Prefer a stable signing identity. macOS keys the Accessibility (TCC) grant to the
@@ -69,10 +83,10 @@ if [ -z "$SIGN_ID" ]; then
   fi
 fi
 if [ -n "$SIGN_ID" ]; then
-  codesign --force --options runtime --sign "$SIGN_ID" "$STAGE"
+  codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$STAGE"
   echo "  signed as ${SIGN_NAME:-$SIGN_ID}"
 else
-  codesign --force --sign - "$STAGE"
+  codesign --force --entitlements "$ENTITLEMENTS" --sign - "$STAGE"
   echo "  ad-hoc signed (no Developer ID Application identity found)"
   echo "  NOTE: macOS will drop SpeakHUD's Accessibility grant on every rebuild."
 fi

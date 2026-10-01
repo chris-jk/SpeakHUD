@@ -16,7 +16,7 @@ func resolveText(_ args: [String]) -> String {
     var i = 1
     while i < args.count {
         let a = args[i]
-        if a == "--source" { i += 2; continue }   // flag + its value
+        if a == "--source" || a == "--origin" { i += 2; continue }   // flag + its value
         if a.hasPrefix("--") { i += 1; continue }
         if !a.isEmpty { return a }
         i += 1
@@ -45,6 +45,322 @@ struct SpeechItem {
     /// spoken, so an agent restart can't swallow a queue. Nil for hotkey reads and the
     /// standalone reader, which have nothing on disk to recover.
     var file: String? = nil
+    /// Where it came from, for clicking the source pill to go back there. Nil when unknown.
+    var origin: Origin? = nil
+    /// Paths and commands in `text` to make clickable. Only the hook finds these.
+    var links: [TextLink] = []
+    /// The directory the turn ran in, where a clicked command is typed. Nil when unknown.
+    var cwd: String? = nil
+}
+
+/// Something in an item's text to click: a file or folder to open, or a command to
+/// type into a terminal and leave there, unrun. The hook finds them, since it has
+/// Claude's PATH and working directory; URLs the HUD finds itself.
+struct TextLink: Equatable {
+    enum Action: Equatable { case open(String), load(String) }
+    let range: NSRange
+    let action: Action
+
+    /// From the spool's `links`, against the text they point into. An entry that
+    /// doesn't parse, doesn't fit the text, or overlaps an earlier one is left out.
+    static func parse(_ json: Any?, in text: String) -> [TextLink] {
+        guard let list = json as? [Any] else { return [] }
+        let length = (text as NSString).length
+        func count(_ raw: Any?) -> Int? {
+            guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                  n.doubleValue >= 0, n.doubleValue < Double(Int32.max),
+                  n.doubleValue == n.doubleValue.rounded() else { return nil }
+            return n.intValue
+        }
+        var out: [TextLink] = []
+        for case let o as [String: Any] in list {
+            guard let at = count(o["at"]), let len = count(o["len"]), len > 0, at + len <= length
+            else { continue }
+            let action: Action
+            if let path = absolutePath(o["path"]) { action = .open(path) }
+            else if let cmd = o["run"] as? String, LoadCommand.isLoadable(cmd) { action = .load(cmd) }
+            else { continue }
+            let range = NSRange(location: at, length: len)
+            if out.contains(where: { NSIntersectionRange($0.range, range).length > 0 }) { continue }
+            out.append(TextLink(range: range, action: action))
+        }
+        return out
+    }
+
+    /// An absolute path, one line, of sane length — or nil.
+    static func absolutePath(_ raw: Any?) -> String? {
+        guard let p = raw as? String, p.hasPrefix("/"), LoadCommand.isLoadable(p) else { return nil }
+        return p
+    }
+}
+
+/// The terminal (or app) an item came from. The hook fills it in from Claude's
+/// environment and process tree; hotkey reads record the frontmost app. Every field is
+/// validated on the way in, because session and tty end up inside an AppleScript.
+struct Origin: Equatable {
+    var term: String? = nil     // TERM_PROGRAM: "iTerm.app", "Apple_Terminal", "vscode", …
+    var session: String? = nil  // iTerm2 session id (the UUID in ITERM_SESSION_ID)
+    var tty: String? = nil      // "/dev/ttys002"
+    var appPID: pid_t? = nil    // the GUI app hosting the terminal
+
+    init(term: String? = nil, session: String? = nil, tty: String? = nil, appPID: pid_t? = nil) {
+        self.term = term; self.session = session; self.tty = tty; self.appPID = appPID
+    }
+
+    /// From the spool's `origin` object, or `--origin` JSON. A field that doesn't look
+    /// right is left out rather than trusted; nothing usable at all is nil.
+    init?(json: Any?) {
+        guard let o = json as? [String: Any] else { return nil }
+        if let t = o["term"] as? String, !t.isEmpty, t.count <= 64 { term = t }
+        if let s = o["session"] as? String,
+           s.range(of: #"^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"#, options: .regularExpression) != nil {
+            session = s
+        }
+        if let t = o["tty"] as? String,
+           t.range(of: #"^/dev/ttys[0-9]{1,5}$"#, options: .regularExpression) != nil {
+            tty = t
+        }
+        if let n = o["app_pid"] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+           n.doubleValue > 1, n.doubleValue < Double(Int32.max), n.doubleValue == n.doubleValue.rounded() {
+            appPID = pid_t(n.int32Value)
+        }
+        if session == nil, tty == nil, appPID == nil { return nil }
+    }
+
+    init?(jsonString: String) {
+        guard let data = jsonString.data(using: .utf8) else { return nil }
+        self.init(json: try? JSONSerialization.jsonObject(with: data))
+    }
+}
+
+// Clicking the source pill: bring the terminal that's talking to the front, on
+// whichever desktop it's on. iTerm2 and Terminal.app are asked by AppleScript for the
+// exact pane or tab; anything else gets its app activated.
+enum Reveal {
+    static let iTerm = "com.googlecode.iterm2"
+    static let terminal = "com.apple.Terminal"
+
+    /// The AppleScript that selects the pane `origin` names, and the app it talks to.
+    /// Nil when it can't name one. Only validated ids and ttys are ever interpolated.
+    static func script(for origin: Origin) -> (bundleID: String, source: String)? {
+        let term = origin.term ?? ""
+        if term == "iTerm.app" || (term.isEmpty && origin.session != nil) {
+            let test: String
+            if let s = origin.session { test = "(id of s) is \"\(s)\"" }
+            else if let t = origin.tty { test = "(tty of s) is \"\(t)\"" }
+            else { return nil }
+            // `select` on the window makes it key, which is what moves to its desktop
+            // once the app activates.
+            return (iTerm, """
+            tell application id "\(iTerm)"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        repeat with s in sessions of t
+                            if \(test) then
+                                select w
+                                select t
+                                select s
+                                activate
+                                return "ok"
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+            return "missing"
+            """)
+        }
+        if term == "Apple_Terminal", let tty = origin.tty {
+            return (terminal, """
+            tell application id "\(terminal)"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if (tty of t) is "\(tty)" then
+                            set selected of t to true
+                            set index of w to 1
+                            activate
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            return "missing"
+            """)
+        }
+        return nil
+    }
+
+    enum Outcome: Equatable, CustomStringConvertible {
+        case pane          // the exact pane or tab
+        case app           // only its app
+        case gone          // the terminal or app has since closed
+        case denied        // Automation permission refused
+        case failed(String)
+
+        var description: String {
+            switch self {
+            case .pane: return "went to its terminal"
+            case .app: return "activated its app"
+            case .gone: return "its terminal is gone"
+            case .denied: return "not allowed to control the terminal — grant it in System Settings › Privacy & Security › Automation › SpeakHUD"
+            case .failed(let why): return "failed: \(why)"
+            }
+        }
+    }
+
+    static func go(_ origin: Origin) -> Outcome {
+        if let (bundleID, source) = script(for: origin) {
+            // `tell application` would launch a terminal that's been quit. Don't.
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+                if #available(macOS 14.0, *) { NSApp.yieldActivation(to: app) }
+                var err: NSDictionary?
+                let result = NSAppleScript(source: source)?.executeAndReturnError(&err)
+                if let err = err {
+                    let code = err[NSAppleScript.errorNumber] as? Int ?? 0
+                    if code == -1743 { return .denied }   // errAEEventNotPermitted
+                    let msg = err[NSAppleScript.errorMessage] as? String ?? "AppleScript error \(code)"
+                    return .failed(msg)
+                }
+                if result?.stringValue == "ok" {
+                    app.activate(options: [])   // belt and braces: the script's own activate
+                    return .pane                 //   can lose out to activation rules on macOS 14+
+                }
+                // Pane closed; fall through to whatever app is left.
+            }
+        }
+        if let pid = origin.appPID, let app = NSRunningApplication(processIdentifier: pid),
+           !app.isTerminated, app.activationPolicy == .regular {
+            if #available(macOS 14.0, *) { NSApp.yieldActivation(to: app) }
+            return app.activate(options: []) ? .app : .failed("activate refused")
+        }
+        return .gone
+    }
+}
+
+// Clicking a path in the transcript. A folder is shown selected in the folder above it,
+// so you see where it lives and can still click in. A file opens in its default app —
+// unless that app would run it rather than show it (a script or bare executable opens
+// in Terminal and executes), in which case Finder shows it instead. A path that's gone
+// opens the nearest folder above it that's still there.
+enum OpenPath {
+    enum Plan: Equatable { case open(String), reveal(String) }
+
+    /// Default apps that execute what they're handed.
+    static let runners: Set<String> = [Reveal.terminal, Reveal.iTerm, "org.python.PythonLauncher"]
+
+    static func plan(_ path: String, defaultApp: (URL) -> String? = OpenPath.defaultApp) -> Plan {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        var p = (path as NSString).standardizingPath
+        if fm.fileExists(atPath: p, isDirectory: &isDir) {
+            if isDir.boolValue { return .reveal(p) }
+            // No default app at all would put up a "choose an app" dialog; Finder is kinder.
+            guard let app = defaultApp(URL(fileURLWithPath: p)), !runners.contains(app) else { return .reveal(p) }
+            return .open(p)
+        }
+        while p != "/" {
+            p = (p as NSString).deletingLastPathComponent
+            if fm.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue { return .open(p) }
+        }
+        return .open("/")
+    }
+
+    static func defaultApp(_ url: URL) -> String? {
+        NSWorkspace.shared.urlForApplication(toOpen: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
+    }
+
+    @discardableResult
+    static func go(_ path: String) -> Plan {
+        let plan = plan(path)
+        switch plan {
+        case .open(let p): NSWorkspace.shared.open(URL(fileURLWithPath: p))
+        case .reveal(let p): NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+        }
+        return plan
+    }
+}
+
+// Clicking a command in the transcript: a new iTerm2 window opens in the turn's working
+// directory with the command typed at the prompt, waiting for Return. `write text …
+// newline no` types without pressing it. Without iTerm2 the command goes on the
+// clipboard and Terminal opens there instead: Terminal's `do script` can only run things.
+enum LoadCommand {
+    /// One line with nothing a terminal would take as a keypress of its own — a newline
+    /// would run it, an escape could do anything.
+    static func isLoadable(_ s: String) -> Bool {
+        !s.trimmingCharacters(in: .whitespaces).isEmpty && s.utf16.count <= 1000
+            && !s.unicodeScalars.contains { $0.value < 0x20 || (0x7F...0x9F).contains($0.value) }
+    }
+
+    /// An AppleScript string literal of `s`, which must already be isLoadable.
+    static func literal(_ s: String) -> String {
+        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    static func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    static func script(_ command: String, cwd: String?) -> String? {
+        guard isLoadable(command) else { return nil }
+        var cd = ""
+        if let cwd = cwd, isLoadable(cwd) {
+            cd = "write text \(literal("cd " + shellQuote(cwd) + " && clear"))"
+        }
+        return """
+        tell application id "\(Reveal.iTerm)"
+            activate
+            set w to (create window with default profile)
+            tell current session of w
+                \(cd)
+                write text \(literal(command)) newline no
+            end tell
+        end tell
+        """
+    }
+
+    enum Outcome: Equatable, CustomStringConvertible {
+        case loaded        // typed into a new iTerm2 window
+        case copied        // no iTerm2: on the clipboard, Terminal opened
+        case denied
+        case failed(String)
+
+        var description: String {
+            switch self {
+            case .loaded: return "typed into a new iTerm2 window"
+            case .copied: return "copied, Terminal opened (no iTerm2)"
+            case .denied: return "not allowed to control iTerm2 — grant it in System Settings › Privacy & Security › Automation › SpeakHUD"
+            case .failed(let why): return "failed: \(why)"
+            }
+        }
+    }
+
+    static func go(_ command: String, cwd: String?) -> Outcome {
+        var isDir: ObjCBool = false
+        let dir = cwd.flatMap { FileManager.default.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue ? $0 : nil }
+        let ws = NSWorkspace.shared
+        if ws.urlForApplication(withBundleIdentifier: Reveal.iTerm) != nil {
+            guard let source = script(command, cwd: dir) else { return .failed("not a single line") }
+            if #available(macOS 14.0, *),
+               let app = NSRunningApplication.runningApplications(withBundleIdentifier: Reveal.iTerm).first {
+                NSApp.yieldActivation(to: app)
+            }
+            var err: NSDictionary?
+            NSAppleScript(source: source)?.executeAndReturnError(&err)
+            if let err = err {
+                let code = err[NSAppleScript.errorNumber] as? Int ?? 0
+                if code == -1743 { return .denied }   // errAEEventNotPermitted
+                return .failed(err[NSAppleScript.errorMessage] as? String ?? "AppleScript error \(code)")
+            }
+            return .loaded
+        }
+        guard isLoadable(command) else { return .failed("not a single line") }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        if let terminal = ws.urlForApplication(withBundleIdentifier: Reveal.terminal) {
+            ws.open([URL(fileURLWithPath: dir ?? NSHomeDirectory())], withApplicationAt: terminal,
+                    configuration: NSWorkspace.OpenConfiguration())
+        }
+        return .copied
+    }
 }
 
 // Claude Code turns arrive as files here rather than as processes, so a finished
@@ -61,6 +377,12 @@ struct SpeechItem {
 //   key      string, optional → the file stem (unique, so that item never coalesces)
 //   created  epoch seconds, optional → the file's mtime (when the hook wrote it);
 //            present but not a number → dropped. Either way older than maxAge → dropped.
+//   origin   object, optional: {term, session, tty, app_pid}, where the turn came from.
+//            Unusable fields are ignored, never a reason to drop the item.
+//   links    array, optional: [{at, len, path} | {at, len, run}], UTF-16 ranges of `text`
+//            to click — a path to open, a command to type into a terminal. Entries
+//            that don't fit are ignored (TextLink.parse).
+//   cwd      string, optional: the turn's working directory, where commands are typed.
 // Every dropped item comes back as a `Drop` with its reason, for the agent to log.
 //
 // Liveness: the agent touches `heartbeatName` in the spool dir at startup and every
@@ -175,7 +497,10 @@ enum Spool {
                                           source: source.isEmpty ? "Claude Code" : source,
                                           key: key.isEmpty ? stem : key,
                                           created: created,
-                                          file: taken))
+                                          file: taken,
+                                          origin: Origin(json: obj["origin"]),
+                                          links: TextLink.parse(obj["links"], in: text),
+                                          cwd: TextLink.absolutePath(obj["cwd"])))
         }
         return batch
     }
@@ -507,10 +832,21 @@ enum Accent {
     }
 }
 
-/// A colored pill naming whoever is speaking.
+/// A colored pill naming whoever is speaking. When the item knows where it came
+/// from, the pill is a link: an arrow, a hand cursor, and a click goes there.
 final class SourceBadge: NSView {
     var text = "" { didSet { needsDisplay = true } }
     var accent: NSColor = .systemBlue { didSet { needsDisplay = true } }
+    var isLink = false {
+        didSet {
+            needsDisplay = true
+            toolTip = isLink ? "Go to this terminal" : nil
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    var onClick: () -> Void = {}
+
+    private static let arrow = " ↗"
 
     private static let dot: CGFloat = 7
     private static let padX: CGFloat = 11
@@ -526,8 +862,10 @@ final class SourceBadge: NSView {
                 .paragraphStyle: p]
     }
 
+    private var label: String { isLink ? text + Self.arrow : text }
+
     override var intrinsicContentSize: NSSize {
-        let w = (text as NSString).size(withAttributes: textAttrs).width
+        let w = (label as NSString).size(withAttributes: textAttrs).width
         return NSSize(width: min(ceil(w) + Self.padX * 2 + Self.dot + Self.gap, Self.maxWidth),
                       height: Self.height)
     }
@@ -544,11 +882,18 @@ final class SourceBadge: NSView {
                                     width: Self.dot, height: Self.dot)).fill()
 
         let attrs = textAttrs
-        let s = text as NSString
+        let s = label as NSString
         let th = s.size(withAttributes: attrs).height
         let x = Self.padX + Self.dot + Self.gap
         s.draw(in: NSRect(x: x, y: (r.height - th) / 2, width: r.width - x - Self.padX, height: th),
                withAttributes: attrs)
+    }
+
+    override func resetCursorRects() { if isLink { addCursorRect(bounds, cursor: .pointingHand) } }
+
+    /// Whether a click at this window location lands on a live link.
+    func takesClick(at locationInWindow: NSPoint) -> Bool {
+        isLink && !isHiddenOrHasHiddenAncestor && bounds.contains(convert(locationInWindow, from: nil))
     }
 }
 
@@ -565,12 +910,24 @@ final class HUDPanel: NSPanel {
     /// did nothing. Clicking the HUD is an unambiguous "I want to use this", so take
     /// focus at that point, and only then.
     override func sendEvent(_ event: NSEvent) {
+        // The pill sits under the transparent title bar, which takes clicks there as
+        // the start of a drag, and the first click on an inactive panel only focuses
+        // it. Either way the pill itself would never see the click, so catch it here.
+        if event.type == .leftMouseDown, let link = link, link.takesClick(at: event.locationInWindow) {
+            // Active, so this app can hand activation on to the terminal (macOS 14+).
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            DispatchQueue.main.async { link.onClick() }
+            return
+        }
         if event.type == .leftMouseDown, !NSApp.isActive {
             focusDonor = NSWorkspace.shared.frontmostApplication
             NSApp.activate(ignoringOtherApps: true)
         }
         super.sendEvent(event)
     }
+
+    /// The source pill, whose clicks are routed here rather than by hit-testing.
+    weak var link: SourceBadge?
 
     /// Whoever we took focus from. NSApp.deactivate() alone just leaves this app
     /// frontmost with no windows, so the app has to be reactivated by name.
@@ -1010,7 +1367,7 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
 // The HUD: renders Playback's state and wires the buttons, hotkeys and mic to it.
 // ---------------------------------------------------------------------------
 
-final class Controller: NSObject, NSWindowDelegate {
+final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     let playback: Playback
     var queue: [SpeechItem] { playback.queue }
 
@@ -1030,6 +1387,12 @@ final class Controller: NSObject, NSWindowDelegate {
     var textView: NSTextView!
     var hideBtn: NSButton!
     var closeTimer: Timer?
+    /// Where the item on screen came from. Kept after it finishes, so the pill still
+    /// works while the panel waits to hide.
+    private var shownOrigin: Origin?
+    /// The paths and commands in the text on screen, and where its commands are typed.
+    private var shownLinks: [TextLink] = []
+    private var shownCwd: String?
 
     /// How long the panel sits there after the queue runs dry. Measured from your last
     /// interaction, not from when speech ended.
@@ -1118,6 +1481,17 @@ final class Controller: NSObject, NSWindowDelegate {
         prefs.set(playback.rateIndex, forKey: Self.rateKey)   // remember it
     }
 
+    /// The source pill was clicked: go to the terminal that's talking.
+    func revealSource() {
+        guard let origin = shownOrigin else { return }
+        let outcome = Reveal.go(origin)
+        log("reveal \(sourceBadge.text): \(outcome)")
+        switch outcome {
+        case .pane, .app: break
+        default: NSSound.beep()
+        }
+    }
+
     /// Stop everything and throw the queue away. Note this discards what's waiting —
     /// "Skip" is the one that moves on to the next item.
     @objc func stopAll() { playback.stop() }
@@ -1139,9 +1513,13 @@ final class Controller: NSObject, NSWindowDelegate {
     private func show(_ item: SpeechItem) {
         closeTimer?.invalidate()
         buildWindowIfNeeded()
+        shownLinks = item.links
+        shownCwd = item.cwd
         setTranscript(item.text)
+        shownOrigin = item.origin
         sourceBadge.text = item.source
         sourceBadge.accent = Accent.color(for: item.source)
+        sourceBadge.isLink = item.origin != nil
         sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
         if !isMinimized { panel.orderFrontRegardless() }
         onVisibilityChange()
@@ -1280,16 +1658,60 @@ final class Controller: NSObject, NSWindowDelegate {
         linkify()
     }
 
-    /// Mark URLs in the transcript as real links. Only `.link` is added, so the karaoke
-    /// highlight (which only ever touches `.backgroundColor`) can't wipe them out.
+    /// Mark URLs, paths and commands in the transcript as real links. Only `.link` (plus
+    /// a tooltip, and a code font on commands) is added, so the karaoke highlight (which
+    /// only ever touches `.backgroundColor`) can't wipe them out.
     private func linkify() {
-        guard let storage = textView?.textStorage, let detector = Self.linkDetector else { return }
+        guard let storage = textView?.textStorage else { return }
         let full = NSRange(location: 0, length: storage.length)
         storage.removeAttribute(.link, range: full)
-        detector.enumerateMatches(in: storage.string, range: full) { match, _, _ in
+        storage.removeAttribute(.toolTip, range: full)
+        Self.linkDetector?.enumerateMatches(in: storage.string, range: full) { match, _, _ in
             guard let match = match, let url = match.url else { return }
             storage.addAttribute(.link, value: url, range: match.range)
         }
+        // The hook's links point back into shownLinks by index, through a scheme only
+        // textView(_:clickedOnLink:at:) understands.
+        for (i, link) in shownLinks.enumerated() where NSMaxRange(link.range) <= storage.length {
+            var taken = false
+            storage.enumerateAttribute(.link, in: link.range) { v, _, stop in
+                if v != nil { taken = true; stop.pointee = true }
+            }
+            guard !taken, let url = URL(string: "\(Self.linkScheme):\(i)") else { continue }
+            var attrs: [NSAttributedString.Key: Any] = [.link: url]
+            switch link.action {
+            case .open(let path):
+                var isDir: ObjCBool = false
+                let dir = FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+                attrs[.toolTip] = dir ? "Show in Finder" : "Open"
+            case .load:
+                attrs[.toolTip] = "Type into a new terminal window (not run)"
+                attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            }
+            storage.addAttributes(attrs, range: link.range)
+        }
+    }
+
+    private static let linkScheme = "speakhud-link"
+
+    /// A path opens; a command is typed into a terminal, never run. URLs fall through
+    /// to the text view, which hands them to the default browser.
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard let url = link as? URL, url.scheme == Self.linkScheme,
+              let i = Int(url.absoluteString.dropFirst(Self.linkScheme.count + 1)),
+              shownLinks.indices.contains(i) else { return false }
+        switch shownLinks[i].action {
+        case .open(let path):
+            log("open \(path): \(OpenPath.go(path))")
+        case .load(let command):
+            let outcome = LoadCommand.go(command, cwd: shownCwd)
+            log("command (\(command.count) chars): \(outcome)")
+            switch outcome {
+            case .loaded, .copied: break
+            default: NSSound.beep()
+            }
+        }
+        return true
     }
 
     /// Clicks, scrolls, and keystrokes aimed at the panel, so the auto-hide can tell
@@ -1368,7 +1790,9 @@ final class Controller: NSObject, NSWindowDelegate {
         // traffic lights, which float over this content view (.fullSizeContentView).
         let badge = SourceBadge(frame: NSRect(x: 80, y: h - 34, width: 140, height: SourceBadge.height))
         badge.autoresizingMask = [.minYMargin]
+        badge.onClick = { [weak self] in self?.revealSource() }
         content.addSubview(badge)
+        panel.link = badge
         sourceBadge = badge
 
         let queued = NSTextField(labelWithString: "")
@@ -1413,6 +1837,7 @@ final class Controller: NSObject, NSWindowDelegate {
             .underlineStyle: NSUnderlineStyle.single.rawValue,
             .cursor: NSCursor.pointingHand,
         ]
+        tv.delegate = self   // paths and commands; see textView(_:clickedOnLink:at:)
         scroll.documentView = tv
         content.addSubview(scroll)
         textView = tv
@@ -2018,10 +2443,12 @@ final class Agent {
 
     /// Hotkey: read whatever is highlighted in the frontmost app.
     func readSelection() {
-        let app = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Selection"
+        let front = NSWorkspace.shared.frontmostApplication
         // No selection (or no Accessibility grant) falls back to the clipboard,
         // which is exactly what this hotkey did before it could see selections.
-        play(Selection.current() ?? NSPasteboard.general.string(forType: .string) ?? "", source: app)
+        play(Selection.current() ?? NSPasteboard.general.string(forType: .string) ?? "",
+             source: front?.localizedName ?? "Selection",
+             origin: front.map { Origin(appPID: $0.processIdentifier) })
     }
 
     /// Menu item / double-clicking the app: there's no meaningful selection when
@@ -2030,10 +2457,11 @@ final class Agent {
         play(NSPasteboard.general.string(forType: .string) ?? "", source: "Clipboard")
     }
 
-    private func play(_ raw: String, source: String) {
+    private func play(_ raw: String, source: String, origin: Origin? = nil) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { NSSound.beep(); return }
-        hud.playNow(SpeechItem(text: text, source: source, key: UUID().uuidString, created: Date()))
+        hud.playNow(SpeechItem(text: text, source: source, key: UUID().uuidString, created: Date(),
+                               origin: origin))
     }
 }
 
@@ -2273,6 +2701,8 @@ enum Main {
 
         var sourceName = "Claude Code"
         if let i = argv.firstIndex(of: "--source"), i + 1 < argv.count { sourceName = argv[i + 1] }
+        var origin: Origin?
+        if let i = argv.firstIndex(of: "--origin"), i + 1 < argv.count { origin = Origin(jsonString: argv[i + 1]) }
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)   // no Dock icon, doesn't steal focus
@@ -2284,7 +2714,8 @@ enum Main {
                                      mods: UInt32(controlKey | optionKey)) { [weak controller] in
             controller?.togglePause()
         }
-        controller.enqueue(SpeechItem(text: text, source: sourceName, key: UUID().uuidString, created: Date()))
+        controller.enqueue(SpeechItem(text: text, source: sourceName, key: UUID().uuidString, created: Date(),
+                                      origin: origin))
         app.run()
     }
 }

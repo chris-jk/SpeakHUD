@@ -29,7 +29,10 @@ Instead the hook writes one JSON file per finished turn into
 `~/.local/state/speakhud/queue/`:
 
 ```json
-{"v": 1, "text": "…", "source": "SpeakHUD", "key": "<session_id>", "created": 1783642610.69}
+{"v": 1, "text": "…", "source": "SpeakHUD", "key": "<session_id>", "created": 1783642610.69,
+ "origin": {"term": "iTerm.app", "session": "41E78242-…", "tty": "/dev/ttys002", "app_pid": 65629},
+ "links": [{"at": 4, "len": 10, "run": "git status"}, {"at": 18, "len": 9, "path": "/abs/README.md"}],
+ "cwd": "/Users/…/project"}
 ```
 
 - Files are written as `<name>.tmp` and then `rename`d to `<name>.json`. Rename is atomic
@@ -57,6 +60,19 @@ Instead the hook writes one JSON file per finished turn into
 - Nothing is dropped silently: each dropped item gets a `spool: dropped <file> — <reason>`
   line in `~/Library/Logs/speakhud-agent.log`. The agent also deletes any `.tmp` older
   than 10 minutes, which is what a hook killed mid-write leaves behind.
+- `origin` says which terminal the turn came from, so clicking the HUD's project pill can
+  go back there: `term` is `TERM_PROGRAM`, `session` the UUID from iTerm2's
+  `ITERM_SESSION_ID`, and `tty` and `app_pid` (the outermost `.app` above Claude) come
+  from the process tree. Each key is there only if found. The agent validates `session`
+  and `tty` before they go anywhere near an AppleScript, and ignores what doesn't fit;
+  a bad `origin` never drops the item. It's an optional key, so `v` stays 1.
+- `links` are what the HUD makes clickable besides URLs: `at`/`len` is a UTF-16 range
+  of `text` (what NSString counts in), with either `path` (absolute; opened or shown in
+  Finder) or `run` (one line; typed into a terminal, never run). The hook finds them,
+  because it has Claude's PATH and working directory: each inline code span is tried as
+  a command, then as a path; bare `/…` and `~/…` paths in the prose count only if they
+  exist. `cwd` is where commands are typed. Both optional, so `v` stays 1; an entry that
+  doesn't fit the text or parse is ignored (`TextLink.parse`).
 - `SPEAKHUD_QUEUE_DIR` moves the queue for both the hook and the agent. It exists for
   tests. Set it for only one side and the hook writes somewhere the agent never reads,
   so the agent logs `spool: watching <dir>` at startup to show which one it chose.
@@ -86,7 +102,7 @@ it if that happens within 10 minutes.
 
 If the heartbeat is missing or stale there's nothing to queue behind, so the hook falls
 back to speaking directly. It pipes the text to `~/.claude/bin/speak-hud --source
-<project>` if that binary exists. Otherwise, or if that binary won't start or exits
+<project> --origin <json>` if that binary exists. Otherwise, or if that binary won't start or exits
 without reading the text, it pipes the text to `say -f -`. The text always goes in on
 stdin, never as an argument, so a turn that starts with `-` can't be read as an option.
 If nothing can speak, the hook logs `speakhud: …` to stderr and exits normally.

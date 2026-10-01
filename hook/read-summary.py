@@ -11,7 +11,7 @@ The finished turn is *queued*, never spoken directly: several terminals running
 Claude at once would otherwise each kill whatever was already playing. The
 SpeakHUD agent owns the one HUD and drains this queue one item at a time.
 """
-import sys, json, os, re, glob, time, subprocess
+import sys, json, os, re, glob, time, subprocess, shlex, shutil
 
 WAIT_SECONDS = 3.0      # max time to wait for the final message to be flushed
 POLL_SECONDS = 0.1
@@ -28,6 +28,9 @@ HEARTBEAT_STALE = 10.0  # seconds; see agent_running()
 # spool dir the agent is about to recreate. The hook is async, so waiting costs nothing
 # heard; speaking directly next to a live agent is a second voice. Tests set it to 0.
 HEARTBEAT_GRACE = float(os.environ.get("SPEAKHUD_HEARTBEAT_GRACE") or 4.0)
+# iTerm2 sets ITERM_SESSION_ID to "w4t0p0:<UUID>"; the UUID is the session's AppleScript id.
+ITERM_SESSION = re.compile(r"^(?:w\d+t\d+p\d+:)?([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})$")
+APP_EXEC = re.compile(r"\.app/Contents/MacOS/")
 
 
 def find_transcript(data):
@@ -83,22 +86,35 @@ def current_response_text(path):
 
 
 BULLET = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
+# Inline code is wrapped in these while the rest is cleaned, so emphasis stripping can't
+# eat the `_` in a path, and so unmark() can say where each code span ended up.
+CODE_OPEN, CODE_CLOSE = "\ue000", "\ue001"
+CODE_SPAN = re.compile(CODE_OPEN + "([^" + CODE_CLOSE + "]*)" + CODE_CLOSE)
+IN_CODE = re.compile("(" + CODE_OPEN + "[^" + CODE_CLOSE + "]*" + CODE_CLOSE + ")")
 
 
 def clean(text):
-    """Strip markdown to speakable prose, keeping the shape of the response.
+    """Strip markdown to speakable prose, keeping the shape of the response."""
+    return unmark(marked(text))[0]
+
+
+def marked(text):
+    """clean(), with every inline code span left wrapped in CODE_OPEN/CODE_CLOSE.
 
     Flattening every newline turns a structured answer into one unreadable run-on in
     the HUD, and robs the synthesizer of the pauses that paragraph breaks give it.
     So: paragraphs stay paragraphs, list items stay one-per-line, and only the runs
     of spaces *within* a line get collapsed.
     """
+    text = text.replace(CODE_OPEN, "").replace(CODE_CLOSE, "")
     # Drop fenced code blocks entirely — reading code aloud is useless.
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     # Keep what's *inside* inline code. Deleting it leaves "it called , which…" —
     # a broken sentence on screen and a stumble when spoken. Fenced blocks are the
-    # genuinely unreadable ones, and those are already gone.
-    text = re.sub(r"`([^`]*)`", r"\1", text)
+    # genuinely unreadable ones, and those are already gone. A span that wraps a line
+    # is only unwrapped: a paragraph break could split its marks.
+    text = re.sub(r"`([^`]*)`", lambda m: m.group(1) if "\n" in m.group(1) or not m.group(1).strip()
+                  else CODE_OPEN + m.group(1) + CODE_CLOSE, text)
     text = re.sub(r"\[([^\]]*)\]\([^\)]*\)", r"\1", text)  # links -> label
 
     blocks = []
@@ -109,14 +125,181 @@ def clean(text):
         out = []
         for line in lines:
             line = BULLET.sub("", line)          # the marker itself isn't speakable
-            line = re.sub(r"[*_#>]+", "", line)  # emphasis / headers / quotes
-            line = re.sub(r"[ \t]+", " ", line).strip()
+            line = "".join(part if part.startswith(CODE_OPEN) else prose(part)
+                           for part in IN_CODE.split(line)).strip()
             if line:
                 out.append(line)
         if out:
             # One item per line reads as a list; a wrapped paragraph reads as prose.
             blocks.append("\n".join(out) if listy else " ".join(out))
     return "\n\n".join(blocks).strip()
+
+
+def prose(part):
+    part = re.sub(r"[*_#>]+", "", part)       # emphasis / headers / quotes
+    return re.sub(r"[ \t]+", " ", part)
+
+
+def u16(s):
+    """Length in UTF-16 units: what NSString ranges, and so the HUD, count in."""
+    return len(s.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def unmark(text):
+    """(text without the code marks, [(at, len, code)]), at/len in UTF-16 units."""
+    out, spans, pos, at = [], [], 0, 0
+    for m in CODE_SPAN.finditer(text):
+        before = text[pos:m.start()].replace(CODE_OPEN, "").replace(CODE_CLOSE, "")
+        code = m.group(1)
+        at += u16(before)
+        spans.append((at, u16(code), code))
+        at += u16(code)
+        out += [before, code]
+        pos = m.end()
+    out.append(text[pos:].replace(CODE_OPEN, "").replace(CODE_CLOSE, ""))
+    return "".join(out), spans
+
+
+# -- what's clickable ------------------------------------------------------------
+# The hook decides, not the HUD: it has Claude's PATH (is `flutter` a command?) and
+# working directory (where is `tests/run.sh`?). URLs the HUD finds on its own.
+
+# Words a shell runs that `which` won't find.
+SHELL_WORDS = {"cd", "export", "source", ".", "alias", "unalias", "unset", "eval", "exec",
+               "set", "pushd", "popd", "ulimit", "umask", "type", "command", "builtin",
+               "setopt", "unsetopt", "autoload", "hash", "rehash", "nohup", "time"}
+PROMPT = re.compile(r"^[!$]\s+")                # `! cmd` (Claude Code's shell escape), `$ cmd`
+ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+LINE_REF = re.compile(r":\d+(?::\d+)?$")        # file.py:12, file.py:12:4
+# A /… or ~/… path in the prose. The lookbehind keeps out URLs, "and/or" and "1/2".
+BARE_PATH = re.compile(r"(?<![\w~/.:@\\-])~?/[^\s\"'<>()\[\]{}`,;]+")
+MAX_LINK = 1000                                  # TextLink's limit on the Swift side
+
+
+def links(text, spans, cwd):
+    """[{"at", "len", "path"}] for a file or folder to open, [{"at", "len", "run"}] for
+    a command to type into a terminal (never run). Inline code is tried as a command
+    and then a path; bare /… and ~/… paths in the prose count only if they exist."""
+    out = []
+    for at, n, code in spans:
+        link = code_link(code, cwd)
+        if link:
+            out.append(dict(at=at, len=n, **link))
+    for m in BARE_PATH.finditer(text):
+        raw = m.group(0).rstrip(".:!?")
+        at = u16(text[:m.start()])
+        n = u16(raw)
+        if any(a < at + n and at < a + l for a, l, _ in spans):
+            continue
+        target = path_target(raw, cwd, loose=False)
+        if target:
+            out.append({"at": at, "len": n, "path": target})
+    return sorted(out, key=lambda l: l["at"])
+
+
+def code_link(code, cwd):
+    s = code.strip()
+    if not s or len(s) > MAX_LINK or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in s):
+        return None
+    m = PROMPT.match(s)
+    if m:
+        return {"run": s[m.end():]}
+    # `./x` is how you say "run x"; `x` alone is the file.
+    if s.startswith("./") and not any(c.isspace() for c in s) and runnable(s, cwd):
+        return {"run": s}
+    if any(c.isspace() for c in s) and is_command(s, cwd):
+        return {"run": s}
+    target = path_target(s, cwd, loose=True)
+    return {"path": target} if target else None
+
+
+def is_command(s, cwd):
+    try:
+        words = shlex.split(s)
+    except ValueError:      # unbalanced quotes: prose with an apostrophe, not a command
+        return False
+    while words and ENV_ASSIGN.match(words[0]):
+        words = words[1:]
+    if not words:
+        return False
+    first = words[0]
+    if "/" in first:
+        return runnable(first, cwd)
+    return first in SHELL_WORDS or shutil.which(first) is not None
+
+
+def runnable(s, cwd):
+    p = path_target(s, cwd, loose=False)
+    return bool(p) and os.path.isfile(p) and os.access(p, os.X_OK)
+
+
+def path_target(s, cwd, loose):
+    """The absolute path `s` names if it exists. `loose` (inline code, so meant as a
+    path) also takes one whose folder exists, since clicking opens that folder."""
+    s = LINE_REF.sub("", s)
+    if not s or len(s) > MAX_LINK:
+        return None
+    shaped = s.startswith(("/", "~/", "./", "../")) or "/" in s.rstrip("/")
+    p = os.path.expanduser(s)
+    if not os.path.isabs(p):
+        if not cwd:
+            return None
+        p = os.path.join(cwd, p)
+    p = os.path.normpath(p)
+    if os.path.exists(p):
+        return p
+    if loose and shaped and os.path.isdir(os.path.dirname(p)):
+        return p
+    return None
+
+def origin():
+    """Which terminal this turn came from, so clicking the HUD's project pill can take
+    you back to it: {"term", "session", "tty", "app_pid"}, each only if found.
+
+    The hook inherits Claude's environment, so iTerm2's own variable names the exact
+    pane. The process tree adds the tty (how Terminal.app finds a tab) and the app
+    hosting the terminal (all any other terminal can offer). Best effort and never
+    raises: a turn that can't say where it came from is still read.
+    """
+    out = {}
+    term = os.environ.get("TERM_PROGRAM", "")
+    if term:
+        out["term"] = term
+    m = ITERM_SESSION.match(os.environ.get("ITERM_SESSION_ID", ""))
+    if m:
+        out["session"] = m.group(1).upper()
+    try:
+        ps = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,tty=,comm="],
+                            capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        ps = ""
+    tty, app_pid = ancestry(ps, os.getpid())
+    if tty:
+        out["tty"] = tty
+    if app_pid:
+        out["app_pid"] = app_pid
+    return out
+
+
+def ancestry(ps, pid):
+    """(tty, app_pid) for `pid` from `ps -axo pid=,ppid=,tty=,comm=` output: the first
+    controlling terminal up the tree, and the outermost `.app` above it. Outermost,
+    because a terminal inside an Electron app runs under a nested helper .app."""
+    table = {}
+    for line in ps.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), parts[2], parts[3])
+    tty, app_pid, seen = None, None, set()
+    while pid > 1 and pid in table and pid not in seen:
+        seen.add(pid)
+        ppid, t, comm = table[pid]
+        if not tty and re.fullmatch(r"ttys\d+", t):
+            tty = "/dev/" + t
+        if APP_EXEC.search(comm):
+            app_pid = pid
+        pid = ppid
+    return tty, app_pid
 
 
 def agent_running():
@@ -149,7 +332,7 @@ def heartbeat_fresh():
     return -HEARTBEAT_STALE < age < HEARTBEAT_STALE
 
 
-def enqueue(text, source, key):
+def enqueue(text, source, key, where=None, links=None, cwd=None):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
     The fields are the contract with Spool.drain in speak-hud.swift, pinned by
@@ -162,9 +345,16 @@ def enqueue(text, source, key):
     stem = f"{time.time_ns():019d}-{os.urandom(4).hex()}"
     tmp = os.path.join(QUEUE_DIR, stem + ".tmp")
     try:
+        item = {"v": SPOOL_VERSION, "text": text, "source": source, "key": key,
+                "created": time.time()}
+        if where:
+            item["origin"] = where
+        if links:
+            item["links"] = links
+        if cwd:
+            item["cwd"] = cwd
         with open(tmp, "w") as f:
-            json.dump({"v": SPOOL_VERSION, "text": text, "source": source, "key": key,
-                       "created": time.time()}, f)
+            json.dump(item, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
     except OSError:
         # Don't leave a partial .tmp behind to accumulate; the agent ignores them,
@@ -211,14 +401,17 @@ def pipe_to(argv, text):
     return rc == 0
 
 
-def speak_directly(text, source):
+def speak_directly(text, source, where=None):
     """No agent to queue behind: read it here, as this hook used to. Never raises.
 
     `say` gets the text on stdin (`-f -`, per `man say`), never in argv: a turn that
     starts with "-" would otherwise be parsed as options.
     """
     hud = os.path.expanduser("~/.claude/bin/speak-hud")
-    if os.path.exists(hud) and pipe_to([hud, "--source", source], text):
+    argv = [hud, "--source", source]
+    if where:
+        argv += ["--origin", json.dumps(where)]
+    if os.path.exists(hud) and pipe_to(argv, text):
         return
     if not pipe_to(["say", "-f", "-"], text):
         print("speakhud: nothing could speak this turn", file=sys.stderr)
@@ -241,26 +434,32 @@ def main():
     if not text:
         return
 
-    text = clean(text)
+    text, spans = unmark(marked(text))
     if not text:
         return
 
     cwd = data.get("cwd") or ""
+    try:
+        clickable = links(text, spans, cwd)
+    except Exception as e:  # a classification bug shouldn't cost the turn its voice
+        print(f"speakhud: could not mark links ({e})", file=sys.stderr)
+        clickable = []
     source = os.path.basename(cwd.rstrip("/")) or "Claude Code"
     # Coalesce on the session, not the project: two terminals in the same repo are
     # two independent conversations and both deserve to be heard. The transcript is
     # per-session too, so it's the right fallback; `cwd` would merge those terminals
     # back together. `path` is non-empty here — main() returned early otherwise.
     key = data.get("session_id") or path
+    where = origin()
 
     if agent_running():
         try:
-            enqueue(text, source, key)
+            enqueue(text, source, key, where, clickable, cwd)
             return
         except OSError as e:
             # A full disk or an unwritable spool shouldn't mean silence.
             print(f"speakhud: could not queue turn ({e}); speaking directly", file=sys.stderr)
-    speak_directly(text, source)
+    speak_directly(text, source, where)
 
 
 if __name__ == "__main__":
