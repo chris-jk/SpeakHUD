@@ -335,7 +335,9 @@ def path_target(s, cwd, loose):
     p = os.path.normpath(p)
     if os.path.exists(p):
         return p
-    if loose and shaped and os.path.isdir(os.path.dirname(p)):
+    # Not straight under /: `/chrome` or `/help` is a Claude Code slash command, not a path.
+    parent = os.path.dirname(p)
+    if loose and shaped and parent != "/" and os.path.isdir(parent):
         return p
     return None
 

@@ -4,7 +4,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 
 ## Where things stand (2026-10-01)
 - Branch `clickable-hud` (not pushed, not merged) holds click-to-terminal + clickable text; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
-- Tests: `./tests/run.sh`, 413 checks, all passing. No CI; run them before committing.
+- Tests: `./tests/run.sh`, 414 checks, all passing. No CI; run them before committing.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
 - Mic hold: speech pauses while any other process records (macOS 14+), resumes 0.6s after release. Menu toggle **Pause While Recording** (shared prefs, on by default) turns it off.
 - Spool contract (hook ↔ agent) pinned by a test that runs the real Python `enqueue()`; items carry `v: 1`, other versions are dropped with a logged reason.
@@ -34,6 +34,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## ✅ Recently shipped (trim as it ages)
+- 2026-10-01 — Slash commands like `/chrome` in inline code no longer link to / (seen in the log)
 - 2026-10-01 — Shell code blocks show in the HUD (silent) with each command line clickable
 - 2026-10-01 — Paths, commands and URLs in the HUD text are clickable: folder shown in its parent, file opens, command typed into a new iTerm2 window (never run)
 - 2026-10-01 — Click the source pill to jump to the terminal that's talking (iTerm2 pane / Terminal.app tab, across desktops); hotkey reads go back to their app

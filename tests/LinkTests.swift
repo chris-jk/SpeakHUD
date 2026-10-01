@@ -60,7 +60,7 @@ let linkSuite = Suite("Links") { t in
 
         let md = """
         Done — **all** pass. Run `./tests/run.sh` or `frob --all`, see `README.md:12`, \
-        `tests/new.md`, `notes_v2.md`, `Playback`, `! frob login`, `it's frob`, `nope --x`.
+        `tests/new.md`, `notes_v2.md`, `Playback`, `! frob login`, `it's frob`, `nope --x`, `/chrome`.
 
         - 🎉 Saved to ~/notes/a.md. Not ~/notes/gone.md or https://example.com/a/b or and/or.
         - `cd ..` and `FOO=1 frob` and `tests/run.sh`
@@ -90,6 +90,7 @@ let linkSuite = Suite("Links") { t in
         t.expectEqual(got["notes_v2.md"], .open(proj + "/notes_v2.md"), "a relative path resolves against the turn's cwd")
         t.expectEqual(got["~/notes/a.md"], .open(home + "/notes/a.md"), "a bare ~/ path in the prose, without its full stop")
         t.expect(got["Playback"] == nil, "a code word that isn't a file or command stays plain")
+        t.expect(got["/chrome"] == nil, "a slash command isn't a path, though / exists")
         t.expect(got["it's frob"] == nil, "unbalanced quotes aren't a command line")
         t.expect(got["nope --x"] == nil, "a first word that isn't on PATH isn't a command")
         t.expect(!got.keys.contains { $0.contains("gone.md") }, "a bare path that doesn't exist stays plain")
