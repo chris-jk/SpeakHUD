@@ -3,7 +3,7 @@
 Running tab. Current state at top, then next up, waiting-on, recently shipped. Prune every session.
 
 ## Where things stand (2026-10-01)
-- Branch `clickable-hud` (not pushed, not merged) holds click-to-terminal + clickable text; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
+- main (pushed 2026-10-01) holds click-to-terminal, clickable text and code blocks; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
 - Tests: `./tests/run.sh`, 414 checks, all passing. No CI; run them before committing.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
 - Mic hold: speech pauses while any other process records (macOS 14+), resumes 0.6s after release. Menu toggle **Pause While Recording** (shared prefs, on by default) turns it off.
@@ -23,7 +23,6 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## 🟡 Next up
-- [ ] Merge `clickable-hud` into main and push
 - [ ] Glance at the first real turn with a ```bash block in the HUD (layout of the indented code)
 - [ ] Terminal.app path is untested live (no Terminal windows open); iTerm2 verified
 
