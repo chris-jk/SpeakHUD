@@ -63,6 +63,9 @@ its turn, and the HUD shows what's behind it:
   A command (inline code whose first word is on Claude's PATH, `./script`, or `! cmd`)
   is typed into a new iTerm2 window in the turn's directory and left there — never run.
   URLs open in your browser. Relative paths resolve against the turn's directory.
+- **Shell code blocks are shown, not spoken.** A fenced `bash`/`sh`/`zsh`/`console`
+  (or unlabeled) block with commands in it appears where it was, in a code font, with
+  each command line clickable; other code blocks stay hidden.
 - **Claude Code turns queue.** Each finished turn is written to a spool directory
   (`~/.local/state/speakhud/queue/`) and drained one at a time by the background agent.
 - **Newest per session wins.** If one terminal finishes two turns while you're still

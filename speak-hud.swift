@@ -51,6 +51,83 @@ struct SpeechItem {
     var links: [TextLink] = []
     /// The directory the turn ran in, where a clicked command is typed. Nil when unknown.
     var cwd: String? = nil
+    /// Code blocks to show but never speak. Only the hook sends these.
+    var blocks: [CodeBlock] = []
+}
+
+/// A fenced code block from the turn: never spoken, but shown where it was, with its
+/// command lines as links. `at` is a paragraph end in the spoken text (0: before it all).
+struct CodeBlock: Equatable {
+    let at: Int
+    let code: String
+    let links: [TextLink]   // ranges within `code`
+
+    /// From the spool's `blocks`. One that doesn't fit the text is left out.
+    static func parse(_ json: Any?, in text: String) -> [CodeBlock] {
+        guard let list = json as? [Any] else { return [] }
+        let length = (text as NSString).length
+        var out: [CodeBlock] = []
+        for case let o as [String: Any] in list {
+            guard let n = o["at"] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                  n.doubleValue >= 0, n.doubleValue <= Double(length), n.doubleValue == n.doubleValue.rounded(),
+                  let code = o["code"] as? String, !code.isEmpty, code.utf16.count <= 8000
+            else { continue }
+            out.append(CodeBlock(at: n.intValue, code: code, links: TextLink.parse(o["links"], in: code)))
+        }
+        return out
+    }
+}
+
+/// What the HUD shows for an item: the spoken text with its code blocks put back. The
+/// voice and the hook's links count in spoken offsets; a block moves everything at or
+/// after its `at` along by its own length, and nothing else moves.
+struct Transcript: Equatable {
+    let shown: String
+    let links: [TextLink]        // the item's and its blocks', in shown offsets
+    let code: [NSRange]          // where the blocks landed
+    private let inserts: [(at: Int, length: Int)]
+
+    init(_ item: SpeechItem) { self.init(text: item.text, links: item.links, blocks: item.blocks) }
+
+    init(text: String, links: [TextLink] = [], blocks: [CodeBlock] = []) {
+        let spoken = text as NSString
+        let out = NSMutableString()
+        var cursor = 0, inserts: [(at: Int, length: Int)] = [], all: [TextLink] = [], code: [NSRange] = []
+        // Sorted, stably, so two blocks in a row keep their order.
+        for b in blocks.enumerated().sorted(by: { ($0.element.at, $0.offset) < ($1.element.at, $1.offset) }).map(\.element)
+        where b.at <= spoken.length {
+            out.append(spoken.substring(with: NSRange(location: cursor, length: b.at - cursor)))
+            cursor = b.at
+            // A block goes in as a paragraph: after the one before it, or ahead of the first.
+            let piece = b.at > 0 ? "\n\n" + b.code : b.code + "\n\n"
+            let start = out.length + (b.at > 0 ? 2 : 0)
+            out.append(piece)
+            inserts.append((b.at, (piece as NSString).length))
+            code.append(NSRange(location: start, length: (b.code as NSString).length))
+            for l in b.links {
+                all.append(TextLink(range: NSRange(location: start + l.range.location, length: l.range.length), action: l.action))
+            }
+        }
+        out.append(spoken.substring(from: cursor))
+        shown = out as String
+        self.inserts = inserts
+        self.code = code
+        // Spoken ranges never straddle a block: blocks sit between paragraphs.
+        func move(_ r: NSRange) -> NSRange {
+            NSRange(location: r.location + inserts.filter { $0.at <= r.location }.reduce(0) { $0 + $1.length }, length: r.length)
+        }
+        self.links = all + links.map { TextLink(range: move($0.range), action: $0.action) }
+    }
+
+    /// Where a range of the spoken text is on screen.
+    func shown(_ spoken: NSRange) -> NSRange {
+        NSRange(location: spoken.location + inserts.filter { $0.at <= spoken.location }.reduce(0) { $0 + $1.length },
+                length: spoken.length)
+    }
+
+    static func == (a: Transcript, b: Transcript) -> Bool {
+        a.shown == b.shown && a.links == b.links && a.code == b.code
+    }
 }
 
 /// Something in an item's text to click: a file or folder to open, or a command to
@@ -383,6 +460,8 @@ enum LoadCommand {
 //            to click — a path to open, a command to type into a terminal. Entries
 //            that don't fit are ignored (TextLink.parse).
 //   cwd      string, optional: the turn's working directory, where commands are typed.
+//   blocks   array, optional: [{at, code, links}], fenced code shown but never spoken —
+//            `at` is where in `text` it goes back, `links` as above but within `code`.
 // Every dropped item comes back as a `Drop` with its reason, for the agent to log.
 //
 // Liveness: the agent touches `heartbeatName` in the spool dir at startup and every
@@ -500,7 +579,8 @@ enum Spool {
                                           file: taken,
                                           origin: Origin(json: obj["origin"]),
                                           links: TextLink.parse(obj["links"], in: text),
-                                          cwd: TextLink.absolutePath(obj["cwd"])))
+                                          cwd: TextLink.absolutePath(obj["cwd"]),
+                                          blocks: CodeBlock.parse(obj["blocks"], in: text)))
         }
         return batch
     }
@@ -1390,8 +1470,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// Where the item on screen came from. Kept after it finishes, so the pill still
     /// works while the panel waits to hide.
     private var shownOrigin: Origin?
-    /// The paths and commands in the text on screen, and where its commands are typed.
-    private var shownLinks: [TextLink] = []
+    /// The text on screen (spoken text plus code blocks), and where its commands are typed.
+    private var transcript = Transcript(text: "")
+    private var shownLinks: [TextLink] { transcript.links }
     private var shownCwd: String?
 
     /// How long the panel sits there after the queue runs dry. Measured from your last
@@ -1513,9 +1594,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private func show(_ item: SpeechItem) {
         closeTimer?.invalidate()
         buildWindowIfNeeded()
-        shownLinks = item.links
         shownCwd = item.cwd
-        setTranscript(item.text)
+        transcript = Transcript(item)
+        setTranscript()
         shownOrigin = item.origin
         sourceBadge.text = item.source
         sourceBadge.accent = Accent.color(for: item.source)
@@ -1604,8 +1685,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     var onVisibilityChange: () -> Void = {}
 
     // Karaoke-style follow: highlight + scroll to the word currently being spoken.
-    private func highlight(_ range: NSRange) {
+    private func highlight(_ spoken: NSRange) {
         guard let tv = textView, let storage = tv.textStorage else { return }
+        let range = transcript.shown(spoken)
         storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
         if NSMaxRange(range) <= storage.length {
             storage.addAttribute(.backgroundColor, value: NSColor.findHighlightColor, range: range)
@@ -1642,9 +1724,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// a wall of tightly-set 12pt is hard to find your place in when the highlight is
     /// moving. Attributes go on before `linkify()`, which would otherwise be wiped by
     /// the blanket `addAttributes` here.
-    private func setTranscript(_ text: String) {
+    private func setTranscript() {
         guard let tv = textView, let storage = tv.textStorage else { return }
-        tv.string = text
+        tv.string = transcript.shown
         let style = NSMutableParagraphStyle()
         style.lineSpacing = 3
         // No paragraphSpacing: the text already carries a blank line between paragraphs,
@@ -1655,6 +1737,19 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: style,
         ], range: NSRange(location: 0, length: storage.length))
+        // Code blocks: set in, quieter, in a code font. No background — the karaoke
+        // highlight clears every background in the text on each word.
+        let indented = NSMutableParagraphStyle()
+        indented.lineSpacing = 2
+        indented.firstLineHeadIndent = 12
+        indented.headIndent = 12
+        for range in transcript.code where NSMaxRange(range) <= storage.length {
+            storage.addAttributes([
+                .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: indented,
+            ], range: range)
+        }
         linkify()
     }
 
@@ -1686,7 +1781,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
                 attrs[.toolTip] = dir ? "Show in Finder" : "Open"
             case .load:
                 attrs[.toolTip] = "Type into a new terminal window (not run)"
-                attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+                let size = (storage.attribute(.font, at: link.range.location, effectiveRange: nil) as? NSFont)?.pointSize ?? 13
+                attrs[.font] = NSFont.monospacedSystemFont(ofSize: min(size, 12), weight: .regular)
             }
             storage.addAttributes(attrs, range: link.range)
         }

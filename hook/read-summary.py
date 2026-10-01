@@ -11,7 +11,7 @@ The finished turn is *queued*, never spoken directly: several terminals running
 Claude at once would otherwise each kill whatever was already playing. The
 SpeakHUD agent owns the one HUD and drains this queue one item at a time.
 """
-import sys, json, os, re, glob, time, subprocess, shlex, shutil
+import sys, json, os, re, glob, time, subprocess, shlex, shutil, textwrap
 
 WAIT_SECONDS = 3.0      # max time to wait for the final message to be flushed
 POLL_SECONDS = 0.1
@@ -91,24 +91,40 @@ BULLET = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
 CODE_OPEN, CODE_CLOSE = "\ue000", "\ue001"
 CODE_SPAN = re.compile(CODE_OPEN + "([^" + CODE_CLOSE + "]*)" + CODE_CLOSE)
 IN_CODE = re.compile("(" + CODE_OPEN + "[^" + CODE_CLOSE + "]*" + CODE_CLOSE + ")")
+# A fenced block becomes a paragraph of its own, FENCE_OPEN + its index + FENCE_CLOSE,
+# so unmark() can say where it was in the spoken text: never spoken, but the HUD
+# shows the ones with commands in them, back where they were.
+FENCE_OPEN, FENCE_CLOSE = "\ue002", "\ue003"
+FENCE_MARK = re.compile(FENCE_OPEN + r"(\d+)" + FENCE_CLOSE)
+MARKS = (CODE_OPEN, CODE_CLOSE, FENCE_OPEN, FENCE_CLOSE)
 
 
 def clean(text):
     """Strip markdown to speakable prose, keeping the shape of the response."""
-    return unmark(marked(text))[0]
+    return unmark(marked(text)[0])[0]
 
 
 def marked(text):
-    """clean(), with every inline code span left wrapped in CODE_OPEN/CODE_CLOSE.
+    """(clean() with every inline code span left wrapped in CODE_OPEN/CODE_CLOSE and
+    every fenced block left as its own FENCE_MARK paragraph, [(lang, body)] by index).
 
     Flattening every newline turns a structured answer into one unreadable run-on in
     the HUD, and robs the synthesizer of the pauses that paragraph breaks give it.
     So: paragraphs stay paragraphs, list items stay one-per-line, and only the runs
     of spaces *within* a line get collapsed.
     """
-    text = text.replace(CODE_OPEN, "").replace(CODE_CLOSE, "")
-    # Drop fenced code blocks entirely — reading code aloud is useless.
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    for mark in MARKS:
+        text = text.replace(mark, "")
+    # Fenced code blocks aren't spoken — reading code aloud is useless.
+    fences = []
+
+    def fence(m):
+        lang, body = m.group(1).strip(), m.group(2)
+        if not body.strip():                # ```npm test``` on one line
+            lang, body = "", lang
+        fences.append((lang.lower(), body))
+        return "\n\n" + FENCE_OPEN + str(len(fences) - 1) + FENCE_CLOSE + "\n\n"
+    text = re.sub(r"```([^\n`]*)\n?(.*?)```", fence, text, flags=re.DOTALL)
     # Keep what's *inside* inline code. Deleting it leaves "it called , which…" —
     # a broken sentence on screen and a stumble when spoken. Fenced blocks are the
     # genuinely unreadable ones, and those are already gone. A span that wraps a line
@@ -132,7 +148,7 @@ def marked(text):
         if out:
             # One item per line reads as a list; a wrapped paragraph reads as prose.
             blocks.append("\n".join(out) if listy else " ".join(out))
-    return "\n\n".join(blocks).strip()
+    return "\n\n".join(blocks).strip(), fences
 
 
 def prose(part):
@@ -146,18 +162,34 @@ def u16(s):
 
 
 def unmark(text):
-    """(text without the code marks, [(at, len, code)]), at/len in UTF-16 units."""
-    out, spans, pos, at = [], [], 0, 0
-    for m in CODE_SPAN.finditer(text):
-        before = text[pos:m.start()].replace(CODE_OPEN, "").replace(CODE_CLOSE, "")
-        code = m.group(1)
-        at += u16(before)
-        spans.append((at, u16(code), code))
-        at += u16(code)
-        out += [before, code]
-        pos = m.end()
-    out.append(text[pos:].replace(CODE_OPEN, "").replace(CODE_CLOSE, ""))
-    return "".join(out), spans
+    """(the spoken text, its code spans [(at, len, code)], and where each fenced block
+    was [(at, index)]). Offsets are UTF-16 units into the spoken text; a block's `at`
+    is the end of the paragraph before it (0 if none), where the HUD puts it back."""
+    out, spans, anchors, at = [], [], [], 0
+
+    def emit(s):
+        nonlocal at
+        for mark in MARKS:
+            s = s.replace(mark, "")
+        out.append(s)
+        at += u16(s)
+
+    # The text is "\n\n"-joined paragraphs (see marked()), and a fence is one whole.
+    for para in text.split("\n\n") if text else []:
+        m = FENCE_MARK.fullmatch(para)
+        if m:
+            anchors.append((at, int(m.group(1))))
+            continue
+        if out:
+            emit("\n\n")
+        pos = 0
+        for c in CODE_SPAN.finditer(para):
+            emit(para[pos:c.start()])
+            spans.append((at, u16(c.group(1)), c.group(1)))
+            emit(c.group(1))
+            pos = c.end()
+        emit(para[pos:])
+    return "".join(out), spans, anchors
 
 
 # -- what's clickable ------------------------------------------------------------
@@ -195,6 +227,61 @@ def links(text, spans, cwd):
         if target:
             out.append({"at": at, "len": n, "path": target})
     return sorted(out, key=lambda l: l["at"])
+
+
+SHELL_LANGS = {"", "bash", "sh", "zsh", "shell", "console", "shell-session", "terminal", "fish"}
+PROMPT_LINE = re.compile(r"^[$%]\s+")          # `$ cmd` / `% cmd` in a console block
+MAX_BLOCK = 8000                                # CodeBlock's limit on the Swift side
+
+
+def blocks(anchors, fences, cwd):
+    """[{"at", "code", "links"}]: the fenced blocks worth showing — shell ones with a
+    command in them — where they go back into the spoken text, and their command lines
+    as {"at", "len", "run"} with at/len UTF-16 within `code`. The rest stay unseen."""
+    out = []
+    for at, i in anchors:
+        lang, body = fences[i]
+        if lang not in SHELL_LANGS:
+            continue
+        code = textwrap.dedent(body).strip("\n").rstrip()
+        if not code or u16(code) > MAX_BLOCK:
+            continue
+        found = block_links(code, cwd, prompted=lang in ("console", "shell-session"))
+        if found:
+            out.append({"at": at, "code": code, "links": found})
+    return out
+
+
+def block_links(code, cwd, prompted):
+    """Each command line in a shell block. A line ending in `\\` runs on into the next,
+    and is typed as one line. In a console block (`prompted`) only `$ ` lines count."""
+    lines = code.split("\n")
+    starts, p = [], 0
+    for line in lines:
+        starts.append(p)
+        p += len(line) + 1
+    out, i = [], 0
+    while i < len(lines):
+        j = i
+        while lines[j].rstrip().endswith("\\") and j + 1 < len(lines):
+            j += 1
+        parts = [l.rstrip()[:-1] if k < j else l for k, l in enumerate(lines[i:j + 1], start=i)]
+        cmd = " ".join(part.strip() for part in parts).strip()
+        first = lines[i]
+        start = starts[i] + len(first) - len(first.lstrip())
+        end = starts[j] + len(lines[j].rstrip())
+        i = j + 1
+        m = PROMPT_LINE.match(cmd)
+        if m:
+            cmd = cmd[m.end():]
+        elif prompted:
+            continue                            # output, not a command
+        if not cmd or cmd.startswith("#") or len(cmd) > MAX_LINK \
+                or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in cmd):
+            continue
+        if is_command(cmd, cwd):
+            out.append({"at": u16(code[:start]), "len": u16(code[start:end]), "run": cmd})
+    return out
 
 
 def code_link(code, cwd):
@@ -332,7 +419,7 @@ def heartbeat_fresh():
     return -HEARTBEAT_STALE < age < HEARTBEAT_STALE
 
 
-def enqueue(text, source, key, where=None, links=None, cwd=None):
+def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
     The fields are the contract with Spool.drain in speak-hud.swift, pinned by
@@ -353,6 +440,8 @@ def enqueue(text, source, key, where=None, links=None, cwd=None):
             item["links"] = links
         if cwd:
             item["cwd"] = cwd
+        if blocks:
+            item["blocks"] = blocks
         with open(tmp, "w") as f:
             json.dump(item, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
@@ -434,16 +523,17 @@ def main():
     if not text:
         return
 
-    text, spans = unmark(marked(text))
+    text, fences = marked(text)
+    text, spans, anchors = unmark(text)
     if not text:
         return
 
     cwd = data.get("cwd") or ""
     try:
-        clickable = links(text, spans, cwd)
+        clickable, shown = links(text, spans, cwd), blocks(anchors, fences, cwd)
     except Exception as e:  # a classification bug shouldn't cost the turn its voice
         print(f"speakhud: could not mark links ({e})", file=sys.stderr)
-        clickable = []
+        clickable, shown = [], []
     source = os.path.basename(cwd.rstrip("/")) or "Claude Code"
     # Coalesce on the session, not the project: two terminals in the same repo are
     # two independent conversations and both deserve to be heard. The transcript is
@@ -454,7 +544,7 @@ def main():
 
     if agent_running():
         try:
-            enqueue(text, source, key, where, clickable, cwd)
+            enqueue(text, source, key, where, clickable, cwd, shown)
             return
         except OSError as e:
             # A full disk or an unwritable spool shouldn't mean silence.

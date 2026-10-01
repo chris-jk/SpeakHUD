@@ -66,7 +66,7 @@ let linkSuite = Suite("Links") { t in
         - `cd ..` and `FOO=1 frob` and `tests/run.sh`
         """
         let out = python("""
-            text, spans = hook.unmark(hook.marked(sys.argv[2]))
+            text, spans, _ = hook.unmark(hook.marked(sys.argv[2])[0])
             print(json.dumps({"text": text, "links": hook.links(text, spans, sys.argv[3])}))
             """, args: [md, proj], home: home, bin: bin)
         let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
@@ -97,22 +97,109 @@ let linkSuite = Suite("Links") { t in
         try? fm.removeItem(atPath: root)
     }
 
+    // -- fenced blocks: never spoken, shown back in place with their commands ----------
+    do {
+        let root = tempDir("blocks")
+        let home = root + "/home", proj = root + "/proj", bin = root + "/bin"
+        for d in [home, proj, bin] { try? fm.createDirectory(atPath: d, withIntermediateDirectories: true) }
+        fm.createFile(atPath: bin + "/frob", contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+
+        let md = """
+        Run this:
+        ```bash
+        # set up
+        frob init
+        frob run \\
+          --port 80
+        nope here
+        ```
+        then **restart** 🎉. Python stays hidden:
+        ```python
+        import frob
+        ```
+        - one more
+          ```console
+          $ frob log -1
+          frob output line
+          ```
+        ```zsh
+        nope only
+        ```
+        """
+        let out = python("""
+            text, fences = hook.marked(sys.argv[2])
+            text, spans, anchors = hook.unmark(text)
+            print(json.dumps({"text": text, "blocks": hook.blocks(anchors, fences, sys.argv[3])}))
+            """, args: [md, proj], home: home, bin: bin)
+        let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+        let text = obj["text"] as? String ?? ""
+        let blocks = CodeBlock.parse(obj["blocks"], in: text)
+        t.expectEqual(text, "Run this:\n\nthen restart 🎉. Python stays hidden:\n\none more",
+                      "no code is spoken, and each block is a paragraph break")
+        t.expectEqual(blocks.count, 2, "shell blocks with commands are kept; python and command-less ones aren't")
+        t.expectEqual((obj["blocks"] as? [Any])?.count ?? -1, 2, "…and every block the hook sends parses")
+        let first = blocks.first
+        t.expectEqual(first?.at, 9, "a block goes back after the paragraph it followed")
+        t.expectEqual(first?.code, "# set up\nfrob init\nfrob run \\\n  --port 80\nnope here", "the block as written, minus its fences")
+        var cmds: [String: TextLink.Action] = [:]
+        for b in blocks { for l in b.links { cmds[(b.code as NSString).substring(with: l.range)] = l.action } }
+        t.expectEqual(cmds["frob init"], .load("frob init"), "each command line is a link")
+        t.expectEqual(cmds["frob run \\\n  --port 80"], .load("frob run --port 80"),
+                      "a continued line is one link, typed as one line")
+        t.expectEqual(cmds["$ frob log -1"], .load("frob log -1"), "a console prompt line loads without the prompt")
+        t.expectEqual(cmds.count, 3, "comments, output and unknown commands aren't links")
+        t.expectEqual(blocks.last?.code, "$ frob log -1\nfrob output line", "an indented block is dedented")
+        t.expectEqual(blocks.last?.at, (text as NSString).length, "a block at the very end goes after everything")
+        try? fm.removeItem(atPath: root)
+    }
+
+    // -- putting them back: spoken offsets → what's on screen -----------------------
+    do {
+        let text = "Say A.\n\nSay B."   // paragraphs at 0 and 8
+        let block = { (at: Int, code: String) in
+            CodeBlock(at: at, code: code, links: [TextLink(range: NSRange(location: 0, length: 3), action: .load(code))])
+        }
+        let tr = Transcript(text: text,
+                            links: [TextLink(range: NSRange(location: 12, length: 2), action: .open("/b"))],
+                            blocks: [block(6, "ls1"), block(0, "ls0"), block(6, "ls2"), block(14, "ls3")])
+        t.expectEqual(tr.shown, "ls0\n\nSay A.\n\nls1\n\nls2\n\nSay B.\n\nls3",
+                      "blocks go back in place, in order, as paragraphs of their own")
+        let shown = tr.shown as NSString
+        t.expectEqual(shown.substring(with: tr.shown(NSRange(location: 4, length: 2))), "A.", "a spoken word before a block stays put")
+        t.expectEqual(shown.substring(with: tr.shown(NSRange(location: 0, length: 3))), "Say", "…and moves past one ahead of everything")
+        t.expectEqual(shown.substring(with: tr.shown(NSRange(location: 12, length: 2))), "B.", "a spoken word after blocks moves past them")
+        t.expectEqual(tr.code.map { shown.substring(with: $0) }, ["ls0", "ls1", "ls2", "ls3"], "code ranges cover exactly the blocks")
+        let landed = tr.links.map { shown.substring(with: $0.range) }
+        t.expectEqual(landed, ["ls0", "ls1", "ls2", "ls3", "B."], "block links and the item's links land on their text")
+        t.expectEqual(Transcript(text: text).shown, text, "no blocks, no change")
+        t.expectEqual(Transcript(text: text, blocks: [block(99, "x")]).shown, text, "a block past the end is ignored")
+        t.expect(CodeBlock.parse([["at": 99, "code": "x"]], in: text).isEmpty, "…and dropped when parsed")
+        t.expect(CodeBlock.parse([["at": 2, "code": ""]], in: text).isEmpty, "an empty block is dropped")
+        t.expect(CodeBlock.parse([["at": true, "code": "x"]], in: text).isEmpty, "a boolean `at` is dropped")
+        t.expectEqual(CodeBlock.parse([["at": 2, "code": "ls", "links": [["at": 0, "len": 9, "run": "ls"]]]], in: text).first?.links, [],
+                      "a block's link that runs past its code is dropped")
+    }
+
     // -- the spool carries them: real enqueue() → real drain -------------------------
     do {
         let root = tempDir("spool")
         let queue = root + "/q"
         let links: [[String: Any]] = [["at": 4, "len": 10, "run": "git status"], ["at": 18, "len": 3, "path": "/tmp"]]
         let json = String(data: try! JSONSerialization.data(withJSONObject: links), encoding: .utf8)!
-        _ = python("hook.enqueue('Run git status in tmp.', 'proj', 'k', None, json.loads(sys.argv[2]), '/x/proj')",
-                   args: [json], home: root, bin: root, queue: queue)
+        let blocks = #"[{"at": 0, "code": "ls -la", "links": [{"at": 0, "len": 6, "run": "ls -la"}]}]"#
+        _ = python("hook.enqueue('Run git status in tmp.', 'proj', 'k', None, json.loads(sys.argv[2]), '/x/proj', json.loads(sys.argv[3]))",
+                   args: [json, blocks], home: root, bin: root, queue: queue)
         let item = Spool.drain(in: queue).items.first
         t.expectEqual(item?.links, [TextLink(range: NSRange(location: 4, length: 10), action: .load("git status")),
                                     TextLink(range: NSRange(location: 18, length: 3), action: .open("/tmp"))],
                       "links survive enqueue → drain")
         t.expectEqual(item?.cwd, "/x/proj", "…and so does cwd")
+        t.expectEqual(item?.blocks, [CodeBlock(at: 0, code: "ls -la",
+                                               links: [TextLink(range: NSRange(location: 0, length: 6), action: .load("ls -la"))])],
+                      "…and so do code blocks")
         _ = python("hook.enqueue('Hi.', 'proj', 'k')", home: root, bin: root, queue: queue)
         let bare = Spool.drain(in: queue).items.first
-        t.expect(bare?.links == [] && bare?.cwd == nil, "a turn with no links has none")
+        t.expect(bare?.links == [] && bare?.cwd == nil && bare?.blocks == [], "a turn with no links has none")
         try? fm.removeItem(atPath: root)
     }
 
