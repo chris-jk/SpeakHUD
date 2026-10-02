@@ -131,6 +131,8 @@ def marked(text):
     # is only unwrapped: a paragraph break could split its marks.
     text = re.sub(r"`([^`]*)`", lambda m: m.group(1) if "\n" in m.group(1) or not m.group(1).strip()
                   else CODE_OPEN + m.group(1) + CODE_CLOSE, text)
+    # Command links ([$ npm test](typecmd:…), Cmd+click types them) are code; not spoken.
+    text = re.sub(r"\[[^\]]*\]\(typecmd:[^\)]*\)", "", text)
     text = re.sub(r"\[([^\]]*)\]\([^\)]*\)", r"\1", text)  # links -> label
 
     blocks = []

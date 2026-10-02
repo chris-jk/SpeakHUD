@@ -3,12 +3,12 @@
 Running tab. Current state at top, then next up, waiting-on, recently shipped. Prune every session.
 
 ## Where things stand (2026-10-01)
-- main (pushed 2026-10-01) holds click-to-terminal, clickable text and code blocks; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
-- Tests: `./tests/run.sh`, 414 checks, all passing. No CI; run them before committing.
+- main (pushed 2026-10-01) holds click-to-terminal, clickable text and code blocks. Also committed (not pushed): the desktop-switch fix, which the installed build has. LaunchAgent running; Claude Code hook `installed`.
+- Tests: `./tests/run.sh`, 416 checks, all passing. No CI; run them before committing.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
 - Mic hold: speech pauses while any other process records (macOS 14+), resumes 0.6s after release. Menu toggle **Pause While Recording** (shared prefs, on by default) turns it off.
 - Spool contract (hook ↔ agent) pinned by a test that runs the real Python `enqueue()`; items carry `v: 1`, other versions are dropped with a logged reason.
-- Click-to-terminal: the hook writes `origin` (TERM_PROGRAM, iTerm2 session UUID, tty, host app pid) into each spool item; clicking the HUD's source pill runs an AppleScript that selects that iTerm2 pane / Terminal.app tab (switching desktops), else activates the app. Pill clicks are caught in `HUDPanel.sendEvent` because the pill sits under the transparent title bar. Needs the `apple-events` entitlement (build.sh) and the Automation grant for iTerm2 (already given).
+- Click-to-terminal: the hook writes `origin` (TERM_PROGRAM, iTerm2 session UUID, tty, host app pid) into each spool item; clicking the HUD's source pill runs an AppleScript that activates the terminal *then* selects that iTerm2 pane / Terminal.app tab (activating after selecting stays on the current desktop whenever the terminal has a window there), else activates the app. Pill clicks are caught in `HUDPanel.sendEvent` because the pill sits under the transparent title bar. Needs the `apple-events` entitlement (build.sh) and the Automation grant for iTerm2 (already given).
 - Clickable text: the hook marks inline-code commands and paths (plus bare existing `/…`, `~/…` paths) as `links` + `cwd` in the spool item; the HUD makes them links. Folder → shown selected in its parent; file → default app (Finder if that app would run it); gone → nearest folder; command → new iTerm2 window in cwd, typed with `newline no`, never run. Clicked live: reveal and iTerm load both logged OK.
 - Code blocks: the hook turns each fenced block into an anchor paragraph; shell blocks with commands go in the spool as `blocks` and `Transcript` puts them back in the HUD (never spoken), mapping the voice's word ranges past them. Unit-tested; not yet seen on screen (live test turn was stopped).
 - Agent liveness is a heartbeat: the agent touches `agent.heartbeat` in the spool every 3s; the hook queues only if it's <10s old (waiting up to 4s for a fresh one, e.g. after wake), else speaks directly (HUD binary, then `say -f -`). tests/HookTests.swift runs the real hook against a stub `say`.
@@ -23,6 +23,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## 🟡 Next up
+- [ ] Click the pill on a turn from another desktop once, to see the fix live (reproduced and fixed by hand with osascript; the pill click itself not yet). Review 10-01: if it still stays put, the after-"ok" `app.activate` in `Reveal.go` is the suspect; activate through NSRunningApplication *before* the script instead. Also: the script now brings the terminal forward even when the pane is gone
 - [ ] Glance at the first real turn with a ```bash block in the HUD (layout of the indented code)
 - [ ] Terminal.app path is untested live (no Terminal windows open); iTerm2 verified
 
@@ -33,6 +34,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## ✅ Recently shipped (trim as it ages)
+- 2026-10-01 — Source pill switches desktops again: activate before selecting the pane (it had stayed put when iTerm2 had a window on the current desktop). Hook's `typecmd:` link skip folded back into the repo
 - 2026-10-01 — Slash commands like `/chrome` in inline code no longer link to / (seen in the log)
 - 2026-10-01 — Shell code blocks show in the HUD (silent) with each command line clickable
 - 2026-10-01 — Paths, commands and URLs in the HUD text are clickable: folder shown in its parent, file opens, command typed into a new iTerm2 window (never run)

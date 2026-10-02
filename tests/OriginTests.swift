@@ -45,6 +45,14 @@ let originSuite = Suite("Origin") { t in
     let terminal = Reveal.script(for: Origin(term: "Apple_Terminal", tty: "/dev/ttys009"))
     t.expectEqual(terminal?.bundleID, Reveal.terminal, "Terminal.app is asked about its tabs")
     t.expect(terminal?.source.contains("(tty of t) is \"/dev/ttys009\"") == true, "…by tty")
+    // Activating after the window is picked stays on the current desktop whenever the
+    // terminal has a window there; activate first and the pick switches desktops.
+    for (name, script, pick) in [("iTerm2", byID, "select w"), ("Terminal", terminal, "set index of w to 1")] {
+        let src = script?.source ?? ""
+        let act = src.range(of: "activate"), sel = src.range(of: pick)
+        t.expect(act != nil && sel != nil && act!.lowerBound < sel!.lowerBound,
+                 "the \(name) script activates before it picks the window")
+    }
     t.expect(Reveal.script(for: Origin(term: "vscode", tty: "/dev/ttys003", appPID: 900)) == nil,
              "any other terminal gets no script (its app is activated instead)")
     t.expect(Reveal.script(for: Origin(term: "Apple_Terminal", appPID: 900)) == nil,

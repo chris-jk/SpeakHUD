@@ -226,10 +226,12 @@ enum Reveal {
             if let s = origin.session { test = "(id of s) is \"\(s)\"" }
             else if let t = origin.tty { test = "(tty of s) is \"\(t)\"" }
             else { return nil }
-            // `select` on the window makes it key, which is what moves to its desktop
-            // once the app activates.
+            // Activate first, then select. Activating lands on whatever desktop iTerm2
+            // already has a window on; only a window brought forward by an app that's
+            // already active pulls macOS over to the desktop that window is on.
             return (iTerm, """
             tell application id "\(iTerm)"
+                activate
                 repeat with w in windows
                     repeat with t in tabs of w
                         repeat with s in sessions of t
@@ -237,7 +239,6 @@ enum Reveal {
                                 select w
                                 select t
                                 select s
-                                activate
                                 return "ok"
                             end if
                         end repeat
@@ -250,12 +251,12 @@ enum Reveal {
         if term == "Apple_Terminal", let tty = origin.tty {
             return (terminal, """
             tell application id "\(terminal)"
+                activate
                 repeat with w in windows
                     repeat with t in tabs of w
                         if (tty of t) is "\(tty)" then
                             set selected of t to true
                             set index of w to 1
-                            activate
                             return "ok"
                         end if
                     end repeat
