@@ -133,6 +133,8 @@ def marked(text):
                   else CODE_OPEN + m.group(1) + CODE_CLOSE, text)
     # Command links ([$ npm test](typecmd:…), Cmd+click types them) are code; not spoken.
     text = re.sub(r"\[[^\]]*\]\(typecmd:[^\)]*\)", "", text)
+    # A line that held only a command link is left a bare bullet or checkbox; drop it.
+    text = re.sub(r"(?m)^[ \t]*(?:(?:[-+*]|\d+[.)])(?:[ \t]+\[[ xX]\])?|\[[ xX]\])[ \t]*$\n?", "", text)
     text = re.sub(r"\[([^\]]*)\]\([^\)]*\)", r"\1", text)  # links -> label
 
     blocks = []
@@ -449,6 +451,7 @@ def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None):
         with open(tmp, "w") as f:
             json.dump(item, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
+        return stem     # read-question.py watches for the agent to let go of it
     except OSError:
         # Don't leave a partial .tmp behind to accumulate; the agent ignores them,
         # but nothing else would ever clean them up.

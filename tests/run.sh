@@ -5,3 +5,5 @@ cd "$(dirname "$0")/.."
 OUT="$(mktemp -d)/speakhud-tests"
 swiftc -D TESTING speak-hud.swift tests/*.swift -o "$OUT"
 "$OUT"
+# The AskUserQuestion hook, against a fake HUD (Python: it never touches the app code).
+python3 tests/read_question_test.py

@@ -98,6 +98,16 @@ let linkSuite = Suite("Links") { t in
         try? fm.removeItem(atPath: root)
     }
 
+    // -- the hook: a command link on its own line goes, bullet and checkbox too ----
+    do {
+        let root = tempDir("typecmd")
+        let md = "Next:\n- [$ npm test](typecmd:npm%20test)\n- [ ] [$ make](typecmd:make)\n- [ ] Real item"
+        let out = python("print(json.dumps(hook.clean(sys.argv[2])))", args: [md], home: root, bin: root)
+        let text = (try? JSONSerialization.jsonObject(with: Data(out.utf8), options: .fragmentsAllowed)) as? String
+        t.expectEqual(text, "Next:\n[ ] Real item", "no bare '-' or '[ ]' left where a command link was")
+        try? fm.removeItem(atPath: root)
+    }
+
     // -- fenced blocks: never spoken, shown back in place with their commands ----------
     do {
         let root = tempDir("blocks")

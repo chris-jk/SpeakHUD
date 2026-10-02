@@ -112,3 +112,27 @@ without reading the text, it pipes the text to `say -f -`. The text always goes 
 stdin, never as an argument, so a turn that starts with `-` can't be read as an option.
 If nothing can speak, the hook logs `speakhud: …` to stderr and exits normally.
 `tests/HookTests.swift` runs the real hook against a stub `say` to pin this.
+
+## Questions: `read-question.py`
+
+Two hooks on `AskUserQuestion`. The Stop hook can't read a question, since the turn
+hasn't ended: it waits on the answer.
+
+- `PreToolUse` (async, timeout 600) waits for the spool to empty, plays a chime
+  (`READQ_CHIME`, Glass; `none` for silence), queues the question (with any text Claude
+  wrote before asking) under `<session>:question`, waits for the agent to let it go,
+  pauses (`READQ_PAUSE`, 2s), then queues the options.
+- `PostToolUse` with `--answered` (sync, timeout 5) drops that question's marker in
+  `~/.local/state/speakhud/questions/`, so its options aren't read once it's answered.
+
+It also stands down for a newer question from the session, for Stop (read from the
+agent log), and when a wait runs past 120s. No hook fires between answers inside one
+multi-question call, so Claude is told to ask one question per call. Installed by hand
+for now:
+
+```json
+"PreToolUse":  [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/read-question.py", "async": true, "timeout": 600 }] }],
+"PostToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/read-question.py --answered", "timeout": 5 }] }]
+```
+
+Tests: `tests/read_question_test.py` (run by `tests/run.sh`).
