@@ -3,7 +3,7 @@
 Running tab. Current state at top, then next up, waiting-on, recently shipped. Prune every session.
 
 ## Where things stand (2026-10-01)
-- main (pushed 2026-10-01) holds click-to-terminal, clickable text and code blocks. Also committed (not pushed) and installed: the desktop-switch fix and the question reader. LaunchAgent running; Claude Code hook `installed`.
+- main (pushed 2026-10-01) holds click-to-terminal, clickable text, code blocks, the desktop-switch fix and the question reader; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
 - Tests: `./tests/run.sh`, 417 checks + 13 Python tests for the question hook, all passing. No CI; run them before committing.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
 - Mic hold: speech pauses while any other process records (macOS 14+), resumes 0.6s after release. Menu toggle **Pause While Recording** (shared prefs, on by default) turns it off.
