@@ -52,9 +52,15 @@ its turn, and the HUD shows what's behind it:
   color every time (a stable hash of the name, not Swift's per-process `hashValue`),
   so four terminals become four colors you recognize rather than four names you read.
   The `next:` line colors each waiting project the same way.
+- **A terminal that has its own color gives it to the pill.** Where a hook colors each
+  terminal's window frame by project (claude-launcher's `terminal-project.py`), the pill
+  is filled with that same color, so it looks like the window it belongs to. Anything
+  else keeps the tinted, hashed color above.
 - **Click the pill to go to that terminal.** A `↗` after the name means SpeakHUD knows
   where it came from: clicking switches to that iTerm2 pane or Terminal.app tab, on
-  whatever desktop it's on. Other terminals (VS Code, Ghostty, …) get their app brought
+  whatever desktop it's on. The rest of the screen dims for a second and that window
+  gets a ring in the pill's color, so in a group of terminals you see which one came
+  forward. Other terminals (VS Code, Ghostty, …) get their app brought
   forward; a hotkey read goes back to the app you read it from. The first click asks
   for permission to control iTerm2 (System Settings › Privacy & Security › Automation).
 - **Paths, commands and URLs in the text are links.** A folder is shown selected in the

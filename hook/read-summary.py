@@ -11,7 +11,7 @@ The finished turn is *queued*, never spoken directly: several terminals running
 Claude at once would otherwise each kill whatever was already playing. The
 SpeakHUD agent owns the one HUD and drains this queue one item at a time.
 """
-import sys, json, os, re, glob, time, subprocess, shlex, shutil, textwrap
+import sys, json, os, re, glob, time, subprocess, shlex, shutil, textwrap, importlib.util
 
 WAIT_SECONDS = 3.0      # max time to wait for the final message to be flushed
 POLL_SECONDS = 0.1
@@ -31,6 +31,10 @@ HEARTBEAT_GRACE = float(os.environ.get("SPEAKHUD_HEARTBEAT_GRACE") or 4.0)
 # iTerm2 sets ITERM_SESSION_ID to "w4t0p0:<UUID>"; the UUID is the session's AppleScript id.
 ITERM_SESSION = re.compile(r"^(?:w\d+t\d+p\d+:)?([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})$")
 APP_EXEC = re.compile(r"\.app/Contents/MacOS/")
+# The hook that colors each terminal's window frame by project (claude-launcher's
+# terminal-project.py), if it's installed. Its session_frame_color() is asked for the
+# color so the HUD's pill can match the window.
+TERMINAL_HOOK = os.path.expanduser("~/.claude/hooks/terminal-project.py")
 
 
 def find_transcript(data):
@@ -347,12 +351,13 @@ def path_target(s, cwd, loose):
 
 def origin():
     """Which terminal this turn came from, so clicking the HUD's project pill can take
-    you back to it: {"term", "session", "tty", "app_pid"}, each only if found.
+    you back to it: {"term", "session", "tty", "app_pid", "color"}, each only if found.
 
     The hook inherits Claude's environment, so iTerm2's own variable names the exact
     pane. The process tree adds the tty (how Terminal.app finds a tab) and the app
-    hosting the terminal (all any other terminal can offer). Best effort and never
-    raises: a turn that can't say where it came from is still read.
+    hosting the terminal (all any other terminal can offer). The color is the
+    terminal's window frame, so the pill can look like the window it goes to. Best
+    effort and never raises: a turn that can't say where it came from is still read.
     """
     out = {}
     term = os.environ.get("TERM_PROGRAM", "")
@@ -371,7 +376,25 @@ def origin():
         out["tty"] = tty
     if app_pid:
         out["app_pid"] = app_pid
+    color = frame_color()
+    if color:
+        out["color"] = color
     return out
+
+
+def frame_color():
+    """"#rrggbb" of this terminal's window frame, from the hook that paints it, or None:
+    no such hook, or it hasn't colored this session (one started outside any project)."""
+    try:
+        spec = importlib.util.spec_from_file_location("terminal_project", TERMINAL_HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        color = hook.session_frame_color()
+    except (Exception, SystemExit):   # someone else's file: whatever it does, the turn is still read
+        return None
+    if isinstance(color, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
+        return color.lower()
+    return None
 
 
 def ancestry(ps, pid):

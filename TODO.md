@@ -2,9 +2,11 @@
 
 Running tab. Current state at top, then next up, waiting-on, recently shipped. Prune every session.
 
-## Where things stand (2026-10-01)
-- main (pushed 2026-10-01) holds click-to-terminal, clickable text, code blocks, the desktop-switch fix and the question reader; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
-- Tests: `./tests/run.sh`, 417 checks + 13 Python tests for the question hook, all passing. No CI; run them before committing.
+## Where things stand (2026-10-05)
+- main (pushed 2026-10-05) holds click-to-terminal, clickable text, code blocks, the desktop-switch fix, the question reader, the pill's terminal color and the click highlight; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
+- Tests: `./tests/run.sh`, 451 checks + 13 Python tests for the question hook, all passing. No CI; run them before committing.
+- Pill matches the terminal: the hook adds `origin.color`, asked of claude-launcher's `~/.claude/hooks/terminal-project.py` (`session_frame_color()`, added there the same day); the pill is then filled solid with that frame color, and the `next:` names use it too. No color for a session started in the home folder until its first project edit; those keep the hashed tint.
+- Click highlight (`Spotlight`): the reveal scripts reply with the window's bounds, and after the jump every screen dims 40% for 0.9 s (fades over 0.4 s) with a ring in the pill's color around that window; clicks pass through, and a desktop switch restarts the 0.9 s. Checked 10-05: drawing rendered offscreen, one live flash, the real script's reply for a live iTerm2 window, and the pill clicked live with four terminals up.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
 - Mic hold: speech pauses while any other process records (macOS 14+), resumes 0.6s after release. Menu toggle **Pause While Recording** (shared prefs, on by default) turns it off.
 - Spool contract (hook ↔ agent) pinned by a test that runs the real Python `enqueue()`; items carry `v: 1`, other versions are dropped with a logged reason.
@@ -24,6 +26,8 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## 🟡 Next up
+- [ ] Click the pill once on a turn from another desktop: does the dim and ring land after the switch (`Spotlight` restarts its 0.9 s on a desktop change)?
+- [ ] Split panes in one iTerm2 window (the tile-terminals skill's layout): the ring goes around the whole window. Ring the pane instead; its frame is the Accessibility frame of the focused text area's scroll area (the text area itself is as tall as the scrollback)
 - [ ] Move the question pause into `Playback` (one spool item with the options and a pause): another session's turn can land in the 2s gap today, and Stop/skip would act on the whole question natively (review 10-01)
 - [ ] Have `ClaudeHook` (--setup-claude) install read-question.py and both its hook entries, and bundle it in build.sh, so it stops being a hand install
 - [ ] Click the pill on a turn from another desktop once, to see the fix live (reproduced and fixed by hand with osascript; the pill click itself not yet). Review 10-01: if it still stays put, the after-"ok" `app.activate` in `Reveal.go` is the suspect; activate through NSRunningApplication *before* the script instead. Also: the script now brings the terminal forward even when the pane is gone
@@ -37,6 +41,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## ✅ Recently shipped (trim as it ages)
+- 2026-10-05 — The pill takes the terminal's window frame color; clicking it dims the screen and rings the window it went to
 - 2026-10-01 — AskUserQuestion read aloud: chime, question, 2s pause, options; review fixes (own spool key, stops on answer/Stop/newer question, gives up on a long wait). A command link alone on a line no longer leaves a bare "-" or "[ ]"
 - 2026-10-01 — Source pill switches desktops again: activate before selecting the pane (it had stayed put when iTerm2 had a window on the current desktop). Hook's `typecmd:` link skip folded back into the repo
 - 2026-10-01 — Slash commands like `/chrome` in inline code no longer link to / (seen in the log)

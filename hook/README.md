@@ -64,7 +64,10 @@ Instead the hook writes one JSON file per finished turn into
 - `origin` says which terminal the turn came from, so clicking the HUD's project pill can
   go back there: `term` is `TERM_PROGRAM`, `session` the UUID from iTerm2's
   `ITERM_SESSION_ID`, and `tty` and `app_pid` (the outermost `.app` above Claude) come
-  from the process tree. Each key is there only if found. The agent validates `session`
+  from the process tree. `color` (`"#rrggbb"`) is the terminal's window frame, which the
+  pill takes on: the hook imports `~/.claude/hooks/terminal-project.py` (claude-launcher)
+  and asks its `session_frame_color()`; without that hook, or in a session it hasn't
+  colored, there is none. Each key is there only if found. The agent validates `session`
   and `tty` before they go anywhere near an AppleScript, and ignores what doesn't fit;
   a bad `origin` never drops the item. It's an optional key, so `v` stays 1.
 - `links` are what the HUD makes clickable besides URLs: `at`/`len` is a UTF-16 range

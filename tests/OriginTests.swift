@@ -34,6 +34,18 @@ let originSuite = Suite("Origin") { t in
     t.expectEqual(Origin(json: ["session": "nope", "tty": "/dev/ttys004"]), Origin(tty: "/dev/ttys004"),
                   "one bad field doesn't cost the good ones")
 
+    // -- the terminal's frame color, for the pill -----------------------------------
+    t.expectEqual(Origin(json: ["tty": "/dev/ttys1", "color": "#40B2B2"])?.color, "#40b2b2", "a frame color is read, lower-cased")
+    for bad: Any in ["40b2b2", "#40b2b", "#40b2b2ff", "#gggggg", "teal", 4239026, true] {
+        t.expect(Origin(json: ["tty": "/dev/ttys1", "color": bad])?.color == nil, "a color that isn't #rrggbb is dropped: \(bad)")
+    }
+    t.expect(Origin(json: ["color": "#40b2b2"]) == nil, "a color alone can't go anywhere, so it's nil")
+    let teal = Accent.frame("#40b2b2")?.usingColorSpace(.sRGB)
+    t.expect(teal != nil && abs(teal!.redComponent - 64 / 255) < 0.001 && abs(teal!.greenComponent - 178 / 255) < 0.001
+             && abs(teal!.blueComponent - 178 / 255) < 0.001, "the pill's color is the frame's, channel for channel")
+    t.expect(Accent.frame(nil) == nil && Accent.frame("#40b2") == nil && Accent.frame("#zzzzzz") == nil,
+             "no frame color, no override: the pill keeps its own")
+
     // -- which script, for which terminal ------------------------------------------
     let byID = Reveal.script(for: Origin(term: "iTerm.app", session: session, tty: "/dev/ttys002"))
     t.expectEqual(byID?.bundleID, Reveal.iTerm, "iTerm2 is asked about iTerm2 panes")
@@ -53,6 +65,26 @@ let originSuite = Suite("Origin") { t in
         t.expect(act != nil && sel != nil && act!.lowerBound < sel!.lowerBound,
                  "the \(name) script activates before it picks the window")
     }
+    // Each script says where the window it picked is, so the HUD can point at it.
+    for (name, script) in [("iTerm2", byID), ("Terminal", terminal)] {
+        t.expect(script?.source.contains("set b to bounds of w") == true, "the \(name) script reports the window's bounds")
+        t.expect(script?.source.components(separatedBy: "return \"ok\"").count == 2,
+                 "…and still answers a bare ok when the window won't give them (\(name))")
+    }
+    t.expectEqual(Reveal.bounds(inReply: "ok 43 33 713 507"), NSRect(x: 43, y: 33, width: 670, height: 474),
+                  "left top right bottom becomes a rect, still counted from the top")
+    t.expectEqual(Reveal.bounds(inReply: "ok -1512 -200 -842 274"), NSRect(x: -1512, y: -200, width: 670, height: 474),
+                  "a window on a screen left of or above the main one has negative bounds")
+    for bad in ["ok", "missing", "ok 1 2 3", "ok 1 2 3 x", "ok 10 10 10 50", "ok 10 50 90 10", "no 1 2 3 4", ""] {
+        t.expect(Reveal.bounds(inReply: bad) == nil, "no usable bounds in \"\(bad)\"")
+    }
+    t.expect(Reveal.bounds(inReply: nil) == nil, "no reply, no bounds")
+    // AppleScript counts down from the top of the main screen, AppKit up from its bottom.
+    t.expectEqual(Spotlight.flipped(NSRect(x: 43, y: 33, width: 670, height: 474), mainHeight: 982),
+                  NSRect(x: 43, y: 475, width: 670, height: 474), "bounds are flipped into AppKit's coordinates")
+    t.expectEqual(Spotlight.flipped(NSRect(x: 100, y: -500, width: 300, height: 200), mainHeight: 982),
+                  NSRect(x: 100, y: 1282, width: 300, height: 200), "…including a window on a screen above the main one")
+
     t.expect(Reveal.script(for: Origin(term: "vscode", tty: "/dev/ttys003", appPID: 900)) == nil,
              "any other terminal gets no script (its app is activated instead)")
     t.expect(Reveal.script(for: Origin(term: "Apple_Terminal", appPID: 900)) == nil,

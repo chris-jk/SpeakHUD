@@ -297,11 +297,28 @@ let hookSuite = Suite("Hook") { t in
         """).err.trimmingCharacters(in: .whitespacesAndNewlines)
         t.expectEqual(bare, "[null, null]", "no TERM_PROGRAM and a junk session id leave both out")
 
+        // The pill's color is asked of the hook that paints the terminal's window frame.
+        t.expect(o != nil && o?.color == nil, "no terminal hook installed: no color")
+        func color(_ terminalHook: String) -> String {
+            let dir = sb.home + "/.claude/hooks"
+            try? fm.removeItem(atPath: dir + "/__pycache__")   // same-second rewrites would reuse it
+            sb.executable(dir + "/terminal-project.py", terminalHook, mode: 0o644)
+            return sb.run(env + "print(json.dumps(hook.origin().get('color')), file=sys.stderr)")
+                .err.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        t.expectEqual(color("def session_frame_color(): return '#40B2B2'"), "\"#40b2b2\"",
+                      "origin() carries the terminal's frame color, lower-cased")
+        t.expectEqual(color("def session_frame_color(): return None"), "null", "a session it hasn't colored has none")
+        t.expectEqual(color("def session_frame_color(): return 'teal\" then beep'"), "null", "anything but #rrggbb is left out")
+        t.expectEqual(color("def frame_color(app): return (0, 0, 0)"), "null", "a terminal hook from before it could say: none")
+        t.expectEqual(color("import sys; sys.exit(3)"), "null", "a terminal hook that exits doesn't take the turn with it")
+
         // Real producer, real consumer: the origin survives the spool.
-        clean(sb.run("hook.enqueue('Hi.', 'proj', 'k', {'term': 'Apple_Terminal', 'tty': '/dev/ttys009', 'app_pid': 321})"),
+        clean(sb.run("hook.enqueue('Hi.', 'proj', 'k', {'term': 'Apple_Terminal', 'tty': '/dev/ttys009', 'app_pid': 321, 'color': '#40b2b2'})"),
               "enqueue with origin")
         let batch = Spool.drain(in: sb.queue)
-        t.expectEqual(batch.items.first?.origin, Origin(term: "Apple_Terminal", tty: "/dev/ttys009", appPID: 321),
+        t.expectEqual(batch.items.first?.origin,
+                      Origin(term: "Apple_Terminal", tty: "/dev/ttys009", appPID: 321, color: "#40b2b2"),
                       "the origin the hook writes is the origin the agent reads")
         clean(sb.run("hook.enqueue('Hi.', 'proj', 'k')"), "enqueue without origin")
         let plain = Spool.drain(in: sb.queue)

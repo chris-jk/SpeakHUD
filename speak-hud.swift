@@ -179,9 +179,12 @@ struct Origin: Equatable {
     var session: String? = nil  // iTerm2 session id (the UUID in ITERM_SESSION_ID)
     var tty: String? = nil      // "/dev/ttys002"
     var appPID: pid_t? = nil    // the GUI app hosting the terminal
+    var color: String? = nil    // "#rrggbb", the terminal's window frame, for the pill to match
 
-    init(term: String? = nil, session: String? = nil, tty: String? = nil, appPID: pid_t? = nil) {
+    init(term: String? = nil, session: String? = nil, tty: String? = nil, appPID: pid_t? = nil,
+         color: String? = nil) {
         self.term = term; self.session = session; self.tty = tty; self.appPID = appPID
+        self.color = color
     }
 
     /// From the spool's `origin` object, or `--origin` JSON. A field that doesn't look
@@ -201,6 +204,10 @@ struct Origin: Equatable {
            n.doubleValue > 1, n.doubleValue < Double(Int32.max), n.doubleValue == n.doubleValue.rounded() {
             appPID = pid_t(n.int32Value)
         }
+        if let c = o["color"] as? String,
+           c.range(of: #"^#[0-9A-Fa-f]{6}$"#, options: .regularExpression) != nil {
+            color = c.lowercased()
+        }
         if session == nil, tty == nil, appPID == nil { return nil }
     }
 
@@ -216,6 +223,26 @@ struct Origin: Equatable {
 enum Reveal {
     static let iTerm = "com.googlecode.iterm2"
     static let terminal = "com.apple.Terminal"
+
+    /// How both scripts answer once they've picked the window `w`: "ok", then its bounds
+    /// if it will give them, so the HUD can point at it (Spotlight).
+    private static let replyWithBounds = """
+    try
+        set b to bounds of w
+        return "ok " & (item 1 of b) & " " & (item 2 of b) & " " & (item 3 of b) & " " & (item 4 of b)
+    end try
+    return "ok"
+    """
+
+    /// The window's bounds out of a script's reply, as AppleScript counts them: left,
+    /// top, right, bottom, down from the top of the main screen. Nil for a bare "ok".
+    static func bounds(inReply reply: String?) -> NSRect? {
+        let parts = (reply ?? "").split(separator: " ")
+        guard parts.count == 5, parts[0] == "ok" else { return nil }
+        let n = parts.dropFirst().compactMap { Double($0) }
+        guard n.count == 4, n[2] > n[0], n[3] > n[1] else { return nil }
+        return NSRect(x: n[0], y: n[1], width: n[2] - n[0], height: n[3] - n[1])
+    }
 
     /// The AppleScript that selects the pane `origin` names, and the app it talks to.
     /// Nil when it can't name one. Only validated ids and ttys are ever interpolated.
@@ -239,7 +266,7 @@ enum Reveal {
                                 select w
                                 select t
                                 select s
-                                return "ok"
+                                \(replyWithBounds)
                             end if
                         end repeat
                     end repeat
@@ -257,7 +284,7 @@ enum Reveal {
                         if (tty of t) is "\(tty)" then
                             set selected of t to true
                             set index of w to 1
-                            return "ok"
+                            \(replyWithBounds)
                         end if
                     end repeat
                 end repeat
@@ -269,7 +296,7 @@ enum Reveal {
     }
 
     enum Outcome: Equatable, CustomStringConvertible {
-        case pane          // the exact pane or tab
+        case pane(NSRect?) // the exact pane or tab, and its window's bounds if known
         case app           // only its app
         case gone          // the terminal or app has since closed
         case denied        // Automation permission refused
@@ -299,9 +326,9 @@ enum Reveal {
                     let msg = err[NSAppleScript.errorMessage] as? String ?? "AppleScript error \(code)"
                     return .failed(msg)
                 }
-                if result?.stringValue == "ok" {
+                if let reply = result?.stringValue, reply.hasPrefix("ok") {
                     app.activate(options: [])   // belt and braces: the script's own activate
-                    return .pane                 //   can lose out to activation rules on macOS 14+
+                    return .pane(bounds(inReply: reply))   // can lose out to activation rules on macOS 14+
                 }
                 // Pane closed; fall through to whatever app is left.
             }
@@ -911,6 +938,15 @@ enum Accent {
         for byte in source.utf8 { h = (h &* 33) &+ UInt64(byte) }
         return palette[Int(h % UInt64(palette.count))]
     }
+
+    /// The terminal's own frame color ("#rrggbb" from the item's origin), when it has
+    /// one: then the pill is the color of the window it goes back to.
+    static func frame(_ hex: String?) -> NSColor? {
+        guard let hex = hex, hex.count == 7, hex.hasPrefix("#"),
+              let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        return NSColor(srgbRed: CGFloat(v >> 16 & 0xFF) / 255, green: CGFloat(v >> 8 & 0xFF) / 255,
+                       blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
 }
 
 /// A colored pill naming whoever is speaking. When the item knows where it came
@@ -918,6 +954,9 @@ enum Accent {
 final class SourceBadge: NSView {
     var text = "" { didSet { needsDisplay = true } }
     var accent: NSColor = .systemBlue { didSet { needsDisplay = true } }
+    /// Filled with the accent instead of tinted by it. For an accent that is the
+    /// terminal's frame color: a solid pill is the same swatch as that window's title bar.
+    var solid = false { didSet { needsDisplay = true } }
     var isLink = false {
         didSet {
             needsDisplay = true
@@ -939,8 +978,16 @@ final class SourceBadge: NSView {
         let p = NSMutableParagraphStyle()
         p.lineBreakMode = .byTruncatingTail   // long repo names shouldn't stretch the pill
         return [.font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: accent,
+                .foregroundColor: ink,
                 .paragraphStyle: p]
+    }
+
+    /// The name and dot: the accent itself on a tinted pill, black or white on a solid
+    /// one, whichever the accent leaves readable.
+    private var ink: NSColor {
+        guard solid, let c = accent.usingColorSpace(.sRGB) else { return accent }
+        let luma = 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        return luma > 0.5 ? NSColor(white: 0, alpha: 0.85) : .white
     }
 
     private var label: String { isLink ? text + Self.arrow : text }
@@ -955,10 +1002,10 @@ final class SourceBadge: NSView {
         let r = bounds
         let pill = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: r.height / 2, yRadius: r.height / 2)
-        accent.withAlphaComponent(0.18).setFill(); pill.fill()
-        accent.withAlphaComponent(0.5).setStroke(); pill.lineWidth = 1; pill.stroke()
+        accent.withAlphaComponent(solid ? 1 : 0.18).setFill(); pill.fill()
+        accent.withAlphaComponent(solid ? 1 : 0.5).setStroke(); pill.lineWidth = 1; pill.stroke()
 
-        accent.setFill()
+        ink.setFill()
         NSBezierPath(ovalIn: NSRect(x: Self.padX, y: (r.height - Self.dot) / 2,
                                     width: Self.dot, height: Self.dot)).fill()
 
@@ -975,6 +1022,100 @@ final class SourceBadge: NSView {
     /// Whether a click at this window location lands on a live link.
     func takesClick(at locationInWindow: NSPoint) -> Bool {
         isLink && !isHiddenOrHasHiddenAncestor && bounds.contains(convert(locationInWindow, from: nil))
+    }
+}
+
+/// After the pill takes you to a terminal: dim everything else for a moment and ring
+/// that window in the pill's color. Four terminals tiled together look alike, and the
+/// one that just came forward isn't obvious.
+final class Spotlight {
+    static let dim: CGFloat = 0.4
+    static let ring: CGFloat = 5
+    static let hold: TimeInterval = 0.9
+    static let fade: TimeInterval = 0.4
+
+    /// AppleScript's bounds count down from the top of the main screen; AppKit's count
+    /// up from its bottom.
+    static func flipped(_ r: NSRect, mainHeight: CGFloat? = nil) -> NSRect {
+        let h = mainHeight ?? NSScreen.screens.first?.frame.height ?? 0
+        return NSRect(x: r.minX, y: h - r.maxY, width: r.width, height: r.height)
+    }
+
+    private final class Shade: NSView {
+        var hole = NSRect.zero
+        var color = NSColor.white
+
+        override func draw(_ dirtyRect: NSRect) {
+            let shade = NSBezierPath(rect: bounds)
+            shade.append(NSBezierPath(roundedRect: hole, xRadius: 10, yRadius: 10))
+            shade.windingRule = .evenOdd
+            NSColor.black.withAlphaComponent(Spotlight.dim).setFill(); shade.fill()
+            // Inside the window's edge: a ring outside it is cut off at the screen's.
+            let inset = Spotlight.ring / 2
+            let ring = NSBezierPath(roundedRect: hole.insetBy(dx: inset, dy: inset), xRadius: 10, yRadius: 10)
+            ring.lineWidth = Spotlight.ring
+            color.setStroke(); ring.stroke()
+        }
+    }
+
+    private var windows: [NSWindow] = []
+    private var timer: Timer?
+    private var showing = 0   // bumped per show, so a finished fade can't take down a newer one
+
+    init() {
+        // The jump may have switched desktops: start the moment over once it lands.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self, !self.windows.isEmpty else { return }
+            self.windows.forEach { $0.alphaValue = 1 }
+            self.linger()
+        }
+    }
+
+    /// `target` in AppKit screen coordinates. One shade per screen; clicks pass through.
+    func show(around target: NSRect, color: NSColor) {
+        clear()
+        for screen in NSScreen.screens {
+            let w = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            w.isOpaque = false
+            w.backgroundColor = .clear
+            w.hasShadow = false
+            w.ignoresMouseEvents = true
+            w.isReleasedWhenClosed = false
+            w.animationBehavior = .none
+            w.level = .floating   // over app windows, under the menu bar and Dock
+            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+            let shade = Shade(frame: NSRect(origin: .zero, size: screen.frame.size))
+            shade.hole = target.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY)
+            shade.color = color
+            w.contentView = shade
+            w.setFrame(screen.frame, display: true)
+            w.orderFrontRegardless()
+            windows.append(w)
+        }
+        linger()
+    }
+
+    private func linger() {
+        showing += 1
+        let mine = showing
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: Self.hold, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = Self.fade
+                self.windows.forEach { $0.animator().alphaValue = 0 }
+            }, completionHandler: { [weak self] in
+                if self?.showing == mine { self?.clear() }
+            })
+        }
+    }
+
+    private func clear() {
+        timer?.invalidate()
+        timer = nil
+        windows.forEach { $0.orderOut(nil) }
+        windows = []
     }
 }
 
@@ -1471,6 +1612,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// Where the item on screen came from. Kept after it finishes, so the pill still
     /// works while the panel waits to hide.
     private var shownOrigin: Origin?
+    private let spotlight = Spotlight()
     /// The text on screen (spoken text plus code blocks), and where its commands are typed.
     private var transcript = Transcript(text: "")
     private var shownLinks: [TextLink] { transcript.links }
@@ -1569,6 +1711,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         let outcome = Reveal.go(origin)
         log("reveal \(sourceBadge.text): \(outcome)")
         switch outcome {
+        case .pane(let bounds?):
+            spotlight.show(around: Spotlight.flipped(bounds), color: sourceBadge.accent)
+            if panel.isVisible { panel.orderFrontRegardless() }   // the HUD stays lit, above the dimming
         case .pane, .app: break
         default: NSSound.beep()
         }
@@ -1600,7 +1745,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         setTranscript()
         shownOrigin = item.origin
         sourceBadge.text = item.source
-        sourceBadge.accent = Accent.color(for: item.source)
+        let frame = Accent.frame(item.origin?.color)
+        sourceBadge.accent = frame ?? Accent.color(for: item.source)
+        sourceBadge.solid = frame != nil
         sourceBadge.isLink = item.origin != nil
         sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
         if !isMinimized { panel.orderFrontRegardless() }
@@ -1618,7 +1765,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         skipBtn.isEnabled = s.canSkip
     }
 
-    /// "next: Alpha, Beta", each name in its project's color.
+    /// "next: Alpha, Beta", each name in its project's color (its terminal's, if known).
     private func queuePreview(_ sources: [String]) -> NSAttributedString {
         guard !sources.isEmpty else { return NSAttributedString(string: "") }
         let dim: [NSAttributedString.Key: Any] = [
@@ -1630,7 +1777,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
             if i > 0 { out.append(NSAttributedString(string: ", ", attributes: dim)) }
             out.append(NSAttributedString(string: source, attributes: [
                 .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                .foregroundColor: Accent.color(for: source),
+                .foregroundColor: Accent.frame(queue.first { $0.source == source }?.origin?.color)
+                    ?? Accent.color(for: source),
             ]))
         }
         if sources.count > 3 { out.append(NSAttributedString(string: "…", attributes: dim)) }
