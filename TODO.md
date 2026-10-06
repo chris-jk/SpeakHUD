@@ -17,21 +17,20 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - Agent liveness is a heartbeat: the agent touches `agent.heartbeat` in the spool every 3s; the hook queues only if it's <10s old (waiting up to 4s for a fresh one, e.g. after wake), else speaks directly (HUD binary, then `say -f -`). tests/HookTests.swift runs the real hook against a stub `say`.
 
 ## ⏭️ Next session — start here
-- (nothing open)
+- [ ] Move the question pause into `Playback` (first item under Next up)
+- [ ] Ring the pane, not the window, when the terminal is a split pane (second item under Next up)
 
 ## 🚨 Blocking
 - (none)
 
 ## 🙋 Owner only
-- (none)
+- [ ] Click the pill on a turn from another desktop: does it switch desktops, and do the dim and ring land after the switch (`Spotlight` restarts its 0.9 s on a desktop change)? Reproduced and fixed by hand with osascript 10-01; the pill click itself across desktops not yet. If it stays put, the after-"ok" `app.activate` in `Reveal.go` is the suspect; activate through NSRunningApplication *before* the script instead. Also: the script brings the terminal forward even when the pane is gone
+- [ ] Glance at the first real turn with a ```bash block in the HUD (layout of the indented code)
 
 ## 🟡 Next up
-- [ ] Click the pill once on a turn from another desktop: does the dim and ring land after the switch (`Spotlight` restarts its 0.9 s on a desktop change)?
-- [ ] Split panes in one iTerm2 window (the tile-terminals skill's layout): the ring goes around the whole window. Ring the pane instead; its frame is the Accessibility frame of the focused text area's scroll area (the text area itself is as tall as the scrollback)
 - [ ] Move the question pause into `Playback` (one spool item with the options and a pause): another session's turn can land in the 2s gap today, and Stop/skip would act on the whole question natively (review 10-01)
+- [ ] Split panes in one iTerm2 window (the tile-terminals skill's layout): the ring goes around the whole window. Ring the pane instead; its frame is the Accessibility frame of the focused text area's scroll area (the text area itself is as tall as the scrollback)
 - [ ] Have `ClaudeHook` (--setup-claude) install read-question.py and both its hook entries, and bundle it in build.sh, so it stops being a hand install
-- [ ] Click the pill on a turn from another desktop once, to see the fix live (reproduced and fixed by hand with osascript; the pill click itself not yet). Review 10-01: if it still stays put, the after-"ok" `app.activate` in `Reveal.go` is the suspect; activate through NSRunningApplication *before* the script instead. Also: the script now brings the terminal forward even when the pane is gone
-- [ ] Glance at the first real turn with a ```bash block in the HUD (layout of the indented code)
 - [ ] Terminal.app path is untested live (no Terminal windows open); iTerm2 verified
 
 ## 🧊 Later
