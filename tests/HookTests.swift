@@ -355,4 +355,36 @@ let hookSuite = Suite("Hook") { t in
         t.expect(!sb.ran("say"), "…and not spoken here too")
         sb.cleanup()
     }
+
+    // -- the pill is named after the session, as its window is ----------------------
+    do {
+        let sb = Sandbox("name")
+        let transcript = sb.root + "/t.jsonl"
+        let turn: [[String: Any]] = [
+            ["type": "user", "message": ["content": "what does an ai-title entry look like?"]],
+            ["type": "assistant", "message": ["content": [["type": "text", "text": "Done."]]]],
+        ]
+        /// The name the hook queues a turn under, for a transcript with these entries too.
+        func name(_ extra: [[String: Any]], _ what: String) -> String? {
+            let body = (turn + extra).map { String(data: try! JSONSerialization.data(withJSONObject: $0), encoding: .utf8)! }
+                .joined(separator: "\n") + "\n"
+            fm.createFile(atPath: transcript, contents: Data(body.utf8))
+            Spool.beat(in: sb.queue)
+            clean(sb.exec([python, hookFile], stdin: "{\"transcript_path\": \"\(transcript)\", \"session_id\": \"s1\", \"cwd\": \"/x/proj\"}"), what)
+            guard let file = sb.queued.last, let data = fm.contents(atPath: sb.queue + "/" + file),
+                  let item = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return item["source"] as? String
+        }
+        t.expectEqual(name([], "no title"), "proj",
+                      "a session with no title yet goes by its folder (a turn that only mentions titles isn't one)")
+        t.expectEqual(name([["type": "ai-title", "aiTitle": "First guess", "sessionId": "s1"],
+                            ["type": "ai-title", "aiTitle": "Pill  navigation\n", "sessionId": "s1"]], "titled"),
+                      "Pill navigation", "a titled session goes by its newest title, on one line")
+        t.expectEqual(name([["type": "custom-title", "customTitle": "My name for it", "sessionId": "s1"],
+                            ["type": "ai-title", "aiTitle": "Claude's name for it", "sessionId": "s1"]], "renamed"),
+                      "My name for it", "a name the user gave it beats Claude's, whichever came last")
+        t.expectEqual(name([["type": "ai-title", "aiTitle": "  ", "sessionId": "s1"]], "blank title"), "proj",
+                      "a blank title is no title")
+        sb.cleanup()
+    }
 }

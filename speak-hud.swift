@@ -224,11 +224,20 @@ enum Reveal {
     static let iTerm = "com.googlecode.iterm2"
     static let terminal = "com.apple.Terminal"
 
-    /// How both scripts answer once they've picked the window `w`: "ok", then its bounds
-    /// if it will give them, so the HUD can point at it (Spotlight).
+    /// How both scripts keep hold of the window they found. The loop's `w` is "window N",
+    /// counted from the front, and bringing a window forward makes it window 1: from then
+    /// on `w`, and any tab or session reached through it, is whichever window was in
+    /// front before. `win` finds it by id every time it's used.
+    private static let holdWindow = """
+    set wid to id of w
+    set win to a reference to (first window whose id is wid)
+    """
+
+    /// How both scripts answer once they've picked the window `win`: "ok", then its
+    /// bounds if it will give them, so the HUD can point at it (Spotlight).
     private static let replyWithBounds = """
     try
-        set b to bounds of w
+        set b to bounds of win
         return "ok " & (item 1 of b) & " " & (item 2 of b) & " " & (item 3 of b) & " " & (item 4 of b)
     end try
     return "ok"
@@ -263,9 +272,10 @@ enum Reveal {
                     repeat with t in tabs of w
                         repeat with s in sessions of t
                             if \(test) then
-                                select w
+                                \(holdWindow)
                                 select t
                                 select s
+                                select win
                                 \(replyWithBounds)
                             end if
                         end repeat
@@ -282,8 +292,9 @@ enum Reveal {
                 repeat with w in windows
                     repeat with t in tabs of w
                         if (tty of t) is "\(tty)" then
+                            \(holdWindow)
                             set selected of t to true
-                            set index of w to 1
+                            set index of win to 1
                             \(replyWithBounds)
                         end if
                     end repeat
@@ -990,11 +1001,15 @@ final class SourceBadge: NSView {
         return luma > 0.5 ? NSColor(white: 0, alpha: 0.85) : .white
     }
 
-    private var label: String { isLink ? text + Self.arrow : text }
+    /// The arrow is drawn after the name, not as part of it: a session's title is often
+    /// too long to fit, and cut off as one string the arrow would be the first thing to go.
+    private var arrowWidth: CGFloat {
+        isLink ? ceil((Self.arrow as NSString).size(withAttributes: textAttrs).width) : 0
+    }
 
     override var intrinsicContentSize: NSSize {
-        let w = (label as NSString).size(withAttributes: textAttrs).width
-        return NSSize(width: min(ceil(w) + Self.padX * 2 + Self.dot + Self.gap, Self.maxWidth),
+        let w = ceil((text as NSString).size(withAttributes: textAttrs).width) + arrowWidth
+        return NSSize(width: min(w + Self.padX * 2 + Self.dot + Self.gap, Self.maxWidth),
                       height: Self.height)
     }
 
@@ -1010,11 +1025,15 @@ final class SourceBadge: NSView {
                                     width: Self.dot, height: Self.dot)).fill()
 
         let attrs = textAttrs
-        let s = label as NSString
-        let th = s.size(withAttributes: attrs).height
+        let s = text as NSString
+        let size = s.size(withAttributes: attrs)
         let x = Self.padX + Self.dot + Self.gap
-        s.draw(in: NSRect(x: x, y: (r.height - th) / 2, width: r.width - x - Self.padX, height: th),
-               withAttributes: attrs)
+        let y = (r.height - size.height) / 2
+        let w = min(ceil(size.width), r.width - x - Self.padX - arrowWidth)
+        s.draw(in: NSRect(x: x, y: y, width: w, height: size.height), withAttributes: attrs)
+        if isLink {
+            (Self.arrow as NSString).draw(at: NSPoint(x: x + w, y: y), withAttributes: attrs)
+        }
     }
 
     override func resetCursorRects() { if isLink { addCursorRect(bounds, cursor: .pointingHand) } }

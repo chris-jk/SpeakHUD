@@ -59,15 +59,25 @@ let originSuite = Suite("Origin") { t in
     t.expect(terminal?.source.contains("(tty of t) is \"/dev/ttys009\"") == true, "…by tty")
     // Activating after the window is picked stays on the current desktop whenever the
     // terminal has a window there; activate first and the pick switches desktops.
-    for (name, script, pick) in [("iTerm2", byID, "select w"), ("Terminal", terminal, "set index of w to 1")] {
+    for (name, script, pick) in [("iTerm2", byID, "select win"), ("Terminal", terminal, "set index of win to 1")] {
         let src = script?.source ?? ""
         let act = src.range(of: "activate"), sel = src.range(of: pick)
         t.expect(act != nil && sel != nil && act!.lowerBound < sel!.lowerBound,
                  "the \(name) script activates before it picks the window")
+        // Picking the window moves it to the front, and the loop's `w` counts from the
+        // front: used again after the pick it's the window that was there before, which
+        // is the one that got the ring. Everything from the pick on goes by id.
+        let hold = src.range(of: "set wid to id of w")
+        t.expect(hold != nil && sel != nil && hold!.lowerBound < sel!.lowerBound
+                 && src.contains("set win to a reference to (first window whose id is wid)"),
+                 "the \(name) script takes the window's id before it picks it")
+        let after = sel.map { String(src[$0.lowerBound...]) } ?? "w"
+        t.expect(after.range(of: #"\b[wts]\b"#, options: .regularExpression) == nil,
+                 "…and never goes back through the loop's window, tab or session after the pick (\(name))")
     }
     // Each script says where the window it picked is, so the HUD can point at it.
     for (name, script) in [("iTerm2", byID), ("Terminal", terminal)] {
-        t.expect(script?.source.contains("set b to bounds of w") == true, "the \(name) script reports the window's bounds")
+        t.expect(script?.source.contains("set b to bounds of win") == true, "the \(name) script reports the window's bounds")
         t.expect(script?.source.components(separatedBy: "return \"ok\"").count == 2,
                  "…and still answers a bare ok when the window won't give them (\(name))")
     }

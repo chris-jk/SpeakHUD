@@ -48,10 +48,11 @@ its turn, and the HUD shows what's behind it:
  ↻ Replay   ❚❚ Pause   ⏩ 1×   ⏭ Skip   ■ Stop
 ```
 
-- **Whoever is speaking is named in a colored pill**, and each project keeps the same
-  color every time (a stable hash of the name, not Swift's per-process `hashValue`),
-  so four terminals become four colors you recognize rather than four names you read.
-  The `next:` line colors each waiting project the same way.
+- **Whoever is speaking is named in a colored pill**, by the session's title, the same
+  words Claude Code puts in that terminal's title bar (the folder name until the session
+  has one). Each name keeps the same color every time (a stable hash of the name, not
+  Swift's per-process `hashValue`), so four terminals become four colors you recognize
+  rather than four names you read. The `next:` line colors each waiting one the same way.
 - **A terminal that has its own color gives it to the pill.** Where a hook colors each
   terminal's window frame by project (claude-launcher's `terminal-project.py`), the pill
   is filled with that same color, so it looks like the window it belongs to. Anything

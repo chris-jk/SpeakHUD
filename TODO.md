@@ -2,9 +2,12 @@
 
 Running tab. Current state at top, then next up, waiting-on, recently shipped. Prune every session.
 
-## Where things stand (2026-10-05)
-- main (pushed 2026-10-05) holds click-to-terminal, clickable text, code blocks, the desktop-switch fix, the question reader, the pill's terminal color and the click highlight; the installed build matches it. LaunchAgent running; Claude Code hook `installed`.
-- Tests: `./tests/run.sh`, 451 checks + 13 Python tests for the question hook, all passing. No CI; run them before committing.
+## Where things stand (2026-10-07)
+- main (pushed 2026-10-07) holds click-to-terminal, clickable text, code blocks, the desktop-switch fix, the question reader, the pill's terminal color, the click highlight, the pill's session name and the ring fix; the installed build matches it (binary built 10-05 9:00 PM, after the last source change; both installed hooks byte-identical to the repo's; checked 10-07). LaunchAgent running; Claude Code hook `installed`.
+- Asked for 10-07, not started: hands-free replies (first item under Next up).
+- Tests: `./tests/run.sh`, 463 checks + 13 Python tests for the question hook, all passing. No CI; run them before committing. `test_chime_waits_for_whatever_is_being_read` timed out once on a busy Mac and passed on the rerun.
+- Pill name: the session's title from the transcript (`ai-title`, or `custom-title` from /rename), i.e. what the window's title bar says; folder name only until a title exists (`source_name()` in read-summary.py, used by both hooks). It was the folder Claude was in, which changed with every `cd`: one window went by three names and four home-folder windows all said "chris". A long title is cut off but keeps its `↗` (drawn separately).
+- Ring on the right window: the reveal scripts used the loop's `w` ("window N" from the front) after bringing it forward, so the bounds they replied with, and the tab and session they selected, belonged to the window that had been in front; the right window got focus and the last one got the ring. They now take the window's id first and go by id (`holdWindow`). Proved live 10-05 with the app's own script text run from a small accessory app: old script replied the previous window's bounds, new one the target's, same desktop and across desktops (the desktop switched and came back).
 - Pill matches the terminal: the hook adds `origin.color`, asked of claude-launcher's `~/.claude/hooks/terminal-project.py` (`session_frame_color()`, added there the same day); the pill is then filled solid with that frame color, and the `next:` names use it too. No color for a session started in the home folder until its first project edit; those keep the hashed tint.
 - Click highlight (`Spotlight`): the reveal scripts reply with the window's bounds, and after the jump every screen dims 40% for 0.9 s (fades over 0.4 s) with a ring in the pill's color around that window; clicks pass through, and a desktop switch restarts the 0.9 s. Checked 10-05: drawing rendered offscreen, one live flash, the real script's reply for a live iTerm2 window, and the pill clicked live with four terminals up.
 - Speech rules live in `Playback` (fake voice in tests); AVSpeech sits behind `SpeechVoice`.
@@ -17,21 +20,24 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - Agent liveness is a heartbeat: the agent touches `agent.heartbeat` in the spool every 3s; the hook queues only if it's <10s old (waiting up to 4s for a fresh one, e.g. after wake), else speaks directly (HUD binary, then `say -f -`). tests/HookTests.swift runs the real hook against a stub `say`.
 
 ## ⏭️ Next session — start here
-- [ ] Move the question pause into `Playback` (first item under Next up)
-- [ ] Ring the pane, not the window, when the terminal is a split pane (second item under Next up)
+- [ ] Hands-free replies (first item under Next up)
+- [ ] Move the question pause into `Playback` (second item under Next up)
+- [ ] Ring the pane, not the window, when the terminal is a split pane (third item under Next up)
 
 ## 🚨 Blocking
 - (none)
 
 ## 🙋 Owner only
-- [ ] Click the pill on a turn from another desktop: does it switch desktops, and do the dim and ring land after the switch (`Spotlight` restarts its 0.9 s on a desktop change)? Reproduced and fixed by hand with osascript 10-01; the pill click itself across desktops not yet. If it stays put, the after-"ok" `app.activate` in `Reveal.go` is the suspect; activate through NSRunningApplication *before* the script instead. Also: the script brings the terminal forward even when the pane is gone
+- [ ] Click the pill for a terminal on another desktop and watch the ring: it should land on that window after the switch (`Spotlight` restarts its 0.9 s on a desktop change). The switch itself and the bounds it rings are confirmed (10-05, real script from an accessory app); only the look of it is left
 - [ ] Glance at the first real turn with a ```bash block in the HUD (layout of the indented code)
 
 ## 🟡 Next up
+- [ ] Hands-free replies (Chris, 10-07): when a turn or question finishes reading, open the mic by itself, transcribe on the Mac (Apple's on-device transcriber, macOS 26; not tried here yet), show what was heard for a moment, then type it into the terminal that spoke and send it on a pause. Spoken commands while it reads: "again", "later" (move it to the end), "skip", "stop"; hearing them over its own voice needs echo cancelling or headphones. Claude Code's own dictation needs a key in both modes (hold, tap; its docs, checked 10-07). A hosted voice model on top is a later option (per-minute cost, audio leaves the Mac)
 - [ ] Move the question pause into `Playback` (one spool item with the options and a pause): another session's turn can land in the 2s gap today, and Stop/skip would act on the whole question natively (review 10-01)
 - [ ] Split panes in one iTerm2 window (the tile-terminals skill's layout): the ring goes around the whole window. Ring the pane instead; its frame is the Accessibility frame of the focused text area's scroll area (the text area itself is as tall as the scrollback)
 - [ ] Have `ClaudeHook` (--setup-claude) install read-question.py and both its hook entries, and bundle it in build.sh, so it stops being a hand install
-- [ ] Terminal.app path is untested live (no Terminal windows open); iTerm2 verified
+- [ ] Terminal.app path is untested live (no Terminal windows open), including its copy of the 10-05 by-id fix; iTerm2 verified
+- [ ] The reveal script brings the terminal app forward even when the pane is gone (it activates before it searches)
 
 ## 🧊 Later
 - (none)
@@ -40,6 +46,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - (none)
 
 ## ✅ Recently shipped (trim as it ages)
+- 2026-10-07 — Committed the 10-05 evening work: the pill goes by the session's title (what the window's title bar says), the ring lands on the window the click went to (the scripts hold the window by id), and a long name keeps its `↗`
 - 2026-10-05 — The pill takes the terminal's window frame color; clicking it dims the screen and rings the window it went to
 - 2026-10-01 — AskUserQuestion read aloud: chime, question, 2s pause, options; review fixes (own spool key, stops on answer/Stop/newer question, gives up on a long wait). A command link alone on a line no longer leaves a bare "-" or "[ ]"
 - 2026-10-01 — Source pill switches desktops again: activate before selecting the pane (it had stayed put when iTerm2 had a window on the current desktop). Hook's `typecmd:` link skip folded back into the repo

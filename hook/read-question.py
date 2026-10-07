@@ -229,7 +229,7 @@ def run(data, questions, marker, key):
         parts[0] = (intro + "\n\n" + parts[0][0], False)
 
     cwd = data.get("cwd") or ""
-    source = os.path.basename(cwd.rstrip("/")) or "Claude Code"
+    source = rs.source_name(path, cwd)
     where = rs.origin()
     spoken = []
     for md, pause in parts:

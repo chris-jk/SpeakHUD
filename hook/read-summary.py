@@ -54,6 +54,42 @@ def find_transcript(data):
     return None
 
 
+# Where Claude Code keeps a session's name in its transcript: one entry per write, the
+# newest counts. A name the user gave it (/rename) beats the one Claude made up.
+TITLE_KEYS = {"custom-title": "customTitle", "ai-title": "aiTitle"}
+
+
+def session_title(path):
+    """What Claude Code calls this session, which is what it puts in the terminal's
+    title bar. None until the first one is written."""
+    found = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                if "-title" not in line:   # skip parsing the turns, which are the bulk
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                key = TITLE_KEYS.get(entry.get("type")) if isinstance(entry, dict) else None
+                title = entry.get(key) if key else None
+                if isinstance(title, str) and title.strip():
+                    found[key] = " ".join(title.split())
+    except OSError:
+        return None
+    return found.get("customTitle") or found.get("aiTitle")
+
+
+def source_name(path, cwd):
+    """The name on the HUD's pill: the session's title, so the pill reads like the
+    window it goes back to. The folder Claude is in is only the fallback, for a session
+    with no title yet. It used to be the name, and it changes whenever Claude changes
+    folder: one window went by three names, and two windows by the same one."""
+    return ((path and session_title(path))
+            or os.path.basename((cwd or "").rstrip("/")) or "Claude Code")
+
+
 def current_response_text(path):
     """Assistant text that appears after the last user entry, or None if not yet present."""
     try:
@@ -564,7 +600,7 @@ def main():
     except Exception as e:  # a classification bug shouldn't cost the turn its voice
         print(f"speakhud: could not mark links ({e})", file=sys.stderr)
         clickable, shown = [], []
-    source = os.path.basename(cwd.rstrip("/")) or "Claude Code"
+    source = source_name(path, cwd)
     # Coalesce on the session, not the project: two terminals in the same repo are
     # two independent conversations and both deserve to be heard. The transcript is
     # per-session too, so it's the right fallback; `cwd` would merge those terminals
