@@ -31,9 +31,44 @@ final class FakeVoice: Voice {
     }
 }
 
-/// A Playback on a fake voice, with retirements and events captured.
+/// Records what Playback asked of the mic, and says things into it on demand.
+final class FakeEar: Ear {
+    enum Call: Equatable { case listen(Int), stop }
+    weak var listener: Playback?
+    private(set) var calls: [Call] = []
+    private(set) var window = 0   // the last window opened, still the one a stale report names
+
+    func listen(window id: Int) { calls.append(.listen(id)); window = id }
+    func stop() { calls.append(.stop) }
+
+    func take() -> [Call] { defer { calls = [] }; return calls }
+    /// The transcriber reporting everything heard so far, for the latest window unless told otherwise.
+    func hear(_ text: String, window id: Int? = nil) { listener?.earHeard(text, window: id ?? window) }
+    func fail(_ why: String) { listener?.earFailed(why, window: window) }
+}
+
+/// A Playback on a fake voice and a fake mic, with retirements and events captured.
 final class Rig {
+    /// Work Playback asked to have run after a while. Tests fire it by hand.
+    final class Pending {
+        let seconds: TimeInterval
+        let work: () -> Void
+        var cancelled = false, fired = false
+        init(_ seconds: TimeInterval, _ work: @escaping () -> Void) { self.seconds = seconds; self.work = work }
+    }
+
     let voice = FakeVoice()
+    let ear = FakeEar()
+    var timers: [Pending] = []
+    /// The timer running now, if one is.
+    var armed: Pending? { timers.last { !$0.cancelled && !$0.fired } }
+    /// Let the running timer run out.
+    func fire() { guard let t = armed else { return }; t.fired = true; t.work() }
+    var listened: [String] = []            // texts of the turns the mic opened for
+    var replied: [Reply.Outcome] = []
+    var sent: [(text: String, to: String)] = []   // what `deliver` was handed
+    var delivery = Reply.Outcome.sent      // and what it answers
+    var earFailures: [String] = []
     private(set) var playback: Playback!
     var retired: [String] = []   // texts, in retirement order
     var ranDry = 0
@@ -46,7 +81,17 @@ final class Rig {
     init() {
         let p = Playback(voice: voice, rateIndex: 1, retire: { [unowned self] in self.retired.append($0.text) },
                          later: { [unowned self] work in
-                             if self.holdLater { self.deferred.append(work) } else { work() } })
+                             if self.holdLater { self.deferred.append(work) } else { work() } },
+                         ear: ear,
+                         timer: { [unowned self] seconds, work in
+                             let t = Pending(seconds, work)
+                             self.timers.append(t)
+                             return { t.cancelled = true } })
+        ear.listener = p
+        p.onListen = { [unowned self] in self.listened.append($0.text) }
+        p.onReplied = { [unowned self] in self.replied.append($0) }
+        p.onEarFailed = { [unowned self] in self.earFailures.append($0) }
+        p.deliver = { [unowned self] text, item in self.sent.append((text, item.source)); return self.delivery }
         p.onStart = { [unowned self] in self.shown.append($0.text) }
         p.onRanDry = { [unowned self] in self.ranDry += 1 }
         p.onStopped = { [unowned self] in self.stopped += 1 }

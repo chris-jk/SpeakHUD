@@ -1,5 +1,6 @@
 import Cocoa
 import AVFoundation
+import Speech
 import ApplicationServices
 import Carbon.HIToolbox
 import CoreAudio
@@ -53,6 +54,9 @@ struct SpeechItem {
     var cwd: String? = nil
     /// Code blocks to show but never speak. Only the hook sends these.
     var blocks: [CodeBlock] = []
+    /// A finished Claude Code turn, whose terminal is back at Claude's prompt: an answer
+    /// said out loud can go there (Reply). Only the Stop hook says so.
+    var answerable = false
 }
 
 /// A fenced code block from the turn: never spoken, but shown where it was, with its
@@ -479,6 +483,258 @@ enum LoadCommand {
     }
 }
 
+// Answering a turn out loud: what was heard goes into the prompt of the terminal that
+// spoke, and Return is pressed once it shows there. iTerm2 only, which can be asked for
+// a pane's screen and written to by AppleScript without coming forward.
+//
+// Pasted, never typed. A question or permission box takes a typed digit as its answer
+// on the spot, and ignores a paste (both tried against Claude Code 2.1.293: a typed "2"
+// picked the second option, a pasted "2" did nothing). So the words go in as a bracketed
+// paste, only into a pane whose screen shows Claude's prompt box and no such box, and
+// Return follows only when the prompt box then shows them. It counts as sent once they
+// have left the box again.
+enum Reply {
+    static let maxLength = 4000
+    /// How often, and how far apart, the screen is read again for the paste to show.
+    static let looks = 8
+    static let lookGap: TimeInterval = 0.1
+
+    /// Whether an item from `origin` can be answered: an iTerm2 pane, by its id.
+    static func canReach(_ origin: Origin?) -> Bool {
+        guard let o = origin, o.session != nil else { return false }
+        let term = o.term ?? ""
+        return term == "iTerm.app" || term.isEmpty
+    }
+
+    /// What was heard as one line a terminal can take: no line breaks or control
+    /// characters (either could be a keypress, or end the paste early), space closed up,
+    /// and nothing ahead of the first word that Claude's prompt would take as a mode
+    /// ("!" runs a shell command, "/" a slash command). Nil if nothing is left.
+    static func clean(_ heard: String) -> String? {
+        let breaks = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        var line = heard.components(separatedBy: breaks).filter { !$0.isEmpty }.joined(separator: " ")
+        while let first = line.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first),
+              first != "\"", first != "'", first != "(" {
+            line = String(line.unicodeScalars.dropFirst())
+            line = line.trimmingCharacters(in: .whitespaces)
+        }
+        return line.isEmpty ? nil : String(line.prefix(maxLength))
+    }
+
+    private static func isRule(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return t.hasPrefix("─") && t.hasSuffix("─") && t.filter({ $0 == "─" }).count >= 10
+    }
+
+    /// What Claude Code's prompt box holds, if `screen` (a pane's visible text) shows one
+    /// that would take a paste as a message: a line starting "❯" with a rule right above
+    /// it and a rule below, after any wrapped lines. Nil for anything else, and then
+    /// nothing is pasted: a question or permission box (their options sit under the
+    /// question, not under a rule, and say how to answer underneath), shell mode ("!"),
+    /// a pane that isn't running Claude at all.
+    static func promptText(in screen: String) -> String? {
+        let lines = screen.components(separatedBy: .newlines)
+            .map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
+        guard let bottom = lines.lastIndex(where: isRule) else { return nil }
+        // A box that takes keys as answers says so under itself.
+        let hints = ["Esc to cancel", "Enter to select", "Enter to confirm", "(esc)"]
+        let under = lines[(bottom + 1)...].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if under.contains(where: { l in hints.contains { l.contains($0) } }) { return nil }
+        // The prompt box sits at the foot of the screen, over a status line or two. A
+        // rule with more than that under it belongs to something else.
+        guard under.count <= 5 else { return nil }
+        var top = bottom - 1
+        while top >= 0, !lines[top].hasPrefix("❯"), !isRule(lines[top]) { top -= 1 }
+        guard top >= 1, lines[top].hasPrefix("❯"), isRule(lines[top - 1]) else { return nil }
+        var parts = [String(lines[top].dropFirst())]
+        parts += lines[(top + 1)..<bottom]
+        let text = parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .joined(separator: " ")
+        // "1. Yes": an option list that happens to sit between rules is still not a prompt.
+        if text.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil { return nil }
+        return text
+    }
+
+    /// Whether the prompt box now holds what was pasted and nothing ahead of it: it
+    /// starts with the first stretch of it (wrapping aside), or, for a long paste, with
+    /// the marker Claude Code folds one into. Text you had already typed there fails
+    /// this, and Return is left to you.
+    static func shows(_ text: String, inPrompt box: String) -> Bool {
+        func squash(_ s: String) -> String { String(s.unicodeScalars.filter { !CharacterSet.whitespaces.contains($0) }) }
+        let want = squash(text), have = squash(box)
+        guard !want.isEmpty else { return false }
+        return have.hasPrefix(String(want.prefix(40))) || have.hasPrefix("[Pastedtext#")
+    }
+
+    /// What iTerm2 said to one script: its reply, or the AppleScript error.
+    struct Answer: Equatable {
+        var reply: String? = nil
+        var errorCode: Int? = nil
+        var errorMessage: String? = nil
+    }
+
+    /// An AppleScript that finds the pane `session` and does `action` with it as `s`.
+    /// `action` ends by returning something starting "ok"; "missing" comes back when the
+    /// pane is gone. Only a validated id (Origin) and a cleaned line are ever put in.
+    static func script(_ session: String, _ action: String) -> String {
+        """
+        tell application id "\(Reveal.iTerm)"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if (id of s) is "\(session)" then
+                            \(action)
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        return "missing"
+        """
+    }
+
+    static func screenScript(_ session: String) -> String {
+        script(session, "return \"ok\" & linefeed & (contents of s)")
+    }
+
+    /// The line as a bracketed paste: Claude's prompt takes it as one paste, and a box
+    /// that answers to keys doesn't take it at all.
+    static func pasteScript(_ session: String, _ line: String) -> String {
+        script(session, """
+        tell s to write text ((character id 27) & "[200~" & \(LoadCommand.literal(line)) & (character id 27) & "[201~") newline no
+                            return "ok"
+        """)
+    }
+
+    /// Return, as the key sends it (a carriage return; a line feed is Claude's "new line").
+    static func returnScript(_ session: String) -> String {
+        script(session, """
+        tell s to write text (character id 13) newline no
+                            return "ok"
+        """)
+    }
+
+    enum Outcome: Equatable, CustomStringConvertible {
+        case sent
+        case notAtPrompt   // nothing pasted: a question or permission box is up, or no prompt in sight
+        case unconfirmed   // pasted, but it didn't show at the start of the prompt (Return not pressed), or it's still there after Return
+        case gone          // its terminal has closed
+        case denied        // Automation permission refused
+        case failed(String)
+
+        var description: String {
+            switch self {
+            case .sent: return "sent"
+            case .notAtPrompt: return "its terminal isn't at Claude's prompt"
+            case .unconfirmed: return "pasted, but Return is yours to press"
+            case .gone: return "its terminal is gone"
+            case .denied: return "not allowed to control iTerm2 — grant it in System Settings › Privacy & Security › Automation › SpeakHUD"
+            case .failed(let why): return why
+            }
+        }
+    }
+
+    /// Runs a script against iTerm2 if it's running. `tell application` would launch one
+    /// that's been quit; a quit iTerm2 has no pane to answer in.
+    static func ask(_ source: String) -> Answer {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: Reveal.iTerm).isEmpty else {
+            return Answer(reply: "missing")
+        }
+        var err: NSDictionary?
+        let result = NSAppleScript(source: source)?.executeAndReturnError(&err)
+        if let err = err {
+            return Answer(errorCode: err[NSAppleScript.errorNumber] as? Int ?? 0,
+                          errorMessage: err[NSAppleScript.errorMessage] as? String)
+        }
+        return Answer(reply: result?.stringValue)
+    }
+
+    /// Paste `heard` into the prompt of the pane `origin` names and press Return.
+    /// `ask` and `wait` are the seams tests drive it through.
+    static func send(_ heard: String, to origin: Origin,
+                     ask: (String) -> Answer = Reply.ask,
+                     wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Outcome {
+        guard canReach(origin), let session = origin.session else { return .gone }
+        guard let line = clean(heard) else { return .failed("nothing to send") }
+
+        /// The pane's screen, or why there isn't one to act on.
+        func screen() -> (text: String?, stop: Outcome?) {
+            let a = ask(screenScript(session))
+            if let code = a.errorCode {
+                return (nil, code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)"))
+            }
+            guard let reply = a.reply, reply.hasPrefix("ok") else { return (nil, .gone) }
+            return (String(reply.dropFirst(2)), nil)
+        }
+        func done(_ a: Answer) -> Outcome? {
+            if let code = a.errorCode {
+                return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+            }
+            return a.reply?.hasPrefix("ok") == true ? nil : .gone
+        }
+
+        let before = screen()
+        if let stop = before.stop { return stop }
+        guard promptText(in: before.text ?? "") != nil else { return .notAtPrompt }
+        if let stop = done(ask(pasteScript(session, line))) { return stop }
+        for _ in 0..<looks {
+            wait(lookGap)
+            let now = screen()
+            if let stop = now.stop { return stop }
+            if let box = promptText(in: now.text ?? ""), shows(line, inPrompt: box) {
+                if let stop = done(ask(returnScript(session))) { return stop }
+                // Sent means gone from the box. Still sitting there, Return didn't take.
+                for _ in 0..<looks {
+                    wait(lookGap)
+                    let after = screen()
+                    if let stop = after.stop { return stop }
+                    guard let left = promptText(in: after.text ?? ""), shows(line, inPrompt: left) else { return .sent }
+                }
+                return .unconfirmed
+            }
+        }
+        return .unconfirmed
+    }
+}
+
+/// The few things said in a reply window that are for the HUD and not for Claude. Whole
+/// phrases only, and ones you wouldn't say to Claude: a reply taken for a command never
+/// arrives, and nothing tells you. (Said to Claude by mistake, "say that again" just
+/// gets you an answer.) Saying nothing at all is how you don't reply.
+enum SpokenCommand: Equatable {
+    case again     // read it to me once more
+    case later     // put it at the end of the line and ask me then
+    case skip      // no reply: move on now
+    case scratch   // forget what I just said and listen again
+
+    private static let phrases: [String: SpokenCommand] = {
+        var table: [String: SpokenCommand] = [:]
+        for p in ["say that again", "say it again", "read that again", "read it again", "repeat that",
+                  "remind me again", "one more time"] { table[p] = .again }
+        for p in ["come back to this", "come back to this later", "come back to that later",
+                  "come back to it later", "put this off", "put that off", "put it off",
+                  "put this off to the end", "put that off to the end", "put it off to the end",
+                  "put off to the end", "ask me later", "remind me later"] { table[p] = .later }
+        for p in ["no reply", "no answer", "nothing to say"] { table[p] = .skip }
+        for p in ["scratch that", "start over"] { table[p] = .scratch }
+        return table
+    }()
+
+    /// The words alone: lower case, no punctuation, single spaces. The transcriber
+    /// re-punctuates as it goes, and "Later." is the same thing said as "later".
+    static func words(_ heard: String) -> String {
+        heard.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    static func parse(_ heard: String) -> SpokenCommand? {
+        let said = words(heard)
+        if let c = phrases[said] { return c }
+        // "…no wait, scratch that" takes back everything before it.
+        return said.hasSuffix(" scratch that") ? .scratch : nil
+    }
+}
+
 // Claude Code turns arrive as files here rather than as processes, so a finished
 // turn can never interrupt one that's already speaking. The hook writes `<name>.tmp`
 // and renames it to `<name>.json`, which is atomic within a filesystem — the agent
@@ -501,6 +757,9 @@ enum LoadCommand {
 //   cwd      string, optional: the turn's working directory, where commands are typed.
 //   blocks   array, optional: [{at, code, links}], fenced code shown but never spoken —
 //            `at` is where in `text` it goes back, `links` as above but within `code`.
+//   reply    string, optional: "prompt" when the turn left its terminal waiting at
+//            Claude's prompt, so an answer said out loud can be pasted there (Reply).
+//            Anything else, or missing, is an item nobody can answer.
 // Every dropped item comes back as a `Drop` with its reason, for the agent to log.
 //
 // Liveness: the agent touches `heartbeatName` in the spool dir at startup and every
@@ -619,7 +878,8 @@ enum Spool {
                                           origin: Origin(json: obj["origin"]),
                                           links: TextLink.parse(obj["links"], in: text),
                                           cwd: TextLink.absolutePath(obj["cwd"]),
-                                          blocks: CodeBlock.parse(obj["blocks"], in: text)))
+                                          blocks: CodeBlock.parse(obj["blocks"], in: text),
+                                          answerable: obj["reply"] as? String == "prompt"))
         }
         return batch
     }
@@ -1218,6 +1478,19 @@ protocol Voice: AnyObject {
     func stop()
 }
 
+/// What Playback needs from a microphone that turns speech into words. Everything it
+/// reports comes back tagged with the `window` it was opened for, so anything from a
+/// window Playback has since shut is stale.
+protocol Ear: AnyObject {
+    var listener: Playback? { get set }
+    /// Open the mic and report what's heard so far, each time it changes, to
+    /// `earHeard(_:window:)`; a mic that can't be opened goes to `earFailed`. Replaces
+    /// a window still open.
+    func listen(window: Int)
+    /// Close the mic. Nothing more is reported.
+    func stop()
+}
+
 final class Playback {
     /// Everything the HUD shows about playback, derived in one place so no label can
     /// drift from another.
@@ -1228,6 +1501,10 @@ final class Playback {
         var queued: [String] = []   // sources waiting behind the current item, in order
         var isActive = false        // something is current or waiting: don't auto-hide
         var canSkip = false
+        /// What's been heard in the reply window (empty until you speak), then what was
+        /// sent, until the next item starts. Nil when there's no reply to show.
+        var heard: String? = nil
+        var putOff = 0              // turns put off, waiting for the next thing to arrive
     }
 
     // macOS default rate (0.5) == 1×; the steps scale around it.
@@ -1266,12 +1543,22 @@ final class Playback {
 
     /// `retire` releases an item that will never be spoken again (its spool file).
     /// `later` runs work after the current event is done; tests run it inline.
+    /// `ear` is the mic for the reply window (none: never listens); `timer` runs work
+    /// after a while and returns its cancel, and tests fire it by hand.
     init(voice: Voice, rateIndex: Int = 1,
          retire: @escaping (SpeechItem) -> Void = { Spool.done($0.file) },
          now: @escaping () -> Date = Date.init,
-         later: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }) {
+         later: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+         ear: Ear? = nil,
+         timer: @escaping (TimeInterval, @escaping () -> Void) -> () -> Void = { seconds, work in
+             let item = DispatchWorkItem(block: work)
+             DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+             return item.cancel
+         }) {
         self.voice = voice
         self.later = later
+        self.ear = ear
+        self.timer = timer
         self.rateIndex = Self.rateSteps.indices.contains(rateIndex) ? rateIndex : 1
         self.retire = retire
         self.now = now
@@ -1291,9 +1578,14 @@ final class Playback {
         } else {
             queue.append(item)
         }
+        // "The end" has arrived for anything put off: behind this, unless this is its
+        // own session with something newer to say.
+        queue.append(contentsOf: putOff.filter { $0.key != item.key })
+        putOff.removeAll()
         // Nothing current means the queue was empty: this item becomes current, and
-        // sounds unless the mic or your pause is holding us.
-        let wasIdle = current == nil
+        // sounds unless the mic or your pause is holding us. An open reply window is
+        // you about to speak: it waits for that.
+        let wasIdle = current == nil && window == nil
         if wasIdle { advance() }
         publish()
         return wasIdle && sound == .speaking
@@ -1302,6 +1594,7 @@ final class Playback {
     /// Jump the queue: you highlighted that text and asked for it now. It becomes
     /// current even while the mic is busy (so you can see it), but waits to be heard.
     func playNow(_ item: SpeechItem) {
+        closeWindow("a read was asked for")
         if let c = current {
             silence()
             // A spool-backed turn was interrupted, not finished — put it back at the head
@@ -1326,6 +1619,12 @@ final class Playback {
     /// Drop the current item and move on. Clears your pause: skipping is asking for
     /// the next one. The mic still holds it.
     func skip() {
+        if window != nil {   // nothing is being read: Skip is "no reply"
+            closeWindow("skipped")
+            userPaused = false
+            moveOn()
+            return
+        }
         guard let c = current else { return }
         log("skipped \(c.source)")
         retire(c)
@@ -1339,6 +1638,8 @@ final class Playback {
 
     /// Stop everything and throw the queue away. "Skip" is the one that moves on.
     func stop() {
+        closeWindow("stopped")
+        putOff.removeAll()
         silence()
         log("stop: discarded \(queue.count) queued item(s)")
         if let c = current { retire(c); lastItem = c }
@@ -1355,6 +1656,11 @@ final class Playback {
     /// then is kept when the mic frees up. Resuming while the mic is busy hands the
     /// hold back to the mic, which resumes on release.
     func togglePause() {
+        if window != nil {   // the one key that works from anywhere: "not now"
+            closeWindow("dismissed")
+            moveOn()
+            return
+        }
         guard current != nil || !queue.isEmpty else { return }
         userPaused.toggle()
         proceed()
@@ -1375,6 +1681,7 @@ final class Playback {
     /// brings the last item back as current (without its spool file, which is gone),
     /// so a turn arriving meanwhile queues behind it instead of cutting it off.
     func replay() {
+        closeWindow("replay")   // the turn you were about to answer is the last item
         if current == nil {
             guard var last = lastItem else { return }
             last.file = nil
@@ -1394,7 +1701,12 @@ final class Playback {
         guard busy != micBusy else { return }
         micBusy = busy
         log(busy ? "mic in use — holding speech" : "mic released")
-        proceed()
+        if busy, window != nil {   // you're answering with a key held instead
+            closeWindow("another app took the mic")
+            advance()
+        } else {
+            proceed()
+        }
         publish()
     }
 
@@ -1419,12 +1731,196 @@ final class Playback {
         retire(c)
         lastItem = c
         current = nil
+        if shouldListen(after: c) {   // your turn; the next item waits for the window to shut
+            openWindow(for: c)
+            return
+        }
         publish()
         later { [weak self] in
-            guard let self = self, self.current == nil else { return }  // something started meanwhile
+            guard let self = self, self.current == nil, self.window == nil else { return }  // something started meanwhile
             self.advance()
             self.publish()
         }
+    }
+
+    // -- the reply window ---------------------------------------------------
+    //
+    // "Listen After Reading": when an answerable turn has been read, the mic opens and
+    // what you say goes back to the terminal that spoke. Say nothing and it closes by
+    // itself. Nothing else is read while it's open.
+
+    /// How long you have to start talking.
+    static let replyWait: TimeInterval = 8
+    /// The quiet that ends what you're saying.
+    static let replyPause: TimeInterval = 1.5
+    /// How long "sending" shows before it goes: say more, or Skip, to take it back.
+    static let replyGrace: TimeInterval = 1.5
+
+    private struct Listening {
+        enum Phase { case waiting, hearing, sending }
+        let item: SpeechItem
+        let id: Int
+        var heard = ""
+        var phase = Phase.waiting
+    }
+
+    /// The setting. Turning it off shuts a window that's open.
+    var listens = false {
+        didSet {
+            guard !listens, window != nil else { return }
+            closeWindow("switched off")
+            moveOn()
+        }
+    }
+    /// The mic opened for a reply to this item.
+    var onListen: (SpeechItem) -> Void = { _ in }
+    /// A reply was said and this is what became of it. The words stay in `state.heard`
+    /// either way, so one that didn't arrive isn't lost.
+    var onReplied: (Reply.Outcome) -> Void = { _ in }
+    /// The mic couldn't be opened.
+    var onEarFailed: (String) -> Void = { _ in }
+    /// Puts the words in the item's terminal. Tests answer for iTerm2.
+    var deliver: (String, SpeechItem) -> Reply.Outcome = { text, item in
+        item.origin.map { Reply.send(text, to: $0) } ?? .gone
+    }
+
+    private let ear: Ear?
+    private let timer: (TimeInterval, @escaping () -> Void) -> () -> Void
+    private var window: Listening?
+    private var windowID = 0
+    private var cancelTimer: (() -> Void)?
+    /// Turns put off with nothing else waiting. They rejoin the line behind the next
+    /// thing to arrive, which is what "the end" means when there is no line.
+    private var putOff: [SpeechItem] = []
+    private var note = ""       // how the last reply went, shown until the next item starts
+    private var said: String?   // and what it was
+
+    private func shouldListen(after item: SpeechItem) -> Bool {
+        // Not while another app has the mic: you're already answering with a key held.
+        // Not when its session has more to say already: that turn gets the window.
+        listens && ear != nil && item.answerable && Reply.canReach(item.origin) && !micBusy
+            && !queue.contains { $0.key == item.key }
+    }
+
+    private func openWindow(for item: SpeechItem) {
+        windowID += 1
+        window = Listening(item: item, id: windowID)
+        note = ""
+        said = nil
+        log("listening for a reply to \(item.source)")
+        onListen(item)
+        ear?.listen(window: windowID)
+        armWait()
+        publish()
+    }
+
+    private func arm(_ seconds: TimeInterval, _ work: @escaping () -> Void) {
+        cancelTimer?()
+        cancelTimer = timer(seconds, work)
+    }
+
+    private func armWait() {
+        arm(Self.replyWait) { [weak self] in
+            self?.closeWindow("nothing said")
+            self?.moveOn()
+        }
+    }
+
+    /// Shut the mic without sending anything.
+    private func closeWindow(_ why: String) {
+        guard let w = window else { return }
+        cancelTimer?()
+        cancelTimer = nil
+        window = nil
+        ear?.stop()
+        log("stopped listening to \(w.item.source): \(why)")
+    }
+
+    /// The window is shut and nothing was started in its place: on to whatever's waiting.
+    private func moveOn() {
+        guard current == nil, window == nil else { return }
+        advance()
+        publish()
+    }
+
+    /// What the mic has made of it so far: the whole reply each time, not the new part.
+    func earHeard(_ text: String, window id: Int) {
+        guard var w = window, w.id == id else { return }
+        let before = SpokenCommand.words(w.heard), now = SpokenCommand.words(text)
+        w.heard = text
+        if now != before {   // the same words re-punctuated aren't more speech
+            if now.isEmpty {
+                w.phase = .waiting
+                armWait()
+            } else {
+                w.phase = .hearing
+                arm(Self.replyPause) { [weak self] in self?.settled() }
+            }
+        }
+        window = w
+        publish()
+    }
+
+    func earFailed(_ why: String, window id: Int) {
+        guard window?.id == id else { return }
+        closeWindow("can't listen: \(why)")
+        note = "✗ Can't listen: \(why)"
+        onEarFailed(why)
+        moveOn()
+    }
+
+    /// You've stopped talking. A command is done now; a reply shows as "sending" first.
+    private func settled() {
+        guard var w = window else { return }
+        cancelTimer = nil
+        switch SpokenCommand.parse(w.heard) {
+        case .again?:
+            closeWindow("asked to hear it again")
+            var again = w.item
+            again.file = nil   // its spool file went when it finished
+            start(again)
+            publish()
+        case .later?:
+            closeWindow("put off to the end")
+            var later = w.item
+            later.file = nil
+            // A session with more to say already has put this turn behind it.
+            if !queue.contains(where: { $0.key == later.key }) {
+                if queue.isEmpty { putOff.append(later) } else { queue.append(later) }
+                note = "⏳ Put off to the end"
+            }
+            moveOn()
+        case .skip?:
+            closeWindow("no reply")
+            moveOn()
+        case .scratch?:
+            // A fresh window: the mic would go on reporting the words taken back.
+            log("scratched; listening again")
+            windowID += 1
+            window = Listening(item: w.item, id: windowID)
+            ear?.listen(window: windowID)
+            armWait()
+            publish()
+        case nil:
+            w.phase = .sending
+            window = w
+            arm(Self.replyGrace) { [weak self] in self?.sendReply() }
+            publish()
+        }
+    }
+
+    private func sendReply() {
+        guard let w = window else { return }
+        cancelTimer = nil
+        window = nil
+        ear?.stop()
+        let line = Reply.clean(w.heard)
+        let outcome = line.map { deliver($0, w.item) } ?? .failed("nothing to send")
+        log("reply to \(w.item.source) (\(w.heard.count) chars): \(outcome)")
+        note = outcome == .sent ? "✓ Sent to \(w.item.source)" : "✗ Not sent: \(outcome)"
+        said = line
+        onReplied(outcome)
+        moveOn()
     }
 
     // -- policy ------------------------------------------------------------
@@ -1434,6 +1930,7 @@ final class Playback {
 
     /// Something that was holding us let go (or took hold): act on it.
     private func proceed() {
+        guard window == nil else { return }
         if current != nil { drive() } else if !queue.isEmpty { advance() }
     }
 
@@ -1453,6 +1950,8 @@ final class Playback {
         current = item
         resumeAt = 0
         stopped = false
+        note = ""
+        said = nil
         startedAt = now()
         log("start \(item.source) (\(item.text.count) chars)")
         onStart(item)
@@ -1499,8 +1998,18 @@ final class Playback {
         s.canSkip = current != nil && !queue.isEmpty
         s.speedTitle = "⏩ \(Self.rateLabels[rateIndex])"
         s.pauseTitle = userPaused ? "▶ Resume" : "❚❚ Pause"
-        if !s.isActive {
-            s.status = stopped ? "■ Stopped" : (lastItem == nil ? "" : "Done")
+        s.putOff = putOff.count
+        s.heard = window?.heard ?? said
+        if let w = window {
+            s.isActive = true   // you're mid-reply: the HUD stays up
+            s.canSkip = true
+            switch w.phase {
+            case .waiting: s.status = "🎙 Listening: answer \(w.item.source), or say nothing"
+            case .hearing: s.status = "🎙 Listening…"
+            case .sending: s.status = "➤ Sending to \(w.item.source)… say more to add to it"
+            }
+        } else if !s.isActive {
+            s.status = stopped ? "■ Stopped" : !note.isEmpty ? note : (lastItem == nil ? "" : "Done")
         } else if userPaused {
             s.status = "⏸ Paused"
         } else if micBusy {
@@ -1605,6 +2114,226 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
 }
 
 // ---------------------------------------------------------------------------
+// The ear: the mic, and the Mac's own transcriber turning what it hears into words
+// (SpeechAnalyzer, macOS 26). On-device: nothing said leaves the Mac. The model is the
+// system's; this app's first use registers it, and downloads it if the Mac lacks it.
+// ---------------------------------------------------------------------------
+
+@available(macOS 26.0, *)
+final class MicEar: Ear, @unchecked Sendable {
+    weak var listener: Playback?
+
+    // Main thread only, like everything Playback calls. The work of getting ready
+    // happens off it and comes back to it before the mic opens.
+    private var window = 0   // the window being listened for; 0 when shut
+    private var task: Task<Void, Never>?
+    private var engine: AVAudioEngine?
+    private var feed: AsyncStream<AnalyzerInput>.Continuation?
+    private var analyzer: SpeechAnalyzer?
+
+    struct Failure: Error {
+        let why: String
+        init(_ why: String) { self.why = why }
+    }
+
+    /// Where the sound comes from: the mic, or a recording played in as if it were said
+    /// (tests/EarTests.swift, so the transcriber is tried for real without a sound).
+    enum Source { case microphone, recording(String) }
+    private let source: Source
+    init(source: Source = .microphone) { self.source = source }
+
+    /// Buffers handed to the transcriber for the open window, counted from the audio
+    /// thread. Logged when the window shuts: none at all means the mic gave nothing.
+    private final class Tally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func add() { lock.lock(); n += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+    private var tally: Tally?
+    private var player: Task<Void, Never>?
+
+    static let micDenied = "microphone access is off for SpeakHUD (System Settings › Privacy & Security › Microphone)"
+
+    func listen(window id: Int) {
+        stop()
+        window = id
+        task = Task { [weak self] in await self?.run(id) }
+    }
+
+    func stop() {
+        window = 0
+        task?.cancel()
+        task = nil
+        player?.cancel()
+        player = nil
+        if let t = tally { listener?.log("mic shut after \(t.count) buffers") }
+        tally = nil
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        feed?.finish()
+        feed = nil
+        if let a = analyzer { Task { await a.cancelAndFinishNow() } }
+        analyzer = nil
+    }
+
+    /// Ask for the mic and ready the model now, so the first reply window doesn't open
+    /// onto a permission prompt. `done` gets what's wrong, or nil, on the main thread.
+    func prepare(_ done: @escaping (String?) -> Void) {
+        Task {
+            var problem: String?
+            if !SpeechTranscriber.isAvailable {
+                problem = "this Mac's transcriber isn't available"
+            } else if !(await AVCaptureDevice.requestAccess(for: .audio)) {
+                problem = Self.micDenied
+            } else {
+                do { try await Self.install(await Self.transcriber()) }
+                catch { problem = "the speech model couldn't be readied: \(error.localizedDescription)" }
+            }
+            let result = problem
+            await MainActor.run { done(result) }
+        }
+    }
+
+    private static func transcriber() async -> SpeechTranscriber {
+        let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
+            ?? Locale(identifier: "en-US")
+        // Progressive: words are reported as they're heard, and firmed up after.
+        return SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+    }
+
+    private static func install(_ transcriber: SpeechTranscriber) async throws {
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await request.downloadAndInstall()
+        }
+    }
+
+    private func run(_ id: Int) async {
+        do {
+            if case .microphone = source {
+                guard await AVCaptureDevice.requestAccess(for: .audio) else { throw Failure(Self.micDenied) }
+            }
+            let transcriber = await Self.transcriber()
+            try await Self.install(transcriber)
+            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                throw Failure("the transcriber offers no audio format")
+            }
+            let analyzer = SpeechAnalyzer(modules: [transcriber])
+            let (stream, feed) = AsyncStream<AnalyzerInput>.makeStream()
+            let open = try await MainActor.run {
+                try self.openMic(for: id, feed: feed, as: format, analyzer: analyzer)
+            }
+            guard open else { feed.finish(); return }
+            try await analyzer.start(inputSequence: stream)
+            // Each result is one stretch of speech: guessed at while it's being said,
+            // then final. What's reported is everything final plus the current guess.
+            var settled = ""
+            for try await result in transcriber.results {
+                let piece = String(result.text.characters)
+                if result.isFinal { settled += piece }
+                let text = result.isFinal ? settled : settled + piece
+                await MainActor.run {
+                    if self.window == id { self.listener?.earHeard(text, window: id) }
+                }
+            }
+        } catch is CancellationError {
+        } catch {
+            let why = (error as? Failure)?.why ?? error.localizedDescription
+            await MainActor.run {
+                if self.window == id { self.listener?.earFailed(why, window: id) }
+            }
+        }
+    }
+
+    /// Runs on the main thread, where stop() does: a window shut while the model was
+    /// being readied must not open the mic after all. False means it was.
+    private func openMic(for id: Int, feed: AsyncStream<AnalyzerInput>.Continuation,
+                         as format: AVAudioFormat, analyzer: SpeechAnalyzer) throws -> Bool {
+        guard window == id else { return false }
+        let tally = Tally()
+        if case .recording(let path) = source {
+            let file: AVAudioFile
+            do { file = try AVAudioFile(forReading: URL(fileURLWithPath: path)) }
+            catch { throw Failure("can't read \(path)") }
+            let native = file.processingFormat
+            guard let converter = AVAudioConverter(from: native, to: format) else {
+                throw Failure("the recording can't be converted for the transcriber")
+            }
+            converter.primeMethod = .none
+            // The recording, then quiet for as long as the window stays open, as a mic gives.
+            player = Task.detached {
+                var playing = true
+                while !Task.isCancelled {
+                    guard let buffer = AVAudioPCMBuffer(pcmFormat: native, frameCapacity: 4096) else { return }
+                    if playing {
+                        if (try? file.read(into: buffer)) == nil || buffer.frameLength == 0 { playing = false }
+                    }
+                    if !playing {
+                        buffer.frameLength = buffer.frameCapacity
+                        for c in 0..<Int(native.channelCount) {
+                            if let samples = buffer.floatChannelData?[c] {
+                                memset(samples, 0, Int(buffer.frameCapacity) * MemoryLayout<Float>.size)
+                            }
+                        }
+                        try? await Task.sleep(nanoseconds: UInt64(4096 / native.sampleRate * 1_000_000_000))
+                    }
+                    if let out = Self.convert(buffer, with: converter, to: format) {
+                        feed.yield(AnalyzerInput(buffer: out))
+                        tally.add()
+                    }
+                }
+            }
+            self.tally = tally
+            self.feed = feed
+            self.analyzer = analyzer
+            return true
+        }
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let native = input.outputFormat(forBus: 0)
+        guard native.sampleRate > 0, native.channelCount > 0 else { throw Failure("no microphone") }
+        guard let converter = AVAudioConverter(from: native, to: format) else {
+            throw Failure("the mic's audio can't be converted for the transcriber")
+        }
+        converter.primeMethod = .none   // no lead-in: every buffer is converted whole
+        input.installTap(onBus: 0, bufferSize: 4096, format: native) { buffer, _ in
+            if let out = Self.convert(buffer, with: converter, to: format) {
+                feed.yield(AnalyzerInput(buffer: out))
+                tally.add()
+            }
+        }
+        engine.prepare()
+        do { try engine.start() } catch {
+            input.removeTap(onBus: 0)
+            throw Failure("the microphone wouldn't start: \(error.localizedDescription)")
+        }
+        self.engine = engine
+        self.tally = tally
+        self.feed = feed
+        self.analyzer = analyzer
+        return true
+    }
+
+    /// One mic buffer in the transcriber's format (its sample rate and layout differ).
+    private static func convert(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter,
+                                to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let ratio = format.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 16
+        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return nil }
+        var fed = false
+        var err: NSError?
+        let status = converter.convert(to: out, error: &err) { _, state in
+            if fed { state.pointee = .noDataNow; return nil }
+            fed = true
+            state.pointee = .haveData
+            return buffer
+        }
+        return status != .error && out.frameLength > 0 ? out : nil
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The HUD: renders Playback's state and wires the buttons, hotkeys and mic to it.
 // ---------------------------------------------------------------------------
 
@@ -1668,11 +2397,62 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         }
     }
 
+    // Listen After Reading: once a Claude Code turn has been read, the mic opens and
+    // what you say goes back to its terminal (Playback's reply window, Reply, MicEar).
+    static let listenKey = "listenAfterReading"
+    /// Whether this Mac can listen at all: the transcriber needs macOS 26.
+    let canListen: Bool
+    private var prepareEar: ((@escaping (String?) -> Void) -> Void)?
+
+    var listenAfterReading: Bool { playback.listens }
+
+    /// Off unless you've turned it on. Turning it on asks for the mic there and then,
+    /// not at the end of the next turn; if that goes wrong `problem` hears why and the
+    /// setting stays off.
+    func setListenAfterReading(_ on: Bool, problem: @escaping (String) -> Void = { _ in }) {
+        guard canListen, on != playback.listens else { return }
+        func apply(_ on: Bool) {
+            playback.listens = on
+            prefs.set(on, forKey: Self.listenKey)
+            log("listen after reading: \(on ? "on" : "off")")
+        }
+        guard on, let prepare = prepareEar else { apply(on); return }
+        prepare { [weak self] why in
+            if let why = why {
+                self?.log("can't listen: \(why)")
+                problem(why)
+            } else {
+                apply(true)
+            }
+        }
+    }
+
     override init() {
         let voice = SpeechVoice()
-        playback = Playback(voice: voice, rateIndex: Self.initialRateIndex())
+        var ear: Ear?
+        var prepare: ((@escaping (String?) -> Void) -> Void)?
+        if #available(macOS 26.0, *) {
+            let mic = MicEar()
+            ear = mic
+            prepare = mic.prepare
+        }
+        playback = Playback(voice: voice, rateIndex: Self.initialRateIndex(), ear: ear)
         voice.listener = playback
+        ear?.listener = playback
+        canListen = ear != nil
+        prepareEar = prepare
         super.init()
+        playback.listens = canListen && prefs.bool(forKey: Self.listenKey)
+        playback.onListen = { [weak self] _ in
+            guard let self = self else { return }
+            self.closeTimer?.invalidate()
+            if !self.isMinimized { self.panel?.orderFrontRegardless() }
+            NSSound(named: "Tink")?.play()   // your turn
+        }
+        playback.onReplied = { outcome in
+            NSSound(named: outcome == .sent ? "Pop" : "Basso")?.play()
+        }
+        playback.onEarFailed = { _ in NSSound(named: "Basso")?.play() }
         micHold = MicHold(enabled: MicHold.storedEnabled(in: prefs)) { [weak self] busy in
             self?.playback.micChanged(busy: busy)
         }
@@ -1761,6 +2541,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         buildWindowIfNeeded()
         shownCwd = item.cwd
         transcript = Transcript(item)
+        shownHeard = nil   // setTranscript() takes the last reply off with the last turn
         setTranscript()
         shownOrigin = item.origin
         sourceBadge.text = item.source
@@ -1779,9 +2560,30 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         statusLabel.stringValue = s.status
         pauseBtn.title = s.pauseTitle
         speedBtn.title = s.speedTitle
-        queueLabel.stringValue = s.queued.isEmpty ? "" : "▸ \(s.queued.count) queued"
+        queueLabel.stringValue = !s.queued.isEmpty ? "▸ \(s.queued.count) queued"
+            : s.putOff > 0 ? "⏳ \(s.putOff) put off" : ""
         nextLabel.attributedStringValue = queuePreview(s.queued)
         skipBtn.isEnabled = s.canSkip
+        showHeard(s.heard)
+    }
+
+    private var shownHeard: String?
+
+    /// What's been heard in the reply window goes under the turn it answers, and stays
+    /// there once sent. Nil takes it away.
+    private func showHeard(_ heard: String?) {
+        guard heard != shownHeard, let tv = textView, let storage = tv.textStorage else { return }
+        shownHeard = heard
+        let turn = (transcript.shown as NSString).length
+        if storage.length > turn {
+            storage.deleteCharacters(in: NSRange(location: turn, length: storage.length - turn))
+        }
+        guard let heard = heard else { return }
+        storage.append(NSAttributedString(string: "\n\n🎙  " + (heard.isEmpty ? "…" : heard), attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+        tv.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
     }
 
     /// "next: Alpha, Beta", each name in its project's color (its terminal's, if known).
@@ -2754,6 +3556,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     var hotkeyItems: [NSMenuItem] = []
     var hotkeyWarning: NSMenuItem!
     var micItem: NSMenuItem!
+    var listenItem: NSMenuItem!
 
     init(_ agent: Agent) {
         self.agent = agent
@@ -2787,6 +3590,15 @@ final class MenuController: NSObject, NSMenuDelegate {
             micItem.toolTip = "Needs macOS 14 or later"
         }
         menu.addItem(micItem)
+
+        listenItem = item("Listen After Reading", #selector(toggleListen))
+        if agent.hud.canListen {
+            listenItem.toolTip = "After a Claude Code turn is read, open the mic and send what you say back to its terminal. Say nothing and it closes."
+        } else {
+            listenItem.isEnabled = false
+            listenItem.toolTip = "Needs macOS 26 or later"
+        }
+        menu.addItem(listenItem)
 
         let hk = NSMenu()
         hk.autoenablesItems = false   // keep the warning line disabled
@@ -2834,6 +3646,7 @@ final class MenuController: NSObject, NSMenuDelegate {
             + (agent.registeredSpec.map { "using \(HotkeyConfig.label($0))" } ?? "no hotkey registered")
         hotkeyWarning.toolTip = loaded.problem.map { "\(HotkeyConfig.path) \($0)" }
         micItem.state = micItem.isEnabled && agent.hud.pauseWhileRecording ? .on : .off
+        listenItem.state = agent.hud.listenAfterReading ? .on : .off
     }
 
     private func refreshVisibility() {
@@ -2890,6 +3703,17 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
     @objc private func toggleMicHold() {
         agent.hud.pauseWhileRecording.toggle()
+        refresh()
+    }
+    @objc private func toggleListen() {
+        agent.hud.setListenAfterReading(!agent.hud.listenAfterReading) { [weak self] why in
+            let alert = NSAlert()
+            alert.messageText = "Listen After Reading"
+            alert.informativeText = "Can't listen: \(why)."
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            self?.refresh()
+        }
         refresh()
     }
     @objc private func openHotkeyConfig() {

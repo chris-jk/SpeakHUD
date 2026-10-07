@@ -351,6 +351,9 @@ let hookSuite = Suite("Hook") { t in
         Spool.beat(in: sb.queue)
         clean(sb.exec([python, hookFile], stdin: input), "hook, fresh heartbeat")
         t.expectEqual(sb.queued.count, 1, "fresh heartbeat: the turn is queued for the agent")
+        // A turn that has ended is one you can answer out loud: real hook, real drain.
+        t.expectEqual(Spool.drain(in: sb.queue).items.map(\.answerable), [true],
+                      "a finished turn is queued as answerable")
         usleep(300_000)
         t.expect(!sb.ran("say"), "…and not spoken here too")
         sb.cleanup()

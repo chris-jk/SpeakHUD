@@ -16,7 +16,7 @@ class FakeHUD(threading.Thread):
     def __init__(self, queue, log):
         super().__init__(daemon=True)
         self.queue, self.log = queue, log
-        self.heard, self.started = [], []
+        self.heard, self.started, self.items = [], [], []
         self.running, self.paused, self.stop_next = True, False, False
 
     def run(self):
@@ -29,6 +29,7 @@ class FakeHUD(threading.Thread):
                     item = json.load(fh)
                 start = time.time()
                 self.started.append(item["text"])
+                self.items.append(item)
                 time.sleep(SPEAK)
                 if self.stop_next:  # you pressed Stop: logged, every file let go
                     self.stop_next = False
@@ -131,6 +132,8 @@ class ReadQuestion(unittest.TestCase):
         self.assertGreaterEqual(gap, PAUSE, "the options wait out the pause after the question ends")
         self.assertEqual({h[1] for h in self.hud.heard}, {"s1:question"},
                          "its own key, so it never replaces the session's spoken reply")
+        self.assertEqual([i.get("reply") for i in self.hud.items], [None, None],
+                         "a question isn't a turn at Claude's prompt: no mic opens to answer it there")
         self.assertEqual(os.listdir(os.path.join(self.tmp, "state", "questions")), [], "marker released")
 
     def test_answering_stops_the_options(self):

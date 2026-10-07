@@ -26,6 +26,10 @@ a standalone app.
   hold-space dictation, a call, system dictation — speech pauses, and picks back up
   a moment after the mic is released (macOS 14+). Want speech during calls? Untick
   **Pause While Recording** in the menu bar.
+- **Answer out loud, hands-free** (macOS 26+, off until you turn it on). With **Listen
+  After Reading** ticked, the mic opens when a Claude Code turn has been read; what you
+  say is typed into that terminal and sent when you stop. See
+  [Listen After Reading](#listen-after-reading).
 - **Global hotkey to read your highlighted text** from any app (default `⌃⌥S`), with
   play / pause / speed controls in the HUD. The combo is **user-configurable**.
 - **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,
@@ -90,6 +94,51 @@ its turn, and the HUD shows what's behind it:
   was stopped for a while doesn't come back and read you the whole morning. Every
   dropped item (too old, blank, malformed, or written by a newer hook) is logged with its reason. The file
   format is described in [hook/README.md](hook/README.md).
+
+## Listen After Reading
+
+Off by default; tick it in the menu bar (macOS 26 or later, iTerm2). The first time, macOS
+asks for the microphone.
+
+When a Claude Code turn has been read to its end, a *tink* sounds and the mic opens for
+that turn. The HUD says who you'd be answering and shows the words as they're heard.
+
+- **Say your reply.** After a pause of 1.5 s it shows as *Sending…* for another 1.5 s (say
+  more and it goes back to listening; **Skip** or `⌃⌥P` takes it back), then it's pasted
+  into the prompt of the terminal that spoke and sent. A *pop* means it went.
+- **Say nothing** and the mic closes after 8 s; the next turn in the queue is read.
+- **Say one of these**, alone, and it's for the HUD instead of Claude:
+  - *"say that again"*, *"repeat that"*, *"remind me again"*: reads the turn again, then asks again
+  - *"put it off"*, *"put it off to the end"*, *"ask me later"*: the turn goes to the back
+    of the queue (or, with nothing queued, waits for the next turn to arrive) and you're
+    asked then
+  - *"no reply"*: closes the mic now
+  - *"scratch that"* (also at the end of whatever you said): forgets it and listens again
+
+  They're whole phrases you wouldn't say to Claude, on purpose: plain "later" or "again"
+  is a reply, and is sent.
+- Nothing else is read while the mic is open, and holding Claude Code's own dictation
+  key closes it (you're answering that way instead).
+
+Everything is transcribed on the Mac by the system's own transcriber (`SpeechAnalyzer`);
+no audio or text leaves it. The mic is only open between the *tink* and the reply.
+
+**What it will and won't type into.** A question or permission box in Claude Code takes
+a typed digit as its answer on the spot, so a reply is never typed: it goes in as a
+paste, which those boxes ignore (tried against Claude Code 2.1.293 with a question box
+and the folder-trust box; a permission box was not tried). Before pasting, SpeakHUD reads
+the terminal's screen and only goes on if Claude's prompt box is there and no such box is;
+Return is pressed only once the words show at the start of the prompt, and it counts as
+sent once they've left it. Otherwise the HUD says *Not sent* and why, and what you said
+stays on screen to copy. If you'd already typed something at that prompt, your reply is
+pasted after it and Return is left to you.
+
+**It hears whatever is said.** A video, a call or someone else talking during those few
+seconds is heard as your reply. That's what the *Sending…* pause is for; keep it off
+when the room isn't yours.
+
+Not yet: commands while a turn is still being read (it would hear itself), answering a
+Claude Code question box by voice, Terminal.app.
 
 ## How it picks what to read
 
@@ -200,6 +249,8 @@ The background agent shows a small **speaker icon** in the menu bar:
   binary is missing or out of date, it shows a dash and "— Repair"; clicking reinstalls.
 - **Pause While Recording** — on by default: speech holds while another app uses the
   mic. Turning it off releases a hold at once. Shared with the standalone reader.
+- **Listen After Reading** — off by default: answer a Claude Code turn out loud
+  (see [Listen After Reading](#listen-after-reading)). Needs macOS 26.
 - **Global Hotkey** — pick a preset or open the config file (a warning line appears
   here if the file is invalid).
 - **Grant Accessibility Access…** — shown only until the permission is granted.

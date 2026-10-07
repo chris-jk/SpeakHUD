@@ -50,13 +50,15 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>LSUIElement</key><true/>
   <key>NSAppleEventsUsageDescription</key><string>Clicking a project name in the HUD switches to the terminal it came from.</string>
+  <key>NSMicrophoneUsageDescription</key><string>With Listen After Reading on, SpeakHUD hears your reply to a Claude Code turn and types it into that terminal. It is transcribed on this Mac.</string>
 </dict>
 </plist>
 PLIST
 printf 'APPL????' > "$STAGE/Contents/PkgInfo"
 
 # The hardened runtime blocks Apple Events without this, and clicking the source pill
-# asks iTerm2 / Terminal.app for the pane by AppleScript.
+# asks iTerm2 / Terminal.app for the pane by AppleScript. It blocks the mic without
+# audio-input, which Listen After Reading opens for your reply.
 ENTITLEMENTS="$(dirname "$STAGE")/entitlements.plist"
 cat > "$ENTITLEMENTS" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -64,6 +66,7 @@ cat > "$ENTITLEMENTS" <<PLIST
 <plist version="1.0">
 <dict>
   <key>com.apple.security.automation.apple-events</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
 </dict>
 </plist>
 PLIST

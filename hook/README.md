@@ -33,7 +33,8 @@ Instead the hook writes one JSON file per finished turn into
  "origin": {"term": "iTerm.app", "session": "41E78242-…", "tty": "/dev/ttys002", "app_pid": 65629},
  "links": [{"at": 4, "len": 10, "run": "git status"}, {"at": 18, "len": 9, "path": "/abs/README.md"}],
  "cwd": "/Users/…/project",
- "blocks": [{"at": 9, "code": "npm test", "links": [{"at": 0, "len": 8, "run": "npm test"}]}]}
+ "blocks": [{"at": 9, "code": "npm test", "links": [{"at": 0, "len": 8, "run": "npm test"}]}],
+ "reply": "prompt"}
 ```
 
 - Files are written as `<name>.tmp` and then `rename`d to `<name>.json`. Rename is atomic
@@ -81,6 +82,10 @@ Instead the hook writes one JSON file per finished turn into
   speaks: `at` is the paragraph end in `text` they follow (0: before everything), `code`
   the block, `links` its command lines (UTF-16 within `code`). A `\`-continued line is one
   link; in a `console` block only `$ ` lines count. Optional too (`CodeBlock.parse`).
+- `reply` is `"prompt"` on a finished turn: its terminal is back at Claude's prompt, so
+  with Listen After Reading on, the HUD opens the mic after reading it and pastes what you
+  say there. A question read by `read-question.py` carries none, and no mic opens for it.
+  Optional, so `v` stays 1.
 - `SPEAKHUD_QUEUE_DIR` moves the queue for both the hook and the agent. It exists for
   tests. Set it for only one side and the hook writes somewhere the agent never reads,
   so the agent logs `spool: watching <dir>` at startup to show which one it chose.

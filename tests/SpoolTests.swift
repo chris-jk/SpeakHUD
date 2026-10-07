@@ -212,6 +212,18 @@ let spoolSuite = Suite("Spool") { t in
         try? fm.removeItem(atPath: q)
     }
 
+    // -- which items can be answered out loud ------------------------------------
+    do {
+        let q = tempDir("reply")
+        write(q, "1.json", ["text": "a turn", "reply": "prompt", "created": fresh])
+        write(q, "2.json", ["text": "a question", "created": fresh])
+        write(q, "3.json", ["text": "some later kind", "reply": "choice", "created": fresh])
+        write(q, "4.json", ["text": "nonsense", "reply": true, "created": fresh])
+        t.expectEqual(Spool.drain(in: q, now: now).items.map(\.answerable), [true, false, false, false],
+                      "only reply: \"prompt\" opens the mic; anything else, or nothing, doesn't")
+        try? fm.removeItem(atPath: q)
+    }
+
     // -- abandoned .tmp files -----------------------------------------------------
     do {
         let q = tempDir("tmp")

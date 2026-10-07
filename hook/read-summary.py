@@ -484,7 +484,7 @@ def heartbeat_fresh():
     return -HEARTBEAT_STALE < age < HEARTBEAT_STALE
 
 
-def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None):
+def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, reply=None):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
     The fields are the contract with Spool.drain in speak-hud.swift, pinned by
@@ -507,6 +507,8 @@ def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None):
             item["cwd"] = cwd
         if blocks:
             item["blocks"] = blocks
+        if reply:
+            item["reply"] = reply
         with open(tmp, "w") as f:
             json.dump(item, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
@@ -610,7 +612,9 @@ def main():
 
     if agent_running():
         try:
-            enqueue(text, source, key, where, clickable, cwd, shown)
+            # A turn that has ended leaves its terminal at Claude's prompt, which is
+            # where a spoken answer goes. (A question from read-question.py doesn't.)
+            enqueue(text, source, key, where, clickable, cwd, shown, reply="prompt")
             return
         except OSError as e:
             # A full disk or an unwritable spool shouldn't mean silence.
