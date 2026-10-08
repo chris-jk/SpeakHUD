@@ -79,8 +79,8 @@ private final class FakeTerm {
         return Reply.Answer(reply: "ok")
     }
 
-    func send(_ heard: String, to origin: Origin = pane) -> Reply.Outcome {
-        Reply.send(heard, to: origin, ask: ask, wait: { _ in self.waits += 1 })
+    func send(_ heard: String, to origin: Origin = pane, pictures: [String] = []) -> Reply.Outcome {
+        Reply.send(heard, to: origin, pictures: pictures, via: Reply.Terminal(ask: ask, wait: { _ in self.waits += 1 }))
     }
 }
 
@@ -247,13 +247,13 @@ let replySuite = Suite("Reply") { t in
         let term = FakeTerm(atPrompt("❯  "))
         term.onPaste = { _, _ in }
         var looks = 0
-        let outcome = Reply.send("blue please", to: pane, ask: { source in
+        let outcome = Reply.send("blue please", to: pane, via: Reply.Terminal(ask: { source in
             if source.contains("contents of s") {
                 looks += 1
                 if looks == 4 { term.screen = atPrompt("❯ blue please") }
             }
             return term.ask(source)
-        }, wait: { _ in })
+        }, wait: { _ in }))
         t.expectEqual(outcome, .sent, "a paste that takes a moment to show is still sent")
     }
     do {  // you'd typed something there already
@@ -271,7 +271,7 @@ let replySuite = Suite("Reply") { t in
         let one = "/Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg"
         let term = FakeTerm(atPrompt("❯  "))
         term.onPaste = { term, text in term.screen = atPrompt("❯ [Image #1]" + text.replacingOccurrences(of: " " + one, with: "")) }
-        t.expectEqual(Reply.send("this one The picture from my phone: " + one, to: pane, pictures: [one], ask: term.ask, wait: { _ in }), .sent,
+        t.expectEqual(term.send("this one The picture from my phone: " + one, pictures: [one]), .sent,
                       "an answer with a picture is sent once its words show after the picture's marker")
         t.expect(term.calls.contains(.enter), "with Return")
     }

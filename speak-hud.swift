@@ -509,6 +509,13 @@ enum LoadCommand {
 // paste, only into a pane whose screen shows Claude's prompt box and no such box, and
 // Return follows only when the prompt box then shows them. It counts as sent once they
 // have left the box again.
+//
+// The phone answers the same panes, and a box as well, by its keys. So this is the one
+// place a pane is read and written: `showing` says what a screen holds (Claude's prompt,
+// a box, a turn at work, or nothing of Claude's), and `send`, `press`, `pick` and
+// `close` each look at the pane themselves before they write a thing to it. `press` and
+// `pick` are also told what the page had drawn, and write only if that still stands.
+// iTerm2 is reached through `Terminal`, which tests swap for a fake one.
 enum Reply {
     static let maxLength = 4000
     /// How often, and how far apart, the screen is read again for the paste to show.
@@ -771,11 +778,44 @@ enum Reply {
         return have.hasPrefix(String(want.prefix(40))) || have.hasPrefix("[Pastedtext#")
     }
 
+    // -- iTerm2 ----------------------------------------------------------------
+
     /// What iTerm2 said to one script: its reply, or the AppleScript error.
     struct Answer: Equatable {
         var reply: String? = nil
         var errorCode: Int? = nil
         var errorMessage: String? = nil
+    }
+
+    /// iTerm2 as everything here reaches it: a script goes in and its answer comes back,
+    /// and there's a wait between writing to a pane and looking at it again. This is the
+    /// one seam: the app's is the real iTerm2, a test's is a fake one answering `ask`.
+    struct Terminal {
+        var ask: (String) -> Answer = Reply.ask
+        var wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    }
+
+    /// Run one script: what it gave back after its "ok", or why there's nothing. The one
+    /// place a pane that has gone, a refused permission and an AppleScript error get
+    /// their names.
+    private static func tell(_ terminal: Terminal, _ source: String) -> Result<String, Outcome> {
+        let a = terminal.ask(source)
+        if let code = a.errorCode {
+            return .failure(code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)"))   // errAEEventNotPermitted
+        }
+        guard let reply = a.reply, reply.hasPrefix("ok") else { return .failure(.gone) }
+        return .success(String(reply.dropFirst(2)))
+    }
+
+    /// A script that writes to a pane: nil once it has, or why it didn't.
+    private static func wrote(_ terminal: Terminal, _ source: String) -> Outcome? {
+        if case .failure(let why) = tell(terminal, source) { return why }
+        return nil
+    }
+
+    /// One look at the pane `session`: what the foot of its screen is showing.
+    private static func look(_ session: String, _ terminal: Terminal) -> Result<Showing, Outcome> {
+        tell(terminal, screenScript(session)).map { showing(foot($0)) }
     }
 
     /// An AppleScript that finds the pane `session` and does `action` with it as `s`.
@@ -834,23 +874,116 @@ enum Reply {
         """)
     }
 
-    /// Press one named key in the pane `origin` names: how a question or permission
-    /// box, which takes no paste, is answered from the phone.
-    static func press(_ key: String, in origin: Origin, ask: (String) -> Answer = Reply.ask) -> Outcome {
+    /// One named key, written to the pane as it is. Only for what has already looked at
+    /// the pane and knows the key belongs there: `press`, `pick`, `close`.
+    private static func key(_ name: String, _ session: String, _ terminal: Terminal) -> Outcome {
+        guard let codes = keys[name] else { return .failed("no such key") }
+        return wrote(terminal, keyScript(session, codes)) ?? .sent
+    }
+
+    /// `line` typed into the pane as keys (not a paste: a question's own text field takes
+    /// no paste), with no Return. For the same callers as `key`.
+    private static func type(_ line: String, _ session: String, _ terminal: Terminal) -> Outcome {
+        wrote(terminal, script(session, """
+        tell s to write text \(LoadCommand.literal(line)) newline no
+                            return "ok"
+        """)) ?? .sent
+    }
+
+    /// What a page had drawn where a key was tapped. Pressing asks for it: a key goes
+    /// only into what was drawn, so nothing is pressed blind.
+    enum Tapped: Equatable {
+        /// A box: one of its own buttons, or a key under its screen.
+        case box(TerminalBox.Drawn)
+        /// The question hook's words, which stand in until the screen is read, and the
+        /// choice the tapped number was beside.
+        case question(asked: String, option: String)
+        /// No box: a key under a screen that had none drawn.
+        case noBox
+    }
+
+    /// Press one named key in the pane `origin` names, if the pane is showing what the
+    /// page had drawn when it was `tapped`, and that takes the key:
+    /// - a box takes any key, and only if it's the box that was drawn (for a hook's
+    ///   question: the box that asks it, where that number is that choice);
+    /// - something else that says it takes keys takes any, from a page with no box drawn;
+    /// - Claude's prompt takes Enter and Esc (send what's typed; stop the turn). Any
+    ///   other key lands in the message being typed, and the next answer is pasted after it;
+    /// - a turn running with no prompt in sight takes Esc;
+    /// - anything else takes nothing. In a pane that has dropped to its shell, Up and
+    ///   Enter run its last command again.
+    static func press(_ key: String, on tapped: Tapped, in origin: Origin, via terminal: Terminal = Terminal()) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
-        guard let codes = keys[key] else { return .failed("no such key") }
-        let a = ask(keyScript(session, codes))
-        if let code = a.errorCode {
-            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+        guard keys[key] != nil else { return .failed("no such key") }
+        switch look(session, terminal) {
+        case .failure(let stop): return stop
+        case .success(let showing): return refusal(of: key, on: tapped, showing: showing) ?? self.key(key, session, terminal)
         }
-        return a.reply?.hasPrefix("ok") == true ? .sent : .gone
+    }
+
+    /// Why `key`, tapped on what the page had drawn, isn't pressed in a pane showing
+    /// this. Nil when it is to be.
+    private static func refusal(of key: String, on tapped: Tapped, showing: Showing) -> Outcome? {
+        switch (showing, tapped) {
+        case (.box(let box), .box(let drawn)):
+            return box.isBox(drawn) ? nil : .changed
+        case (.box(let box), .question(let asked, let option)):
+            return box.isChoice(Int(key) ?? 0, worded: option, asked: asked) ? nil : .changed
+        case (.box, .noBox):
+            return .changed   // a box the page never drew: Enter would take whichever choice its cursor is on
+        case (_, .box), (_, .question):
+            return .changed   // the box it was tapped for has gone: Enter would now send whatever is typed
+        case (.keys, .noBox):
+            return nil
+        case (.prompt, .noBox):
+            return ["enter", "esc"].contains(key) ? nil : .failed("its terminal is at Claude's prompt, where that key would only type into your message")
+        case (.working, .noBox):
+            // Esc stops a turn, and does nothing to a shell whose title only looked like one.
+            return key == "esc" ? nil : .failed("its terminal is in the middle of a turn with no box up, where only Esc (which stops it) is pressed")
+        case (.notClaude(let why), .noBox):
+            return .failed("its terminal isn't showing Claude Code (\(why)), so no key is pressed there")
+        }
+    }
+
+    /// What `pick` answers when words come with a choice that isn't a text field.
+    static let takesNoWords = "that choice doesn't take words"
+
+    /// Pick choice `row` of the box that was `drawn`, if that is the box the pane is
+    /// showing now: its digit, or the arrows from where the cursor is now and Enter.
+    /// `words` are for the choice that turns into a text field: it's picked, they're
+    /// typed on one line, and Enter follows.
+    static func pick(_ row: Int, of drawn: TerminalBox.Drawn, words: String? = nil, in origin: Origin,
+                     via terminal: Terminal = Terminal()) -> Outcome {
+        guard canReach(origin), let session = origin.session else { return .gone }
+        let showing: Showing
+        switch look(session, terminal) {
+        case .failure(let stop): return stop
+        case .success(let seen): showing = seen
+        }
+        guard let box = showing.box, box.isBox(drawn), var keys = box.keys(toPick: row) else { return .changed }
+        var line: String?
+        if let words = words {
+            guard box.rows[row].types, box.rows[row].checked == nil, let cleaned = clean(words) else { return .failed(takesNoWords) }
+            line = cleaned
+            keys.append("enter")
+        }
+        var outcome = Outcome.sent
+        for (i, name) in keys.enumerated() where outcome == .sent {
+            if i > 0 { terminal.wait(0.15) }
+            if let line = line, i == keys.count - 1 {
+                outcome = type(line, session, terminal)
+                if outcome == .sent { terminal.wait(0.15) }
+            }
+            if outcome == .sent { outcome = key(name, session, terminal) }
+        }
+        return outcome
     }
 
     /// The foot of the pane's screen as text, for the phone to show. Nil when it's gone.
-    static func screen(of origin: Origin, lines: Int = 40, ask: (String) -> Answer = Reply.ask) -> String? {
+    static func screen(of origin: Origin, lines: Int = 40, via terminal: Terminal = Terminal()) -> String? {
         guard canReach(origin), let session = origin.session,
-              let reply = ask(screenScript(session)).reply, reply.hasPrefix("ok") else { return nil }
-        return foot(String(reply.dropFirst(2)), lines: lines)
+              case .success(let contents) = tell(terminal, screenScript(session)) else { return nil }
+        return foot(contents, lines: lines)
     }
 
     /// A pane iTerm2 has open: its id, its title, and the foot of its screen.
@@ -881,9 +1014,9 @@ enum Reply {
 
     /// The open panes, or nil when iTerm2 isn't running or won't say (then nothing is
     /// known, which is not the same as nothing being open).
-    static func survey(ask: (String) -> Answer = Reply.ask) -> [Pane]? {
-        guard let reply = ask(surveyScript).reply, reply.hasPrefix("ok") else { return nil }
-        return reply.components(separatedBy: "\u{1E}").dropFirst().compactMap { record in
+    static func survey(via terminal: Terminal = Terminal()) -> [Pane]? {
+        guard case .success(let records) = tell(terminal, surveyScript) else { return nil }
+        return records.components(separatedBy: "\u{1E}").dropFirst().compactMap { record in
             let fields = record.components(separatedBy: "\u{1F}")
             guard fields.count == 3, Origin(json: ["session": fields[0]]) != nil else { return nil }
             return Pane(session: fields[0], name: fields[1], screen: foot(fields[2]))
@@ -900,38 +1033,21 @@ enum Reply {
 
     /// Close the pane: Claude Code is asked to exit first if it's at its prompt (so the
     /// session ends cleanly and iTerm2 has no running job to ask about), then the pane goes.
-    static func close(_ origin: Origin, ask: (String) -> Answer = Reply.ask,
-                      wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Outcome {
+    static func close(_ origin: Origin, via terminal: Terminal = Terminal()) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
-        if let screen = screen(of: origin, ask: ask), case .prompt(let prompt) = showing(screen), prompt.text.isEmpty {
-            _ = type("/exit", in: origin, ask: ask)
-            wait(0.3)
-            _ = press("enter", in: origin, ask: ask)
-            wait(1.5)
+        if case .success(.prompt(let prompt)) = look(session, terminal), prompt.text.isEmpty {
+            _ = type("/exit", session, terminal)
+            terminal.wait(0.3)
+            _ = key("enter", session, terminal)
+            terminal.wait(1.5)
         }
-        let a = ask(script(session, """
+        switch wrote(terminal, script(session, """
         tell s to close
                             return "ok"
-        """))
-        if let code = a.errorCode {
-            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+        """)) {
+        case nil, .gone?: return .sent   // gone: it had already closed when Claude exited. Closed all the same.
+        case let stop?: return stop
         }
-        // "missing" here means the pane had already gone when Claude exited: closed all the same.
-        return .sent
-    }
-
-    /// Type `line` into the pane as keys (not a paste: a question's own text field takes
-    /// no paste), with no Return.
-    static func type(_ line: String, in origin: Origin, ask: (String) -> Answer = Reply.ask) -> Outcome {
-        guard canReach(origin), let session = origin.session else { return .gone }
-        let a = ask(script(session, """
-        tell s to write text \(LoadCommand.literal(line)) newline no
-                            return "ok"
-        """))
-        if let code = a.errorCode {
-            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
-        }
-        return a.reply?.hasPrefix("ok") == true ? .sent : .gone
     }
 
     /// A pane's title as Claude Code sets it ("✳ Grow guide replies — ~/some/dir"), down
@@ -947,10 +1063,11 @@ enum Reply {
         return name.isEmpty ? title.trimmingCharacters(in: .whitespaces) : name
     }
 
-    enum Outcome: Equatable, CustomStringConvertible {
+    enum Outcome: Equatable, CustomStringConvertible, Error {
         case sent
         case notAtPrompt   // nothing pasted: a question or permission box is up, or no prompt in sight
         case unconfirmed   // pasted, but it didn't show at the start of the prompt (Return not pressed), or it's still there after Return
+        case changed       // no key pressed: the box up now isn't the one the tap was drawn on
         case gone          // its terminal has closed
         case denied        // Automation permission refused
         case failed(String)
@@ -960,6 +1077,7 @@ enum Reply {
             case .sent: return "sent"
             case .notAtPrompt: return "its terminal isn't at Claude's prompt"
             case .unconfirmed: return "pasted, but Return is yours to press"
+            case .changed: return "its box has changed since this was drawn"
             case .gone: return "its terminal is gone"
             case .denied: return "not allowed to control iTerm2 — grant it in System Settings › Privacy & Security › Automation › SpeakHUD"
             case .failed(let why): return why
@@ -984,48 +1102,35 @@ enum Reply {
 
     /// Paste `heard` into the prompt of the pane `origin` names and press Return.
     /// `pictures` are the paths on the end of it that are pictures being sent with it.
-    /// `ask` and `wait` are the seams tests drive it through.
-    static func send(_ heard: String, to origin: Origin, pictures: [String] = [],
-                     ask: (String) -> Answer = Reply.ask,
-                     wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Outcome {
+    static func send(_ heard: String, to origin: Origin, pictures: [String] = [], via terminal: Terminal = Terminal()) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
         guard let line = clean(heard) else { return .failed("nothing to send") }
 
-        /// The pane's screen, or why there isn't one to act on.
-        func screen() -> (text: String?, stop: Outcome?) {
-            let a = ask(screenScript(session))
-            if let code = a.errorCode {
-                return (nil, code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)"))
-            }
-            guard let reply = a.reply, reply.hasPrefix("ok") else { return (nil, .gone) }
-            return (String(reply.dropFirst(2)), nil)
+        /// Whether the prompt box is what's showing, holding the paste and nothing ahead of it.
+        func holdsIt(_ showing: Showing) -> Bool {
+            showing.prompt.map { shows(line, inPrompt: $0.text, pictures: pictures) } ?? false
         }
-        func done(_ a: Answer) -> Outcome? {
-            if let code = a.errorCode {
-                return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
-            }
-            return a.reply?.hasPrefix("ok") == true ? nil : .gone
+        switch look(session, terminal) {
+        case .failure(let stop): return stop
+        case .success(let before): guard before.prompt != nil else { return .notAtPrompt }
         }
-
-        let before = screen()
-        if let stop = before.stop { return stop }
-        guard case .prompt = showing(before.text ?? "") else { return .notAtPrompt }
-        if let stop = done(ask(pasteScript(session, line))) { return stop }
+        if let stop = wrote(terminal, pasteScript(session, line)) { return stop }
         for _ in 0..<looks {
-            wait(lookGap)
-            let now = screen()
-            if let stop = now.stop { return stop }
-            if case .prompt(let box) = showing(now.text ?? ""), shows(line, inPrompt: box.text, pictures: pictures) {
-                if let stop = done(ask(returnScript(session))) { return stop }
-                // Sent means gone from the box. Still sitting there, Return didn't take.
-                for _ in 0..<looks {
-                    wait(lookGap)
-                    let after = screen()
-                    if let stop = after.stop { return stop }
-                    guard case .prompt(let left) = showing(after.text ?? ""), shows(line, inPrompt: left.text, pictures: pictures) else { return .sent }
-                }
-                return .unconfirmed
+            terminal.wait(lookGap)
+            switch look(session, terminal) {
+            case .failure(let stop): return stop
+            case .success(let now): guard holdsIt(now) else { continue }
             }
+            if let stop = wrote(terminal, returnScript(session)) { return stop }
+            // Sent means gone from the box. Still sitting there, Return didn't take.
+            for _ in 0..<looks {
+                terminal.wait(lookGap)
+                switch look(session, terminal) {
+                case .failure(let stop): return stop
+                case .success(let after): guard holdsIt(after) else { return .sent }
+                }
+            }
+            return .unconfirmed
         }
         return .unconfirmed
     }
@@ -5266,25 +5371,15 @@ final class Phone {
     private var scanned = Date.distantPast
     private var polled = Date.distantPast
     private var askPushed: [String: Date] = [:]
-    /// Puts the words in a terminal; the paths are the pictures the phone put on the end
-    /// of them. Tests answer for iTerm2.
-    var deliver: (String, [String], Origin) -> Reply.Outcome = { Reply.send($0, to: $2, pictures: $1) }
-    /// Presses a key in a terminal, and reads the foot of its screen.
-    var press: (String, Origin) -> Reply.Outcome = { Reply.press($0, in: $1) }
-    var look: (Origin) -> String? = { Reply.screen(of: $0) }
+    /// iTerm2, which every terminal is read and written through (`Reply`). Tests put a
+    /// fake one here, so the page's requests run the real reading, guarding and writing.
+    var terminal = Reply.Terminal()
     /// Sends a push. Tests keep the request instead.
     var transport: (URLRequest, @escaping (String?) -> Void) -> Void = Phone.post
     /// A file of the page, by name. The app's are in its bundle; tests read the repo's.
     var asset: (String) -> Data? = { name in
         Bundle.main.resourcePath.flatMap { FileManager.default.contents(atPath: $0 + "/phone/" + name) }
     }
-    /// The panes iTerm2 has open and what's on them. Tests answer for it.
-    var survey: () -> [Reply.Pane]? = { Reply.survey() }
-    /// Types into a terminal's own text field, and waits between keys.
-    var type: (String, Origin) -> Reply.Outcome = { Reply.type($0, in: $1) }
-    var wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
-    /// Closes a terminal.
-    var shut: (Origin) -> Reply.Outcome = { Reply.close($0) }
     /// The sessions that could be resumed, and what opens one.
     var oldSessions: () -> [OldSessions.Session] = { OldSessions.recent() }
     var reopen: (OldSessions.Session) -> Reply.Outcome = { OldSessions.resume($0) }
@@ -5339,7 +5434,7 @@ final class Phone {
     func scan(now: Date = Date()) {
         guard now.timeIntervalSince(scanned) >= Self.scanEvery else { return }
         scanned = now
-        guard let open = survey() else { return }   // iTerm2 not running, or not saying: nothing learned
+        guard let open = Reply.survey(via: terminal) else { return }   // iTerm2 not running, or not saying: nothing learned
         for key in desk.met(open, now: now) where away {
             guard let turn = desk.turn(key), let box = turn.box, firstAsk(key, now) else { continue }
             push(title: "\(turn.name) is asking", message: box.ask, key: key, name: turn.name)
@@ -5652,7 +5747,7 @@ final class Phone {
         }
         if r.method == "GET", r.path == "/api/screen" {
             guard let turn = desk.turn(r.query["key"] ?? ""), let origin = turn.origin,
-                  let screen = look(origin) else {
+                  let screen = Reply.screen(of: origin, via: terminal) else {
                 return .json(["error": "its terminal can't be read from here"], status: 409)
             }
             desk.saw(turn.key, screen)   // its box as it stands; back at the prompt, a question is over
@@ -5720,15 +5815,16 @@ final class Phone {
             guard let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
-            let outcome = shut(origin)
+            let outcome = Reply.close(origin, via: terminal)
             log("phone closed \(turn.name): \(outcome)")
             if outcome == .sent { desk.closed(key) }
             return .json(["sent": outcome == .sent, "outcome": outcome.description, "state": state()])
         case "/api/pick":
             // A choice in the box its terminal is showing. The page says which box it had
-            // drawn, and the box is read again here: the keys go only if that box is the
-            // one up now, and are worked out from where its cursor is now. A box that has
-            // moved on since the page drew it is never answered blind.
+            // drawn; `Reply.pick` reads the box again and presses only if that box is the
+            // one up now, working the keys out from where its cursor is now. A box that
+            // has moved on since the page drew it is never answered blind. Words, if
+            // any, are the page's own answer for the choice that takes them.
             guard let key = body["key"] as? String, let row = body["row"] as? Int, let label = body["label"] as? String,
                   let drawn = TerminalBox.Drawn(json: body["box"]) else {
                 return .json(["error": "which choice?"], status: 400)
@@ -5736,30 +5832,15 @@ final class Phone {
             guard let turn = desk.turn(key), let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
-            guard drawn.rows.indices.contains(row), drawn.rows[row] == label,
-                  let screen = look(origin), let box = Reply.showing(screen).box, box.isBox(drawn), var keys = box.keys(toPick: row) else {
-                if let screen = look(origin) { desk.saw(key, screen) }
-                return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
+            // The row and its label are the page's two names for the choice: they have to agree.
+            let outcome = drawn.rows.indices.contains(row) && drawn.rows[row] == label
+                ? Reply.pick(row, of: drawn, words: body["text"] as? String, in: origin, via: terminal) : .changed
+            if outcome == .changed {
+                if let screen = Reply.screen(of: origin, via: terminal) { desk.saw(key, screen) }
+                return .json(["sent": false, "outcome": outcome.description, "state": state()])
             }
-            var words: String?
-            if let text = body["text"] as? String {
-                // Its own answer: pick the row that turns into a text field, type, Enter.
-                guard box.rows[row].types, box.rows[row].checked == nil, let line = Reply.clean(text) else {
-                    return .json(["error": "that choice doesn't take words"], status: 400)
-                }
-                words = line
-                keys.append("enter")
-            }
-            var outcome = Reply.Outcome.sent
-            for (i, name) in keys.enumerated() where outcome == .sent {
-                if i > 0 { wait(0.15) }
-                if let line = words, i == keys.count - 1 {
-                    outcome = type(line, origin)
-                    if outcome == .sent { wait(0.15) }
-                }
-                if outcome == .sent { outcome = press(name, origin) }
-            }
-            log("phone pick \(row + 1) of \(box.rows.count) in \(turn.name): \(outcome)")
+            if outcome == .failed(Reply.takesNoWords) { return .json(["error": Reply.takesNoWords], status: 400) }
+            log("phone pick \(row + 1) of \(drawn.rows.count) in \(turn.name): \(outcome)")
             return .json(["sent": outcome == .sent, "outcome": outcome.description])
         case "/api/key":
             guard let key = body["key"] as? String, let name = body["press"] as? String, Reply.keys[name] != nil else {
@@ -5771,45 +5852,23 @@ final class Phone {
             guard let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
-            // A key goes only where Claude is showing something that takes it, and only
-            // if that is what the page had drawn when it was tapped: a box, or a hook's
-            // question with the choice this number was beside.
-            let drawn = TerminalBox.Drawn(json: body["box"])
-            let option = (body["option"] as? String).flatMap { words in (body["asked"] as? String).map { (asked: $0, words: words) } }
-            guard let screen = look(origin) else {
-                return .json(["sent": false, "outcome": Reply.Outcome.gone.description])
+            // What the page had drawn when the key was tapped: a box, or the hook's
+            // question with the choice this number was beside, or neither. `Reply.press`
+            // looks at the pane and presses only where that still stands and takes the key.
+            let tapped: Reply.Tapped
+            if let drawn = TerminalBox.Drawn(json: body["box"]) {
+                tapped = .box(drawn)
+            } else if let asked = body["asked"] as? String, let option = body["option"] as? String {
+                tapped = .question(asked: asked, option: option)
+            } else {
+                tapped = .noBox
             }
-            var refused: String?
-            switch Reply.showing(screen) {
-            case .box(let box):
-                // Its box, as drawn: any other one would be answered blind.
-                guard drawn.map(box.isBox) ?? option.map({ box.isChoice(Int(name) ?? 0, worded: $0.words, asked: $0.asked) }) ?? false else {
-                    desk.saw(key, screen)
-                    return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
-                }
-            case _ where drawn != nil || option != nil:
-                // The box it was tapped for has gone: Enter would now send whatever is typed.
-                desk.saw(key, screen)
-                return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
-            case .keys:
-                break
-            case .prompt:
-                // At Claude's prompt a key isn't an answer: it lands in the message being
-                // typed, and the next answer is pasted after it. Enter and Esc still mean
-                // something there (send what's typed; stop the turn).
-                if !["enter", "esc"].contains(name) {
-                    refused = "its terminal is at Claude's prompt, where that key would only type into your message"
-                }
-            case .working:
-                // Esc stops a turn, and does nothing to a shell whose title only looked like one.
-                if name != "esc" { refused = "its terminal is in the middle of a turn with no box up, where only Esc (which stops it) is pressed" }
-            case .notClaude(let why):
-                // A pane that has dropped to its shell: Up and Enter there run its last command again.
-                refused = "its terminal isn't showing Claude Code (\(why)), so no key is pressed there"
-            }
-            if let why = refused { return .json(["sent": false, "outcome": why]) }
-            let outcome = press(name, origin)
+            let outcome = Reply.press(name, on: tapped, in: origin, via: terminal)
             log("phone key \(name) to \(turn.name): \(outcome)")
+            if outcome == .changed {
+                if let screen = Reply.screen(of: origin, via: terminal) { desk.saw(key, screen) }
+                return .json(["sent": false, "outcome": outcome.description, "state": state()])
+            }
             return .json(["sent": outcome == .sent, "outcome": outcome.description])
         case "/api/reply":
             guard let key = body["key"] as? String, let said = body["text"] as? String else {
@@ -5838,7 +5897,7 @@ final class Phone {
             }
             // Only the paths put on the end here count as pictures: a path or a link in
             // the words themselves is words.
-            let outcome = deliver(text, paths, origin)
+            let outcome = Reply.send(text, to: origin, pictures: paths, via: terminal)
             let with = paths.isEmpty ? "" : paths.count == 1 ? "1 picture" : "\(paths.count) pictures"
             desk.answered(key, with: [Reply.clean(said), with.isEmpty ? nil : "[\(with)]"].compactMap { $0 }.joined(separator: " "), outcome)
             log("phone reply to \(turn.name) (\(said.count) chars\(with.isEmpty ? "" : ", " + with)): \(outcome)")

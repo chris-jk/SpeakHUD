@@ -50,20 +50,92 @@ private func screenshot(_ name: String) -> String {
     String(decoding: fm.contents(atPath: "tests/fixtures/screens/\(name).txt") ?? Data(), as: UTF8.self)
 }
 
-/// A Phone on throwaway settings, with what it sent to iTerm2 and to the push server.
+/// iTerm2, as Phone reaches it through Reply: each script it's asked is taken for what it
+/// does (the survey, a look at a pane's screen, a paste, Return, a key, typed words, a
+/// close), noted, and answered the way iTerm2 would. One screen stands for whichever
+/// pane is asked about. A paste lands the way Claude Code's prompt takes one (seen in
+/// 2.1.294): the words show in the box until Return, with a marker at the front in place
+/// of each picture's path.
+private final class FakeITerm {
+    static let promptScreen = "some output\n────────────────\n❯ \n────────────────\n  status"
+
+    var screen: String? = FakeITerm.promptScreen { didSet { held = nil } }   // nil: the pane has gone
+    var open: [Reply.Pane]? = nil     // what a survey says is open and showing; nil: iTerm2 isn't saying
+    var takesPaste = true             // false: a paste never shows in the prompt box
+    var pictureFiles: [String] = []   // the paths Claude Code would find to be pictures
+    private(set) var pasted: [(text: String, session: String?)] = []
+    private(set) var pressed: [String] = []
+    private(set) var typed: [String] = []
+    private(set) var closed: [String?] = []
+    private var held: String?         // what the prompt box holds since a paste, until Return
+
+    func ask(_ source: String) -> Reply.Answer {
+        if source == Reply.surveyScript {
+            guard let open = open else { return Reply.Answer(reply: "missing") }
+            return Reply.Answer(reply: "ok" + open.map { "\u{1E}\($0.session)\u{1F}\($0.name)\u{1F}\($0.screen)" }.joined())
+        }
+        let session = source.components(separatedBy: "(id of s) is \"").dropFirst().first?.components(separatedBy: "\"").first
+        guard let screen = screen else { return Reply.Answer(reply: "missing") }
+        if source.contains("contents of s") {
+            let shown = held.map { "some output\n────────────────\n❯ \($0)\n────────────────\n  status" } ?? screen
+            return Reply.Answer(reply: "ok\n" + shown)
+        }
+        if source.contains("tell s to close") {
+            closed.append(session)
+        } else if source.contains("\"[200~\"") {
+            // The pasted line: what sits between the paste brackets, un-escaped.
+            let text = unquoted(source.components(separatedBy: "\"[200~\" & \"").last?
+                .components(separatedBy: "\" & (character id 27) & \"[201~\"").first ?? "")
+            pasted.append((text, session))
+            if takesPaste {
+                var words = text, markers: [String] = []
+                for path in pictureFiles where words.contains(path) {
+                    words = words.replacingOccurrences(of: " " + path, with: "").replacingOccurrences(of: path, with: "")
+                    markers.append("[Image #\(markers.count + 1)]")
+                }
+                held = markers.joined(separator: " ") + words
+            }
+        } else if source == Reply.returnScript(session ?? "") {
+            held = nil   // the Return that follows a paste: the message goes
+        } else if source.contains("tell s to write text ((character id") {
+            let codes = Self.ids(in: source)
+            let name = Reply.keys.first { $0.value == codes }?.key ?? "?"
+            pressed.append(name)
+            if name == "enter" { held = nil }
+        } else if let line = source.components(separatedBy: "tell s to write text \"").dropFirst().first?.components(separatedBy: "\" newline no").first {
+            typed.append(unquoted(line))
+        }
+        return Reply.Answer(reply: "ok")
+    }
+
+    private func unquoted(_ literal: String) -> String {
+        literal.replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\")
+    }
+
+    /// The character ids a script writes, in order.
+    private static func ids(in source: String) -> [Int] {
+        source.components(separatedBy: "(character id ").dropFirst().compactMap { Int($0.prefix { $0.isNumber }) }
+    }
+}
+
+/// A Phone on throwaway settings, over a fake iTerm2 and a stand-in for the push server:
+/// what the page asks runs the real reading and writing of terminals (Reply), and what
+/// reached iTerm2 is kept here.
 private final class Bench {
     let suite = "speakhud-phone-tests-\(UUID().uuidString)"
     let defaults: UserDefaults
     let phone: Phone
-    var delivered: [(text: String, session: String?, pictures: [String])] = []
-    var pressed: [String] = []
+    let term = FakeITerm()
+    var delivered: [(text: String, session: String?)] { term.pasted }   // each paste that reached a pane
+    var pressed: [String] { term.pressed }                              // each key, by name
+    var typed: [String] { term.typed }
+    var shutPanes: [String?] { term.closed }
+    var screen: String? { get { term.screen } set { term.screen = newValue } }
+    var open: [Reply.Pane]? { get { term.open } set { term.open = newValue } }
     var pushes: [URLRequest] = []
     var logs: [String] = []
     var awayChanges: [Bool] = []
-    var outcome = Reply.Outcome.sent
-    var open: [Reply.Pane]? = nil   // what iTerm2 says is open and showing; nil: it isn't saying
-    var typed: [String] = []
-    var shutPanes: [String?] = []
+    var outcome = Reply.Outcome.sent   // how resuming an old session goes
     var old: [OldSessions.Session] = []
     var running: Set<String> = []
     var reopened: [String] = []
@@ -73,7 +145,6 @@ private final class Bench {
     var hearDone: ((Result<String, Dictation.Failure>) -> Void)?
     var livePieces: [String] = []    // each piece of a word-for-word dictation: "id rate bytes last"
     var liveAnswer: Result<String, Dictation.Failure> = .success("Yes, go")
-    var screen: String? = "some output\n────────────────\n❯ \n────────────────\n  status"
 
     init(url: String? = "https://my-mac.example.ts.net", ntfy: String? = "https://push.example.com/terminals") {
         defaults = UserDefaults(suiteName: suite)!
@@ -82,13 +153,7 @@ private final class Bench {
         config.ntfy = ntfy
         config.ntfyToken = ntfy == nil ? nil : "tk_secret"
         phone = Phone(config: config, defaults: defaults)
-        phone.deliver = { [unowned self] text, pictures, origin in self.delivered.append((text, origin.session, pictures)); return self.outcome }
-        phone.press = { [unowned self] key, _ in self.pressed.append(key); return self.outcome }
-        phone.look = { [unowned self] _ in self.screen }
-        phone.survey = { [unowned self] in self.open }
-        phone.type = { [unowned self] text, _ in self.typed.append(text); return self.outcome }
-        phone.wait = { _ in }
-        phone.shut = { [unowned self] origin in self.shutPanes.append(origin.session); return self.outcome }
+        phone.terminal = Reply.Terminal(ask: term.ask, wait: { _ in })
         phone.oldSessions = { [unowned self] in self.old }
         phone.runningIDs = { [unowned self] in self.running }
         phone.reopen = { [unowned self] session in self.reopened.append(session.id + " in " + session.cwd); return self.outcome }
@@ -259,10 +324,12 @@ let phoneSuite = Suite("Phone") { t in
     t.expectEqual(Reply.paneName("◑ SpeakerHug crash logs\u{00A0}—\u{00A0}~/GitHub/mac-apps/speakhud"), "SpeakerHug crash logs",
                   "as iTerm2 really gives it, with no-break spaces round the dash")
     t.expectEqual(Reply.paneName("zsh"), "zsh", "a plain title is left alone")
-    let surveyed = Reply.survey(ask: { _ in Reply.Answer(reply: "ok\u{1E}\(other)\u{1F}✳ Review desk — ~\u{1F}line one\nline\ttwo\n\n\u{1E}not-an-id\u{1F}x\u{1F}y\u{1E}only two\u{1F}fields") })
+    /// A terminal that answers every script the same way.
+    func saying(_ answer: Reply.Answer) -> Reply.Terminal { Reply.Terminal(ask: { _ in answer }, wait: { _ in }) }
+    let surveyed = Reply.survey(via: saying(Reply.Answer(reply: "ok\u{1E}\(other)\u{1F}✳ Review desk — ~\u{1F}line one\nline\ttwo\n\n\u{1E}not-an-id\u{1F}x\u{1F}y\u{1E}only two\u{1F}fields")))
     t.expect(surveyed?.count == 1 && surveyed?[0] == Reply.Pane(session: other, name: "✳ Review desk — ~", screen: "line one\nline\ttwo"),
              "iTerm2's panes are read by id, title and screen, whatever the screen holds; a record that isn't one is skipped")
-    t.expect(Reply.survey(ask: { _ in Reply.Answer(reply: "missing") }) == nil, "iTerm2 not running: nothing known, which isn't nothing open")
+    t.expect(Reply.survey(via: saying(Reply.Answer(reply: "missing"))) == nil, "iTerm2 not running: nothing known, which isn't nothing open")
     t.expect(Reply.surveyScript.contains("(character id 31)") && !Reply.surveyScript.contains("& tab &"),
              "the separators are spelled as character ids: inside iTerm2's tell, tab is one of its tabs")
     t.expect(Reply.showing(atPrompt).isClaude && Reply.showing("Thinking… (esc to interrupt)").isClaude && Reply.showing("❯ 1. Yes\nEnter to select · Esc to cancel").isClaude
@@ -482,13 +549,15 @@ let phoneSuite = Suite("Phone") { t in
              "a picture is kept under a plain name of its kind")
     t.expect(fm.contents(atPath: firstPath) == Data(jpegBytes) && (try? fm.attributesOfItem(atPath: firstPath))?[.posixPermissions] as? Int == 0o600,
              "as it came, for you alone")
+    // Claude Code takes a picture's path out of the prompt and puts a marker at the front
+    // of it: the answer is sent only because the Mac knows which of its words those are.
+    p.term.pictureFiles = [firstPath, secondPath]
     let withPics = json(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "this one", "pictures": [firstID, secondID]])))
     t.expect(withPics["sent"] as? Bool == true && p.delivered.last?.text == "this one The pictures from my phone: \(firstPath) \(secondPath)",
              "an answer with pictures says where they are on the Mac, for the terminal's Claude to read")
-    t.expectEqual(p.delivered.last?.pictures ?? [], [firstPath, secondPath], "and which of its words are those pictures: Claude Code takes exactly those out of the prompt")
-    _ = p.phone.respond(to: post("/api/reply", ["key": "a", "text": "use /tmp/logo.png and https://x.com/logo.png"]))
-    t.expect(p.delivered.last?.text == "use /tmp/logo.png and https://x.com/logo.png" && p.delivered.last?.pictures == [],
-             "a picture the answer names in its own words is words: none is said to have been sent with it")
+    let named = json(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "use /tmp/logo.png and https://x.com/logo.png"])))
+    t.expect(named["sent"] as? Bool == true && p.delivered.last?.text == "use /tmp/logo.png and https://x.com/logo.png",
+             "an answer that names a picture in its own words is sent too: those are words, and stay in the prompt as said")
     t.expect(turns(withPics["state"] as? [String: Any] ?? [:]).first?["sent"] as? String == "this one [2 pictures]"
              && p.logs.contains("phone reply to Grow guide replies (8 chars, 2 pictures): sent") && !p.logs.contains { $0.contains("from phone") },
              "the page and the log say there were pictures, not where they are")
@@ -533,15 +602,17 @@ let phoneSuite = Suite("Phone") { t in
                       : source.contains("tell s to close") ? "close" : "?")
         return Reply.Answer(reply: source.contains("contents of s") ? "ok\n" + atPrompt : "ok")
     }
-    t.expect(Reply.close(pane, ask: promptPane, wait: { _ in }) == .sent && script == ["look", "type /exit", "enter", "close"],
+    t.expect(Reply.close(pane, via: Reply.Terminal(ask: promptPane, wait: { _ in })) == .sent && script == ["look", "type /exit", "enter", "close"],
              "closing a terminal at Claude's prompt asks Claude to exit first, then closes the pane")
     script = []
     let boxPane: (String) -> Reply.Answer = { source in
         script.append(source.contains("contents of s") ? "look" : source.contains("tell s to close") ? "close" : "other")
         return Reply.Answer(reply: source.contains("contents of s") ? "ok\n" + screenshot("permission") : "ok")
     }
-    t.expect(Reply.close(pane, ask: boxPane, wait: { _ in }) == .sent && script == ["look", "close"], "one that isn't at its prompt is just closed: nothing is typed into a box")
-    t.expect(Reply.close(Origin(term: "Apple_Terminal", tty: "/dev/ttys004"), ask: { _ in Reply.Answer(reply: "ok") }) == .gone, "a pane that isn't iTerm2's can't be")
+    t.expect(Reply.close(pane, via: Reply.Terminal(ask: boxPane, wait: { _ in })) == .sent && script == ["look", "close"], "one that isn't at its prompt is just closed: nothing is typed into a box")
+    t.expect(Reply.close(Origin(term: "Apple_Terminal", tty: "/dev/ttys004"), via: saying(Reply.Answer(reply: "ok"))) == .gone, "a pane that isn't iTerm2's can't be")
+    t.expect(Reply.close(pane, via: saying(Reply.Answer(reply: "missing"))) == .sent && Reply.close(pane, via: saying(Reply.Answer(errorCode: -1743))) == .denied,
+             "one that had already gone is closed all the same; a refused permission is said")
     let closing = json(o.phone.respond(to: post("/api/close", ["key": "real"])))
     t.expect(closing["sent"] as? Bool == true && o.shutPanes == [pane.session] && o.phone.desk.turn("real") == nil
              && o.logs.contains("phone closed Grow guide replies: sent"), "closed from the page, its window goes")
@@ -701,15 +772,15 @@ let phoneSuite = Suite("Phone") { t in
              "and the page is told it went")
     t.expect(b.logs.contains("phone reply to Grow guide replies (19 chars): sent") && !b.logs.contains { $0.contains("post all three") },
              "the log has who and how long, never the words")
-    b.outcome = .notAtPrompt
+    b.screen = screenshot("permission")   // a box is up, which takes no paste
     let refused = json(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "again"])))
     t.expect(refused["sent"] as? Bool == false && refused["outcome"] as? String == Reply.Outcome.notAtPrompt.description,
              "one that didn't go says why")
-    b.outcome = .sent
+    b.screen = FakeITerm.promptScreen
     t.expectEqual(b.phone.respond(to: post("/api/reply", ["key": "gone", "text": "hi"])).status, 404, "a terminal off the list: not found")
     t.expectEqual(b.phone.respond(to: post("/api/reply", ["key": "b", "text": "hi"])).status, 409, "a pane that can't be reached: said")
     t.expectEqual(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "  \n "])).status, 400, "nothing to send: refused")
-    t.expectEqual(b.delivered.count, 2, "and none of those typed anything")
+    t.expectEqual(b.delivered.count, 1, "and none of those, nor the one a box turned away, typed anything")
 
     // -- a question box -----------------------------------------------------
     b.phone.took(turn("a:question", "Which route?"))
@@ -728,10 +799,10 @@ let phoneSuite = Suite("Phone") { t in
              "at Claude's prompt a number isn't pressed: it would type into the message, and the next answer would be pasted after it")
     _ = b.phone.respond(to: post("/api/key", ["key": "a", "press": "enter"]))
     t.expectEqual(b.pressed, ["2", "enter"], "Enter still is: it sends what's typed there")
-    b.outcome = .unconfirmed
+    b.term.takesPaste = false   // the paste never shows in the prompt box, so Return isn't pressed
     let half = json(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "and one more thing"])))
     t.expect(half["sent"] as? Bool == false && half["pasted"] as? Bool == true, "words pasted but not sent are said to be in the prompt, so the page doesn't offer to send them twice")
-    b.outcome = .sent
+    b.term.takesPaste = true
     let after = json(b.phone.respond(to: get("/api/screen", query: ["key": "a"])))
     t.expect(turns(after["state"] as? [String: Any] ?? [:]).first?["question"] is NSNull, "back at Claude's prompt, the question is over")
     b.screen = nil
@@ -741,15 +812,28 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(Reply.keyScript(pane.session!, Reply.keys["down"]!).contains("(character id 27) & (character id 91) & (character id 66)"),
              "Down is the bytes the key sends")
     var asked: [String] = []
-    t.expect(Reply.press("enter", in: pane, ask: { asked.append($0); return Reply.Answer(reply: "ok") }) == .sent
-             && asked.count == 1 && asked[0].contains("(character id 13)") && asked[0].contains("newline no"),
-             "a key is written to the pane, with no Return of its own")
-    t.expect(Reply.press("f13", in: pane, ask: { _ in Reply.Answer(reply: "ok") }) == .failed("no such key"), "an unknown key is never written")
-    t.expect(Reply.press("enter", in: pane, ask: { _ in Reply.Answer(reply: "missing") }) == .gone
-             && Reply.press("enter", in: pane, ask: { _ in Reply.Answer(errorCode: -1743) }) == .denied, "a closed pane and a refused permission say so")
-    t.expectEqual(Reply.screen(of: pane, lines: 2, ask: { _ in Reply.Answer(reply: "ok\none\ntwo\nthree\n\n   \n") }) ?? "", "two\nthree",
+    let atItsPrompt = Reply.Terminal(ask: { source in
+        asked.append(source)
+        return Reply.Answer(reply: source.contains("contents of s") ? "ok\n" + atPrompt : "ok")
+    }, wait: { _ in })
+    t.expect(Reply.press("enter", on: .noBox, in: pane, via: atItsPrompt) == .sent
+             && asked.count == 2 && asked[0].contains("contents of s") && asked[1].contains("(character id 13)") && asked[1].contains("newline no"),
+             "a key is written to the pane only after a look at it, and with no Return of its own")
+    asked = []
+    t.expect(Reply.press("f13", on: .noBox, in: pane, via: atItsPrompt) == .failed("no such key") && Reply.press("3", on: .noBox, in: pane, via: atItsPrompt) != .sent
+             && asked.allSatisfy { $0.contains("contents of s") }, "an unknown key is never written, nor one the pane wouldn't take as an answer")
+    t.expect(Reply.press("enter", on: .noBox, in: pane, via: saying(Reply.Answer(reply: "missing"))) == .gone
+             && Reply.press("enter", on: .noBox, in: pane, via: saying(Reply.Answer(errorCode: -1743))) == .denied, "a closed pane and a refused permission say so")
+    let writeFails = Reply.Terminal(ask: { source in
+        source.contains("contents of s") ? Reply.Answer(reply: "ok\n" + atPrompt) : Reply.Answer(errorCode: -1728, errorMessage: "Can't get session.")
+    }, wait: { _ in })
+    t.expect(Reply.press("enter", on: .noBox, in: pane, via: writeFails) == .failed("Can't get session.")
+             && Reply.pick(0, of: TerminalBox.Drawn(ask: "", rows: []), in: pane, via: saying(Reply.Answer(errorCode: -1743))) == .denied
+             && Reply.press("enter", on: .noBox, in: Origin(term: "Apple_Terminal", tty: "/dev/ttys004"), via: atItsPrompt) == .gone,
+             "an error from iTerm2 comes back in its own words, whichever script met it; a pane that isn't iTerm2's can't be pressed in")
+    t.expectEqual(Reply.screen(of: pane, lines: 2, via: saying(Reply.Answer(reply: "ok\none\ntwo\nthree\n\n   \n"))) ?? "", "two\nthree",
                   "the screen is its last lines, without the blank foot")
-    t.expect(Reply.screen(of: pane, ask: { _ in Reply.Answer(reply: "missing") }) == nil, "and nil once the pane is gone")
+    t.expect(Reply.screen(of: pane, via: saying(Reply.Answer(reply: "missing"))) == nil, "and nil once the pane is gone")
 
     // -- away and its pushes ------------------------------------------------
     t.expect(b.pushes.isEmpty, "at the Mac, nothing is pushed")
