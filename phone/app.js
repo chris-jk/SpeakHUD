@@ -217,13 +217,16 @@
   }
 
   // A window's button: Read, Pause while it's being read, Resume where it was paused.
+  // While it's either, start over and stop sit beside it, where the time was.
   function mark() {
     for (const [key, w] of shown) {
       const button = w.el.querySelector('.win-read');
       const held = !!paused && paused.key === key;
+      const live = key === reading || held;
       button.classList.toggle('is-reading', key === reading);
       button.textContent = key === reading ? 'Pause' : held ? 'Resume' : 'Read';
-      w.el.querySelector('.win-paused').hidden = !held;
+      w.el.querySelector('.win-reading').hidden = !live;
+      w.el.querySelector('.win-when').hidden = live;
     }
     speakSays.hidden = !speakOn;
     speakSays.textContent = unlocked
@@ -579,8 +582,8 @@
 
     el.querySelector('.win-over').addEventListener('click', () => {
       touched = 0;
-      paused = null;
-      unmark();
+      line.length = 0;
+      if (reading) hush('replaced'); else { paused = null; unmark(); }
       read(turn.key, 'all', null, 'tap');
     });
     el.querySelector('.win-stop').addEventListener('click', () => hush('stopped'));
@@ -706,7 +709,7 @@
     // Full colour: it's waiting on you. A stripe: it's working, on its own or on what you sent.
     const working = !asking && (turn.busy || !!turn.sent);
     el.classList.toggle('is-working', working);
-    el.querySelector('.win-state').textContent = asking ? 'asking' : turn.busy ? 'working' : '';
+    el.querySelector('.win-state').textContent = asking ? 'asking' : '';   // working is said down by the buttons
     // Said down by the buttons too, with a bar that keeps moving: that's where your
     // thumb is when you're about to send it something more.
     el.querySelector('.win-working').hidden = !working;

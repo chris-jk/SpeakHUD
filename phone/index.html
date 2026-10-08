@@ -58,6 +58,10 @@
       <h2 class="win-name"></h2>
       <span class="win-state"></span>
       <time class="win-when"></time>
+      <span class="win-reading" hidden>
+        <button type="button" class="win-over" aria-label="Start over" title="Start over">&#8635;</button>
+        <button type="button" class="win-stop" aria-label="Stop" title="Stop">&#9632;</button>
+      </span>
       <button type="button" class="win-read" hidden>Read</button>
     </header>
     <div class="win-body">
@@ -65,10 +69,6 @@
       <span class="win-cursor" aria-hidden="true"></span>
       <p class="win-text"></p>
       <button type="button" class="win-more" hidden>Show all of it</button>
-      <div class="win-paused" hidden>
-        <button type="button" class="win-more win-over">Start over</button>
-        <button type="button" class="win-more win-stop">Stop</button>
-      </div>
       <div class="win-media" hidden></div>
 
       <section class="win-asks" hidden>

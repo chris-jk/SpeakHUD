@@ -183,15 +183,22 @@ main { margin-top: 14px; }
 
 /* -- a window ------------------------------------------------------------- */
 
+/* `clip`, not `hidden`: the corners are still rounded off, but the window doesn't become
+   a scroll box of its own, which would stop its bar from sticking to the screen. */
 .win {
   margin: 0 0 12px;
   border-radius: 12px;
   background: var(--win);
-  overflow: hidden;
+  overflow: clip;
   scroll-margin-top: 12px;
 }
 
+/* The bar stays at the top of the screen for as long as its window is under it, so on
+   a long turn the name, and Pause while it's read, are never scrolled away. */
 .win-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   display: flex;
   align-items: baseline;
   gap: 12px;
@@ -201,6 +208,8 @@ main { margin-top: 14px; }
 }
 
 .win-name {
+  flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   font-size: 1rem;
   font-weight: 650;
@@ -225,6 +234,29 @@ main { margin-top: 14px; }
   font-size: 0.8125rem;
   opacity: 0.8;
 }
+
+/* While a window is being read, or paused: start over and stop, beside Pause or Resume,
+   in the bar where Read was tapped. They take the place of the time. */
+.win-reading {
+  display: flex;
+  flex: none;
+  align-self: center;
+  gap: 6px;
+  margin: -4px 0;
+}
+.win-reading button {
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  border: 1.5px solid currentColor;
+  border-radius: 15px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+}
+.win-reading .win-stop { font-size: 0.75rem; }
 
 /* Read this turn aloud on the phone. Sits in the bar, in the bar's own ink. */
 .win-read {
@@ -315,12 +347,6 @@ main { margin-top: 14px; }
   will-change: transform, width;
 }
 .win-cursor.is-on { opacity: 1; }
-
-/* While a reading is paused: Resume is on the bar, these are the other two ways out. */
-.win-paused {
-  display: flex;
-  gap: 22px;
-}
 
 .win-more {
   margin: 6px 0 0;
