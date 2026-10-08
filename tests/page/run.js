@@ -233,6 +233,20 @@ scenario('a paused reading whose window goes is forgotten: new turns are read an
   assert.deepStrictEqual(w.keys(), ['c', 'b']);
 });
 
+scenario('a reading stops when its window goes, and what waited behind it is read', async () => {
+  const w = await open([turn('a', 'Alpha one.\nAlpha two.\nAlpha three.'), turn('b', 'Bee.')], Object.assign({ manner: speaks({ lasts: 2000 }) }, SPEAK_ON));
+  await w.tap(readButton(w, 'a'));
+  w.mac.state.turns = [turn('b', 'Bee has finished.'), turn('a', 'Alpha one.\nAlpha two.\nAlpha three.')];
+  await w.advance(2600);                      // b's turn lands and waits behind a's
+  w.mac.state.turns = [turn('b', 'Bee has finished.')];   // then terminal a is closed on the Mac, mid "Alpha two."
+  await w.advance(2500);
+  assert.deepStrictEqual(w.keys(), ['b']);
+  assert.deepStrictEqual(heard(w).map((h) => h.end), ['closed']);
+  await w.advance(9000);
+  assert.deepStrictEqual(w.voice.texts(), ['T-a.', 'Alpha one.', 'Alpha two.', 'T-b.', 'Bee has finished.']);   // never "Alpha three."
+  assert.strictEqual(readButton(w, 'b').textContent, 'Read');
+});
+
 // -- one tab at a time ---------------------------------------------------------
 
 scenario('a newer tab takes over: this one stops reading and says so, and a tap takes it back', async () => {

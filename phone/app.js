@@ -427,9 +427,12 @@
 
   // A window has left the page, its terminal closed: nothing of it waits to be read,
   // and a place kept in it is forgotten, or no new turn would ever be read over it.
+  // If it's the one being read, the voice stops there (its Pause and Stop went with the
+  // window) and goes on to whatever was waiting.
   function gone(key) {
     for (let i = line.length - 1; i >= 0; i--) if (line[i][0] === key) line.splice(i, 1);
     if (paused && paused.key === key) { paused = null; unmark(); }
+    if (reading === key) { hush('closed'); next(); }
   }
 
   function showSpeed() { speedButton.textContent = 'Speed ' + speed + '\u00d7'; }
