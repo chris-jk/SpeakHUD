@@ -1,0 +1,42 @@
+ ▐▛███▛█   Claude Code v2.1.294
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /Users/you/project
+
+
+❯ Call the AskUserQuestion tool right now with exactly two questions and do nothing else. Question 1: header
+  Route, question 'Which route do you want?', options 'Try Claude first' (description 'Nothing to build') and
+  'Build our own' (description 'A page over Tailscale'). Question 2: header Extras, multiSelect true,
+  question 'Which extras do you want?', options 'Speech' (description 'Phone reads aloud'), 'Keys'
+  (description 'Answer boxes'), 'Screen' (description 'See the terminal').
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Route  ☒ Extras  ✔ Submit  →
+
+Review your answers
+
+ ● Which route do you want?
+   → Build our own
+ ● Which extras do you want?
+   → Speech, Screen
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

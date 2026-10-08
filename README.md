@@ -202,12 +202,27 @@ What's on the page:
   terminal's window goes. An answer is pasted into that
   terminal's prompt and sent, by the same guarded paste as a spoken reply: only into
   Claude Code's prompt box, never into a question or permission box.
-- **Question boxes as buttons.** When Claude asks a multiple-choice question, its
-  choices show as buttons; a tap presses that number in the terminal.
+- **Whatever it's asking, as buttons.** A question, a permission prompt, the
+  folder-trust check: the box is read off the terminal's own screen, so its choices show
+  as they stand, ticks and all, and a tap picks one (its number, or arrows and Enter
+  for a choice without one). The choice that takes your own words is a field. The Mac
+  reads the box again before it presses anything, so a box that has moved on is never
+  answered blind.
+- **Working, asking, or waiting on you.** A window in full colour is waiting on you; one
+  that has stepped back to a stripe says "working", and its Send becomes Queue; one
+  with a box up says "asking". Under the bar is the terminal's own status line, which
+  is where your model and context figure show if your status line has them.
+- **Quick answers.** The things you always send ("Wrap up") as one-tap buttons on every
+  window. Add and remove your own under **Quick answers** at the top; they're kept on
+  the Mac.
+- **Resume an old session**, at the foot of the page: recent sessions by name, folder
+  and age. Resume opens a new iTerm2 window on the Mac in the folder the session was
+  started in and runs `claude --resume` for it.
 - **Its screen**: the foot of the terminal as text, with keys (1 to 4, up, down, Enter,
-  Esc) for anything that wants a key: a permission box, or Esc to stop a turn. At
-  Claude's prompt only Enter and Esc are pressed; a number there would just type into
-  your message.
+  Esc) for anything that wants a key, or Esc to stop a turn. At Claude's prompt only
+  Enter and Esc are pressed; a number there would just type into your message.
+  **Close this terminal** is under there too, and takes two taps: Claude is asked to
+  exit if it's at its prompt, then the pane is closed.
 - **Read aloud.** A **Read** button on each window has the phone read that turn in its
   own voice. With the **Read aloud** switch on, turns are read as they arrive while the
   page is open; the switch is remembered, and after reopening the page one tap anywhere
@@ -252,7 +267,8 @@ Limits:
 - A terminal that hasn't finished a turn since SpeakHUD first saw it shows an empty
   window (its screen and the answer box still work), in a colour picked from its name
   rather than its frame's.
-- A question's free-text "Other" choice can't be typed from the page yet.
+- Away pushes a box coming up (a question, a permission prompt) as well as a finished
+  turn, because the Mac keeps reading the terminals' screens while you're away.
 
 ## How it picks what to read
 

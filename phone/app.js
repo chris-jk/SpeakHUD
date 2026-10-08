@@ -23,6 +23,7 @@
   const canSpeak = !!voice && typeof window.SpeechSynthesisUtterance === 'function';
 
   const shown = new Map();   // session key -> { el, turn, text, question, note, paras }
+  let quick = [];            // the quick answers, as the Mac keeps them
   // The page only reorders when you're not in the middle of something: not typing, not
   // being read to, and not having touched it in the last few seconds.
   const SETTLE_MS = 6000;
@@ -70,9 +71,17 @@
       parts.push({ say: turn.name + '.' });
       for (const para of w.paras || []) parts.push({ say: para.say, para });
     }
-    if (what !== 'turn' && turn.question) {
+    if (what !== 'turn' && (turn.box || turn.question)) {
       parts.push({ say: what === 'question' ? turn.name + ' is asking.' : 'It is asking.' });
-      for (const say of paragraphs(turn.question)) parts.push({ say });
+      if (turn.box) {
+        for (const say of paragraphs(turn.box.ask)) parts.push({ say });
+        for (const row of turn.box.rows) {
+          if (row.types) continue;   // "type something" is the field, not a choice to hear
+          parts.push({ say: (row.number ? row.number + '. ' : '') + row.label + '.' + (row.detail ? ' ' + row.detail : '') });
+        }
+      } else {
+        for (const say of paragraphs(turn.question)) parts.push({ say });
+      }
     }
     return parts;
   }
@@ -266,6 +275,10 @@
       ? 'Finished turns are pushed to this phone. The Mac stays quiet and awake.'
       : 'The Mac reads turns aloud as usual. Switch on when you walk away.';
 
+    if (Array.isArray(state.quick) && state.quick.join('\n') !== quick.join('\n')) {
+      quick = state.quick;
+      drawQuickList();
+    }
     // Decided before anything new starts being read: a turn that has just arrived
     // comes to the top and is read there, and then the page holds still.
     const still = settled();
@@ -308,18 +321,18 @@
     box.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
     });
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const words = box.value.trim();
-      if (!words || send.disabled) return;
-      send.disabled = true;
-      send.textContent = 'Sending';
+    // Send `words` to this terminal: what's in the box (cleared once it has gone), or
+    // a quick answer.
+    async function sendWords(words, button, fromBox) {
+      if (!words || button.disabled) return;
+      button.disabled = true;
+      if (fromBox) button.textContent = 'Sending';
       try {
         const { data } = await call('/api/reply', { key: turn.key, text: words });
         if (data.sent) {
           note(el, '');
           // Only what was sent is cleared: anything typed since stays.
-          if (box.value.trim() === words) {
+          if (fromBox && box.value.trim() === words) {
             box.value = '';
             box.style.height = 'auto';
             box.blur();
@@ -327,8 +340,7 @@
         } else if (data.pasted) {
           // The words are sitting in its prompt, after something that was already
           // there. Sending again would paste them twice: show the prompt instead.
-          box.value = '';
-          box.style.height = 'auto';
+          if (fromBox) { box.value = ''; box.style.height = 'auto'; }
           if (data.state) show(data.state);
           note(el, 'Typed into its prompt but not sent: something was already there. Check its screen below, then Enter sends it.');
           screen.open = true;
@@ -340,8 +352,41 @@
       } catch (err) {
         note(el, "Not sent: can't reach the Mac.");
       } finally {
-        send.disabled = false;
-        send.textContent = 'Send';
+        button.disabled = false;
+        if (fromBox) button.textContent = shown.get(turn.key) && shown.get(turn.key).turn.busy ? 'Queue' : 'Send';
+      }
+    }
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      sendWords(box.value.trim(), send, true);
+    });
+    el.querySelector('.win-quick').addEventListener('click', (e) => {
+      const chip = e.target.closest('button');
+      if (chip) sendWords(chip.textContent, chip, false);
+    });
+
+    // Closing ends the session in that terminal, so it takes two taps.
+    const closeButton = el.querySelector('.win-close');
+    let armed = 0;
+    const disarm = () => { armed = 0; closeButton.textContent = 'Close this terminal'; closeButton.classList.remove('is-armed'); };
+    closeButton.addEventListener('click', async () => {
+      if (!armed) {
+        armed = Date.now();
+        closeButton.textContent = 'Tap again to close it';
+        closeButton.classList.add('is-armed');
+        setTimeout(() => { if (armed && Date.now() - armed >= 3900) disarm(); }, 4000);
+        return;
+      }
+      disarm();
+      closeButton.disabled = true;
+      try {
+        const { data } = await call('/api/close', { key: turn.key });
+        if (data.state) show(data.state);
+        if (!data.sent) note(el, 'Not closed: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');
+      } catch (err) {
+        note(el, "Not closed: can't reach the Mac.");
+      } finally {
+        closeButton.disabled = false;
       }
     });
 
@@ -361,7 +406,9 @@
     });
     el.querySelector('.win-options').addEventListener('click', (e) => {
       const option = e.target.closest('button');
-      if (option) press(turn.key, option.dataset.press, option);
+      if (!option || option.type === 'submit') return;
+      if (option.dataset.row) pick(turn.key, Number(option.dataset.row), option.dataset.label, option);
+      else press(turn.key, option.dataset.press, option);
     });
 
     list.appendChild(el);
@@ -390,6 +437,11 @@
     el.querySelector('.win-name').textContent = turn.name;
     el.querySelector('.win-when').textContent = ago(turn.at);
 
+    const status = el.querySelector('.win-status');
+    status.textContent = turn.status || '';
+    status.hidden = !turn.status;
+    status.classList.toggle('is-full', (turn.context || 0) >= 80);
+
     const text = el.querySelector('.win-text');
     const more = el.querySelector('.win-more');
     if (w.text !== turn.text) {
@@ -408,42 +460,62 @@
       }
     }
 
+    // What it's asking. The box read off its terminal's screen is the truth; the question
+    // hook's words stand in only until the screen has been looked at.
     const asks = el.querySelector('.win-asks');
-    if (w.question !== turn.question) {
-      w.question = turn.question;
+    const box = turn.box;
+    const asking = !!(box || turn.question);
+    const drawn = box ? JSON.stringify(box) : (turn.question || '');
+    if (w.question !== drawn) {
+      w.question = drawn;
       const options = el.querySelector('.win-options');
       options.replaceChildren();
-      const said = [];
-      for (const line of (turn.question || '').split('\n')) {
-        const m = OPTION.exec(line);
-        if (!m) { if (line.trim()) said.push(line.trim()); continue; }
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.dataset.press = m[1];
-        const number = document.createElement('b');
-        number.textContent = m[1];
-        const label = document.createElement('span');
-        label.textContent = m[2];
-        button.append(number, label);
-        options.append(button);
+      const tabs = el.querySelector('.win-tabs');
+      tabs.textContent = (box && box.tabs) || '';
+      tabs.hidden = !tabs.textContent;
+      if (box) {
+        el.querySelector('.win-question').textContent = box.ask;
+        box.rows.forEach((row, index) => options.append(choice(turn.key, row, index)));
+      } else {
+        const said = [];
+        for (const line of (turn.question || '').split('\n')) {
+          const m = OPTION.exec(line);
+          if (!m) { if (line.trim()) said.push(line.trim()); continue; }
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.dataset.press = m[1];
+          const number = document.createElement('b');
+          number.textContent = m[1];
+          const label = document.createElement('span');
+          label.textContent = m[2];
+          button.append(number, label);
+          options.append(button);
+        }
+        el.querySelector('.win-question').textContent = said.join('\n');
       }
-      el.querySelector('.win-question').textContent = said.join('\n');
-      // A question comes in two pieces a few seconds apart: read it once, whole.
-      clearTimeout(asked.get(turn.key));
-      if (turn.question && loaded) {
-        asked.set(turn.key, setTimeout(() => announce(turn.key, 'question'), 3500));
+      // Read a question once, whole: the hook's comes in two pieces a few seconds apart,
+      // and a box's ticks changing isn't a new question.
+      const what = box ? box.ask : (turn.question || '');
+      if (what !== w.asked) {
+        w.asked = what;
+        clearTimeout(asked.get(turn.key));
+        if (what && loaded) asked.set(turn.key, setTimeout(() => announce(turn.key, 'question'), box ? 400 : 3500));
       }
     }
-    asks.hidden = !turn.question;
+    asks.hidden = !asking;
 
-    const working = !!turn.sent && !turn.question;
+    // Full colour: it's waiting on you. A stripe: it's working, on its own or on what you sent.
+    const working = !asking && (turn.busy || !!turn.sent);
     el.classList.toggle('is-working', working);
+    el.querySelector('.win-state').textContent = asking ? 'asking' : turn.busy ? 'working' : '';
     const sent = el.querySelector('.win-sent');
     // A terminal that's open but hasn't finished a turn since it was first seen.
-    const idle = !turn.text && !turn.question && !turn.sent;
+    const idle = !turn.text && !asking && !turn.sent;
     sent.textContent = turn.sent ? 'You sent: ' + turn.sent
       : idle ? 'No finished turn from this terminal yet. Its screen shows where it is.' : '';
     sent.hidden = !turn.sent && !idle;
+    const sendButton = el.querySelector('.win-answer button');
+    if (!sendButton.disabled) sendButton.textContent = turn.busy ? 'Queue' : 'Send';
 
     const form = el.querySelector('.win-answer');
     const words = w.note || (turn.note ? 'Not sent: ' + turn.note + '.' : '');
@@ -452,13 +524,85 @@
       note(el, "This terminal can't be answered from the phone. Only iTerm2 panes can.", true);
     } else {
       // A question box takes keys, not words: its choices are the buttons above.
-      form.hidden = !!turn.question;
+      form.hidden = asking;
       note(el, words);
     }
 
+    const chips = el.querySelector('.win-quick');
+    if (w.quick !== quick.join('\n')) {
+      w.quick = quick.join('\n');
+      chips.replaceChildren(...quick.map((words) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.textContent = words;
+        return chip;
+      }));
+    }
+    chips.hidden = !turn.canReply || asking || !quick.length;
+
     const screen = el.querySelector('.win-screen');
     screen.hidden = !turn.canReply;
-    if (screen.open || turn.question) look(turn.key, true);
+    if (screen.open || asking) look(turn.key, true);
+  }
+
+  // One choice of a box: a button, or for the choice that takes words, a field.
+  function choice(key, row, index) {
+    if (row.types && row.checked === null) {
+      const form = document.createElement('form');
+      form.className = 'win-own';
+      const field = document.createElement('input');
+      field.type = 'text';
+      field.placeholder = 'Or type your own answer';
+      field.setAttribute('aria-label', 'Your own answer');
+      field.enterKeyHint = 'send';
+      const go = document.createElement('button');
+      go.type = 'submit';
+      go.textContent = 'Send';
+      form.append(field, go);
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const words = field.value.trim();
+        if (words) pick(key, index, row.label, go, words);
+      });
+      return form;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.row = String(index);
+    button.dataset.label = row.label;
+    const mark = document.createElement('b');
+    mark.textContent = row.checked === null ? (row.number || '\u203a') : (row.checked ? '\u2611' : '\u2610');
+    const words = document.createElement('span');
+    const label = document.createElement('span');
+    label.textContent = row.label;
+    words.append(label);
+    if (row.detail) {
+      const detail = document.createElement('small');
+      detail.textContent = row.detail;
+      words.append(detail);
+    }
+    button.append(mark, words);
+    return button;
+  }
+
+  // Tap a choice. The Mac reads the box again before pressing anything, so a box that
+  // has moved on is never answered blind; then the screen is read back.
+  async function pick(key, row, label, button, text) {
+    const w = shown.get(key);
+    if (!w) return;
+    button.disabled = true;
+    try {
+      const body = { key, row, label };
+      if (text !== undefined) body.text = text;
+      const { data } = await call('/api/pick', body);
+      note(w.el, data.sent ? '' : 'Not chosen: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');
+      if (data.state) show(data.state);
+      setTimeout(() => look(key), 700);
+    } catch (e) {
+      note(w.el, "Not chosen: can't reach the Mac.");
+    } finally {
+      button.disabled = false;
+    }
   }
 
   // Fetch the foot of a terminal's screen. Quiet ones run from the poll and say nothing
@@ -474,9 +618,9 @@
       if (ok) {
         pre.textContent = data.screen;
         pre.scrollLeft = 0;
-        // Back at Claude's prompt, the Mac drops the question: drop its box here too.
+        // The Mac has just read its box afresh: redraw if it isn't what's showing here.
         const now = data.state && data.state.turns.find((t) => t.key === key);
-        if (w.question && now && !now.question) show(data.state);
+        if (now && (now.box ? JSON.stringify(now.box) : (now.question || '')) !== w.question) show(data.state);
       } else if (!quiet) {
         pre.textContent = data.error || "Can't read its screen.";
       }
@@ -552,6 +696,99 @@
       mark();
     }, true);
   }
+
+  // -- quick answers, kept on the Mac ---------------------------------------
+  const quickList = document.getElementById('quick-list');
+  const quickNew = document.getElementById('quick-new');
+
+  function drawQuickList() {
+    quickList.replaceChildren(...quick.map((words) => {
+      const row = document.createElement('li');
+      const said = document.createElement('span');
+      said.textContent = words;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => keepQuick(quick.filter((q) => q !== words), remove));
+      row.append(said, remove);
+      return row;
+    }));
+  }
+
+  async function keepQuick(list, button) {
+    button.disabled = true;
+    try {
+      const { ok, data } = await call('/api/quick', { list });
+      if (ok) show(data); else say("Quick answers didn't change: the Mac refused.");
+    } catch (e) {
+      say("Quick answers didn't change: can't reach the Mac.");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  document.getElementById('quick-add').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const words = quickNew.value.trim();
+    if (!words) return;
+    await keepQuick(quick.concat(words), e.target.querySelector('button'));
+    quickNew.value = '';
+  });
+
+  // -- old sessions ----------------------------------------------------------
+  const old = document.getElementById('old');
+  const oldList = document.getElementById('old-list');
+  const oldSays = document.getElementById('old-says');
+
+  async function loadOld() {
+    try {
+      const { ok, data } = await call('/api/sessions');
+      if (!ok) { oldSays.textContent = "The Mac wouldn't list its sessions."; return; }
+      oldList.replaceChildren(...data.sessions.map((session) => {
+        const row = document.createElement('li');
+        const said = document.createElement('span');
+        said.textContent = session.title;
+        const where = document.createElement('small');
+        where.textContent = 'in ' + session.folder + ', ' + (ago(session.at) === 'now' ? 'just now' : ago(session.at) + ' ago');
+        said.append(where);
+        row.append(said);
+        if (session.open) {
+          const open = document.createElement('small');
+          open.textContent = 'open';
+          row.append(open);
+        } else {
+          const go = document.createElement('button');
+          go.type = 'button';
+          go.textContent = 'Resume';
+          go.addEventListener('click', () => resume(session, go));
+          row.append(go);
+        }
+        return row;
+      }));
+      if (!data.sessions.length) oldSays.textContent = 'No sessions from the last few weeks on this Mac.';
+    } catch (e) {
+      oldSays.textContent = "Can't reach the Mac.";
+    }
+  }
+
+  async function resume(session, button) {
+    button.disabled = true;
+    button.textContent = 'Opening';
+    try {
+      const { data } = await call('/api/resume', { id: session.id });
+      oldSays.textContent = data.sent
+        ? session.title + ' is opening on the Mac. Its window shows up above in a few seconds.'
+        : 'Not resumed: ' + (data.outcome || data.error || 'the Mac did not say why') + '.';
+      if (data.sent) { setTimeout(refresh, 4000); setTimeout(loadOld, 8000); }
+      else { button.disabled = false; button.textContent = 'Resume'; }
+    } catch (e) {
+      oldSays.textContent = "Not resumed: can't reach the Mac.";
+      button.disabled = false;
+      button.textContent = 'Resume';
+    }
+  }
+
+  old.addEventListener('toggle', () => { if (old.open) loadOld(); });
 
   awaySwitch.addEventListener('change', async () => {
     const on = awaySwitch.checked;

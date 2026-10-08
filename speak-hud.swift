@@ -659,21 +659,26 @@ enum Reply {
     static func screen(of origin: Origin, lines: Int = 40, ask: (String) -> Answer = Reply.ask) -> String? {
         guard canReach(origin), let session = origin.session,
               let reply = ask(screenScript(session)).reply, reply.hasPrefix("ok") else { return nil }
-        let all = String(reply.dropFirst(2)).components(separatedBy: .newlines)
-        var end = all.count
-        while end > 0, all[end - 1].trimmingCharacters(in: .whitespaces).isEmpty { end -= 1 }
-        return all[max(0, end - lines)..<end].joined(separator: "\n").trimmingCharacters(in: .newlines)
+        return foot(String(reply.dropFirst(2)), lines: lines)
     }
 
-    /// Every pane iTerm2 has open, by id and title. The separators are spelled as
-    /// character ids: inside iTerm2's `tell`, the word `tab` means one of its tabs.
-    static let panesScript = """
+    /// A pane iTerm2 has open: its id, its title, and the foot of its screen.
+    struct Pane: Equatable {
+        var session: String
+        var name: String
+        var screen: String
+    }
+
+    /// Every pane, in one ask. The separators are control characters spelled as
+    /// character ids: a title or a screen can hold anything else, and inside iTerm2's
+    /// `tell` the word `tab` means one of its tabs.
+    static let surveyScript = """
         tell application id "\(Reveal.iTerm)"
             set out to "ok"
             repeat with w in windows
                 repeat with t in tabs of w
                     repeat with s in sessions of t
-                        set out to out & (character id 10) & (id of s) & (character id 9) & (name of s)
+                        set out to out & (character id 30) & (id of s) & (character id 31) & (name of s) & (character id 31) & (contents of s)
                     end repeat
                 end repeat
             end repeat
@@ -683,13 +688,86 @@ enum Reply {
 
     /// The open panes, or nil when iTerm2 isn't running or won't say (then nothing is
     /// known, which is not the same as nothing being open).
-    static func panes(ask: (String) -> Answer = Reply.ask) -> [(session: String, name: String)]? {
-        guard let reply = ask(panesScript).reply, reply.hasPrefix("ok") else { return nil }
-        return reply.components(separatedBy: .newlines).dropFirst().compactMap { line in
-            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2, Origin(json: ["session": String(parts[0])]) != nil else { return nil }
-            return (String(parts[0]), String(parts[1]))
+    static func survey(ask: (String) -> Answer = Reply.ask) -> [Pane]? {
+        guard let reply = ask(surveyScript).reply, reply.hasPrefix("ok") else { return nil }
+        return reply.components(separatedBy: "\u{1E}").dropFirst().compactMap { record in
+            let fields = record.components(separatedBy: "\u{1F}")
+            guard fields.count == 3, Origin(json: ["session": fields[0]]) != nil else { return nil }
+            return Pane(session: fields[0], name: fields[1], screen: foot(fields[2]))
         }
+    }
+
+    /// The last `lines` lines of a screen, without the blank ones under them.
+    static func foot(_ contents: String, lines: Int = 40) -> String {
+        let all = contents.components(separatedBy: .newlines)
+        var end = all.count
+        while end > 0, all[end - 1].trimmingCharacters(in: .whitespaces).isEmpty { end -= 1 }
+        return all[max(0, end - lines)..<end].joined(separator: "\n").trimmingCharacters(in: .newlines)
+    }
+
+    /// Whether a pane is in the middle of a turn. Claude Code spins a glyph at the front
+    /// of the title while it works and leaves ✳ there when it's waiting for you.
+    static func working(title: String, screen: String) -> Bool {
+        if screen.contains("esc to interrupt") { return true }
+        let name = title.replacingOccurrences(of: "\u{00A0}", with: " ")
+        guard let first = name.unicodeScalars.first, name.dropFirst().hasPrefix(" ") else { return false }
+        return first != "✳" && !CharacterSet.alphanumerics.contains(first)
+    }
+
+    /// What Claude Code's status line says under its prompt box (yours to set: a folder,
+    /// the model, how full the context is), and the context figure if it gives one.
+    /// Nil when the prompt box isn't showing. Whatever sits far to the right of it, a
+    /// notice with a gap before it, is left off.
+    static func status(in screen: String) -> (line: String, context: Int?)? {
+        guard promptText(in: screen) != nil else { return nil }
+        let lines = screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
+        guard let rule = lines.lastIndex(where: isRule),
+              let raw = lines[(rule + 1)...].first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return nil }
+        let left = raw.trimmingCharacters(in: .whitespaces).components(separatedBy: "   ").first ?? ""
+        let line = left.components(separatedBy: " ").filter { !$0.isEmpty }.joined(separator: " ")
+        guard !line.isEmpty else { return nil }
+        var context: Int?
+        if let m = line.range(of: #"(?i)(ctx|context)\D{0,3}(\d{1,3})\s?%|(\d{1,3})\s?%\s*(ctx|context)"#, options: .regularExpression),
+           let n = Int(line[m].filter { $0.isNumber }), (0...100).contains(n) {
+            context = n
+        }
+        return (line, context)
+    }
+
+    /// Close the pane: Claude Code is asked to exit first if it's at its prompt (so the
+    /// session ends cleanly and iTerm2 has no running job to ask about), then the pane goes.
+    static func close(_ origin: Origin, ask: (String) -> Answer = Reply.ask,
+                      wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Outcome {
+        guard canReach(origin), let session = origin.session else { return .gone }
+        if let screen = screen(of: origin, ask: ask), let typed = promptText(in: screen), typed.isEmpty {
+            _ = type("/exit", in: origin, ask: ask)
+            wait(0.3)
+            _ = press("enter", in: origin, ask: ask)
+            wait(1.5)
+        }
+        let a = ask(script(session, """
+        tell s to close
+                            return "ok"
+        """))
+        if let code = a.errorCode {
+            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+        }
+        // "missing" here means the pane had already gone when Claude exited: closed all the same.
+        return .sent
+    }
+
+    /// Type `line` into the pane as keys (not a paste: a question's own text field takes
+    /// no paste), with no Return.
+    static func type(_ line: String, in origin: Origin, ask: (String) -> Answer = Reply.ask) -> Outcome {
+        guard canReach(origin), let session = origin.session else { return .gone }
+        let a = ask(script(session, """
+        tell s to write text \(LoadCommand.literal(line)) newline no
+                            return "ok"
+        """))
+        if let code = a.errorCode {
+            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+        }
+        return a.reply?.hasPrefix("ok") == true ? .sent : .gone
     }
 
     /// A pane's title as Claude Code sets it ("✳ Grow guide replies — ~/some/dir"), down
@@ -3880,6 +3958,256 @@ func parseHotkey(_ spec: String) -> (keyCode: UInt32, mods: UInt32)? {
 // (`speak-hud --setup-phone`).
 // ---------------------------------------------------------------------------
 
+/// Sessions that could be picked up again. Claude Code keeps each as a transcript,
+/// ~/.claude/projects/<folder>/<id>.jsonl, which says what it was called and where it
+/// ran: enough to open a terminal there and `claude --resume` it.
+enum OldSessions {
+    struct Session: Equatable {
+        var id: String
+        var title: String
+        var cwd: String
+        var at: Date        // when it last wrote anything
+    }
+
+    static var root: String { NSString(string: "~/.claude/projects").expandingTildeInPath }
+    static let maxAge: TimeInterval = 30 * 86_400
+    static let limit = 40
+    /// How much of a transcript's end is read for its title and folder. They're written
+    /// over and over, so the end has them without reading megabytes of turns.
+    static let tailBytes = 400_000
+
+    static func isID(_ s: String) -> Bool {
+        s.range(of: #"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"#, options: .regularExpression) != nil
+    }
+
+    /// The newest sessions first. Only a session's own transcript counts (a file named
+    /// for its id, straight in a project folder), and only one that says where it ran.
+    static func recent(in root: String = OldSessions.root, now: Date = Date()) -> [Session] {
+        let fm = FileManager.default
+        var files: [(path: String, id: String, at: Date)] = []
+        for folder in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+            let dir = root + "/" + folder
+            for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".jsonl") {
+                let id = String(name.dropLast(6))
+                guard isID(id), let at = (try? fm.attributesOfItem(atPath: dir + "/" + name))?[.modificationDate] as? Date,
+                      now.timeIntervalSince(at) < maxAge else { continue }
+                files.append((dir + "/" + name, id, at))
+            }
+        }
+        return files.sorted { $0.at > $1.at }.prefix(limit).compactMap { file in
+            guard let facts = read(file.path) else { return nil }
+            let folder = (facts.cwd as NSString).lastPathComponent
+            return Session(id: file.id, title: facts.title ?? (folder.isEmpty ? "Claude Code" : folder), cwd: facts.cwd, at: file.at)
+        }
+    }
+
+    /// A transcript's title (yours from /rename over Claude's own), from its end, and the
+    /// folder it was started in, from its beginning: that folder is the project the
+    /// session belongs to, and the only place `claude --resume` finds it from. (The
+    /// folder Claude later moved to, at the end, is the fallback.) Nil if it never says.
+    static func read(_ path: String) -> (title: String?, cwd: String)? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0)
+        let text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+        try? handle.seek(toOffset: 0)
+        let head = String(decoding: (try? handle.read(upToCount: 65_536)) ?? Data(), as: UTF8.self)
+        var custom: String?, ai: String?, cwd: String?, started: String?
+        func object(_ line: Substring) -> [String: Any]? {
+            (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+        }
+        func words(_ raw: Any?) -> String? {
+            guard let s = raw as? String else { return nil }
+            let line = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+            return line.isEmpty ? nil : String(line.prefix(120))
+        }
+        for line in text.split(separator: "\n").reversed() {   // the newest say wins
+            if line.contains("-title\""), let o = object(line) {
+                if custom == nil, o["type"] as? String == "custom-title" { custom = words(o["customTitle"]) }
+                if ai == nil, o["type"] as? String == "ai-title" { ai = words(o["aiTitle"]) }
+            } else if cwd == nil, line.contains("\"cwd\""), let o = object(line), let dir = o["cwd"] as? String, dir.hasPrefix("/") {
+                cwd = dir
+            }
+            if cwd != nil, custom != nil { break }
+        }
+        for line in head.split(separator: "\n") where line.contains("\"cwd\"") {
+            if let dir = object(line)?["cwd"] as? String, dir.hasPrefix("/") { started = dir; break }
+        }
+        return (started ?? cwd).map { (custom ?? ai, $0) }
+    }
+
+    /// The ids of sessions a running Claude Code says are its own (it keeps a note per
+    /// process in ~/.claude/sessions; not every version writes one).
+    static func running(in dir: String = NSString(string: "~/.claude/sessions").expandingTildeInPath) -> Set<String> {
+        var ids: Set<String> = []
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".json") {
+            guard let data = FileManager.default.contents(atPath: dir + "/" + name),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = o["sessionId"] as? String, let pid = (o["pid"] as? NSNumber)?.int32Value,
+                  kill(pid, 0) == 0 else { continue }
+            ids.insert(id)
+        }
+        return ids
+    }
+
+    /// The AppleScript that opens a new iTerm2 window in the session's folder and resumes
+    /// it there. Only an id that is one and a folder that's a plain path are ever put in.
+    static func script(_ session: Session) -> String? {
+        guard isID(session.id), LoadCommand.isLoadable(session.cwd) else { return nil }
+        let line = "cd " + LoadCommand.shellQuote(session.cwd) + " && claude --resume " + session.id
+        return """
+        tell application id "\(Reveal.iTerm)"
+            set w to (create window with default profile)
+            tell current session of w to write text \(LoadCommand.literal(line))
+            return "ok"
+        end tell
+        """
+    }
+
+    /// Open it. `run` is what executes the script; tests keep it instead.
+    static func resume(_ session: Session, run: (String) -> Reply.Answer = OldSessions.run) -> Reply.Outcome {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: session.cwd, isDirectory: &isDir), isDir.boolValue else {
+            return .failed("its folder isn't there any more")
+        }
+        guard let source = script(session) else { return .failed("that isn't a session that can be resumed") }
+        let a = run(source)
+        if let code = a.errorCode {
+            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+        }
+        return .sent
+    }
+
+    /// Unlike `Reply.ask`, this starts iTerm2 if it isn't running: a terminal is the point.
+    static func run(_ source: String) -> Reply.Answer {
+        var err: NSDictionary?
+        let result = NSAppleScript(source: source)?.executeAndReturnError(&err)
+        if let err = err {
+            return Reply.Answer(errorCode: err[NSAppleScript.errorNumber] as? Int ?? 0,
+                                errorMessage: err[NSAppleScript.errorMessage] as? String)
+        }
+        return Reply.Answer(reply: result?.stringValue)
+    }
+}
+
+/// A box Claude Code has up instead of its prompt, read off the terminal's own screen: a
+/// question with its choices, a permission prompt, the folder-trust check. The screen is
+/// the one thing that's true for all of them, whoever put the box there and whenever the
+/// agent started, so this, not the question hook, is what the phone answers from.
+struct TerminalBox: Equatable {
+    struct Row: Equatable {
+        var label: String
+        var detail: String? = nil
+        var number: Int? = nil       // the digit that picks it, when it has one
+        var cursor = false           // the ❯ is on it
+        var checked: Bool? = nil     // a pick-any-that-apply row, and whether it's ticked
+        /// The row that turns into a text field when picked ("Type something").
+        var types: Bool { label.lowercased().hasPrefix("type something") }
+    }
+
+    var ask: String                  // what it says above its choices
+    var tabs: String? = nil          // "☒ Route  ☐ Extras  ✔ Submit": several questions, and where you are
+    var rows: [Row]
+    var hints: String? = nil         // "Enter to select · Esc to cancel"
+
+    private static func isRule(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return t.count >= 10 && t.allSatisfy { $0 == "─" || $0 == "╌" }
+    }
+
+    /// The box at the foot of `screen`, or nil: Claude's prompt is showing, or nothing
+    /// that reads as a list of choices with a cursor on one.
+    static func read(_ screen: String) -> TerminalBox? {
+        guard Reply.promptText(in: screen) == nil else { return nil }
+        var lines = screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        func col(_ line: String) -> Int? {
+            line.firstIndex { $0 != " " }.map { line.distance(from: line.startIndex, to: $0) }
+        }
+        func blank(_ i: Int) -> Bool { lines[i].trimmingCharacters(in: .whitespaces).isEmpty }
+        // The cursor: the last line that starts with ❯ and something after it.
+        guard let at = lines.lastIndex(where: { l in col(l).map { l.dropFirst($0).hasPrefix("❯ ") } ?? false }),
+              let c = col(lines[at]) else { return nil }
+        // Its list runs up and down from there: rows start two columns in from the
+        // cursor, what's under a row is indented further, and a rule may cross it.
+        func inList(_ i: Int) -> Bool {
+            if blank(i) { return false }
+            if isRule(lines[i]) { return true }
+            return i == at || (col(lines[i]) ?? 0) >= c + 2
+        }
+        var top = at, bottom = at
+        while top > 0, inList(top - 1) { top -= 1 }
+        while bottom < lines.count - 1, inList(bottom + 1) { bottom += 1 }
+        while top < at, isRule(lines[top]) { top += 1 }
+        // Under the list there's nothing but its hint line: anything more and that ❯ was
+        // a line of the conversation, not a cursor.
+        let under = (bottom + 1..<lines.count).filter { !blank($0) }.map { lines[$0].trimmingCharacters(in: .whitespaces) }
+        guard under.count <= 1 else { return nil }
+        let hints = under.first
+        if let h = hints, !(h.contains("Esc") || h.contains("Enter") || h.contains(" · ")) { return nil }
+
+        var rows: [Row] = []
+        var labelCol = c + 2
+        for i in top...bottom where !isRule(lines[i]) {
+            let k = i == at ? c + 2 : (col(lines[i]) ?? 0)
+            var text = String(lines[i].dropFirst(min(k, lines[i].count))).trimmingCharacters(in: .whitespaces)
+            if i == at { text = String(lines[i].dropFirst(c + 1)).trimmingCharacters(in: .whitespaces) }
+            let numbered = text.range(of: #"^\d{1,2}\.\s+"#, options: .regularExpression)
+            if k == c + 2, let n = numbered {
+                var row = Row(label: String(text[n.upperBound...]), number: Int(text.prefix { $0.isNumber }), cursor: i == at)
+                labelCol = k + text.distance(from: text.startIndex, to: n.upperBound)
+                if let box = row.label.range(of: #"^\[(.)\]\s+"#, options: .regularExpression) {
+                    row.checked = !row.label[box].hasPrefix("[ ]")
+                    labelCol += row.label.distance(from: row.label.startIndex, to: box.upperBound)
+                    row.label = String(row.label[box.upperBound...])
+                }
+                rows.append(row)
+            } else if k == c + 2 || (k < labelCol && rows.last?.checked != nil) || rows.isEmpty {
+                // A row with no number: the trust box's choices, or Submit under a list of ticks.
+                rows.append(Row(label: text, cursor: i == at))
+            } else {
+                // Under a row: its description, or the rest of a label that wrapped.
+                rows[rows.count - 1].detail = [rows[rows.count - 1].detail, text].compactMap { $0 }.joined(separator: " ")
+            }
+        }
+        guard rows.count >= 2, rows.contains(where: { $0.cursor }) else { return nil }
+
+        // What it says: from the rule that opens the box down to the list.
+        var open = top
+        while open > 0, !isRule(lines[open - 1]) || lines[open - 1].contains("╌"), top - open < 40 { open -= 1 }
+        var said: [String] = []
+        var tabs: String?
+        for i in open..<top where !blank(i) && !isRule(lines[i]) {
+            let text = lines[i].trimmingCharacters(in: .whitespaces)
+            if text.hasPrefix("←") || (said.isEmpty && (text.hasPrefix("☐ ") || text.hasPrefix("☒ "))) {
+                // The strip of questions (several), or the one question's own heading.
+                tabs = text.trimmingCharacters(in: CharacterSet(charactersIn: "←→ ")).replacingOccurrences(of: "  ", with: " ")
+            } else {
+                said.append(text)
+            }
+        }
+        return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
+    }
+
+    /// The keys that pick row `index` as the box stands: its digit, or the arrows from
+    /// where the cursor is and Enter. Nil if there's no such row.
+    func keys(toPick index: Int) -> [String]? {
+        guard rows.indices.contains(index), let from = rows.firstIndex(where: { $0.cursor }) else { return nil }
+        if let n = rows[index].number, (1...9).contains(n) { return [String(n)] }
+        let step = index >= from ? "down" : "up"
+        return Array(repeating: step, count: abs(index - from)) + ["enter"]
+    }
+
+    var json: [String: Any] {
+        ["ask": ask, "tabs": tabs as Any? ?? NSNull(), "hints": hints as Any? ?? NSNull(),
+         "rows": rows.map { r -> [String: Any] in
+            ["label": r.label, "detail": r.detail as Any? ?? NSNull(), "number": r.number as Any? ?? NSNull(),
+             "cursor": r.cursor, "checked": r.checked as Any? ?? NSNull(), "types": r.types]
+         }]
+    }
+}
+
 /// phone.json. `token` is what a paired phone holds: it opens the page, and the page
 /// types into your terminals. It never goes in the log.
 struct PhoneConfig: Equatable {
@@ -3967,6 +4295,10 @@ struct PhoneDesk {
         var askedAt: Date? = nil
         var sent: String? = nil      // what the phone last sent it, until its next turn
         var note: String? = nil      // why a send didn't go
+        var box: TerminalBox? = nil  // what its screen is asking right now, if anything
+        var busy = false             // in the middle of a turn
+        var status: String? = nil    // its status line as last seen: folder, model, context
+        var context: Int? = nil      // how full its context is, in percent, if the line says
     }
 
     /// A terminal seen open that hasn't finished a turn since it was first seen: its key
@@ -3982,19 +4314,42 @@ struct PhoneDesk {
     func turn(_ key: String) -> Turn? { turns.first { $0.key == key } }
 
     /// Bring the list in line with the panes iTerm2 has `open`: a closed terminal's turn
-    /// goes, and an open one running Claude Code (`claude` says, by pane id) that has no
-    /// turn here yet gets an empty window, so every terminal can be answered and looked at.
-    mutating func met(_ open: [(session: String, name: String)], claude: (String) -> Bool, now: Date = Date()) {
+    /// goes; an open one running Claude Code that has no turn here yet gets an empty
+    /// window; and each is marked with whether it's working and what box, if any, its
+    /// screen is showing. Returns the keys whose box has just come up.
+    @discardableResult
+    mutating func met(_ open: [Reply.Pane], now: Date = Date()) -> [String] {
         let ids = Set(open.map { $0.session })
         turns.removeAll { $0.origin?.session.map { !ids.contains($0) } ?? false }
+        var asking: [String] = []
         for pane in open {
+            let box = TerminalBox.read(pane.screen)
+            let busy = box == nil && Reply.working(title: pane.name, screen: pane.screen)
             if let i = turns.firstIndex(where: { $0.origin?.session == pane.session }) {
                 if turns[i].key.hasPrefix(Self.paneKey) { turns[i].name = Reply.paneName(pane.name) }
-            } else if claude(pane.session), turns.count < Self.keep {
-                turns.append(Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
-                                  origin: Origin(term: "iTerm.app", session: pane.session)))
+                if let box = box, turns[i].box?.ask != box.ask { asking.append(turns[i].key) }
+                (turns[i].box, turns[i].busy) = (box, busy)
+                if let status = Reply.status(in: pane.screen) { (turns[i].status, turns[i].context) = status }
+            } else if box != nil || Reply.showsClaude(pane.screen), turns.count < Self.keep {
+                var t = Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
+                             origin: Origin(term: "iTerm.app", session: pane.session))
+                (t.box, t.busy) = (box, busy)
+                if let status = Reply.status(in: pane.screen) { (t.status, t.context) = status }
+                if box != nil { asking.append(t.key) }
+                turns.append(t)
             }
         }
+        return asking
+    }
+
+    /// A fresh look at one terminal's screen: what box it shows now. A hook's question
+    /// is over once the screen is back at Claude's prompt.
+    mutating func saw(_ key: String, _ screen: String) {
+        guard let i = turns.firstIndex(where: { $0.key == key }) else { return }
+        turns[i].box = TerminalBox.read(screen)
+        if turns[i].box != nil { turns[i].busy = false }
+        if let status = Reply.status(in: screen) { (turns[i].status, turns[i].context) = status }
+        if turns[i].question != nil, Reply.promptText(in: screen) != nil { (turns[i].question, turns[i].askedAt) = (nil, nil) }
     }
 
     /// The list as it's kept between runs of the agent.
@@ -4006,6 +4361,8 @@ struct PhoneDesk {
             if let a = t.askedAt { o["asked_at"] = a.timeIntervalSince1970 }
             if let sent = t.sent { o["sent"] = sent }
             if let note = t.note { o["note"] = note }
+            if let status = t.status { o["status"] = status }
+            if let context = t.context { o["context"] = context }
             return o
         }
         return (try? JSONSerialization.data(withJSONObject: ["v": 1, "turns": rows])) ?? Data()
@@ -4024,6 +4381,8 @@ struct PhoneDesk {
             t.askedAt = (row["asked_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
             t.sent = row["sent"] as? String
             t.note = row["note"] as? String
+            t.status = row["status"] as? String
+            t.context = (row["context"] as? NSNumber)?.intValue
             turns.append(t)
         }
     }
@@ -4049,6 +4408,10 @@ struct PhoneDesk {
             (t.sent, t.note) = (nil, nil)
         } else {
             t = Turn(key: key, name: item.source, text: item.text, at: now, origin: item.origin)
+            // What was last read off its pane's screen still stands.
+            if let was = turns.first(where: { $0.origin?.session != nil && $0.origin?.session == item.origin?.session }) {
+                (t.status, t.context) = (was.status, was.context)
+            }
         }
         // Its own turn takes the place of the empty window its pane had.
         turns.removeAll { $0.key == key || ($0.key.hasPrefix(Self.paneKey) && $0.origin?.session != nil
@@ -4063,6 +4426,9 @@ struct PhoneDesk {
         guard let i = turns.firstIndex(where: { $0.key == key }) else { return }
         (turns[i].question, turns[i].askedAt) = (nil, nil)
     }
+
+    /// Its terminal has been closed from the phone.
+    mutating func closed(_ key: String) { turns.removeAll { $0.key == key } }
 
     /// The phone sent `text` to `key`, and this is how it went.
     mutating func answered(_ key: String, with text: String, _ outcome: Reply.Outcome) {
@@ -4238,13 +4604,24 @@ final class Phone {
                          "/app.css": ("app.css", "text/css; charset=utf-8"),
                          "/app.js": ("app.js", "text/javascript; charset=utf-8")]
 
-    /// How often, at most, iTerm2 is asked which panes are open (only while a page is asking).
-    static let scanEvery: TimeInterval = 20
+    /// How often, at most, iTerm2 is asked what its panes are showing: while a page is
+    /// polling, or while you're away and a box coming up needs a push.
+    static let scanEvery: TimeInterval = 4
+    /// A page that asked this recently is still open.
+    static let pageOpen: TimeInterval = 15
+    /// One push per question, whichever of the hook and the screen sees it first.
+    static let askGap: TimeInterval = 120
+    /// The answers you send often, as buttons on the page. Yours to change there.
+    static let quickKey = "phoneQuick"
+    static let quickDefault = ["Yes", "No", "Go ahead", "Wrap up"]
+    static let quickLimit = 12
 
     let config: PhoneConfig
     private(set) var desk: PhoneDesk { didSet { if desk.turns != oldValue.turns { save(desk.snapshot()) } } }
     private let defaults: UserDefaults
     private var scanned = Date.distantPast
+    private var polled = Date.distantPast
+    private var askPushed: [String: Date] = [:]
     /// Puts the words in a terminal. Tests answer for iTerm2.
     var deliver: (String, Origin) -> Reply.Outcome = { Reply.send($0, to: $1) }
     /// Presses a key in a terminal, and reads the foot of its screen.
@@ -4256,8 +4633,37 @@ final class Phone {
     var asset: (String) -> Data? = { name in
         Bundle.main.resourcePath.flatMap { FileManager.default.contents(atPath: $0 + "/phone/" + name) }
     }
-    /// The panes iTerm2 has open. Tests answer for it.
-    var panes: () -> [(session: String, name: String)]? = { Reply.panes() }
+    /// The panes iTerm2 has open and what's on them. Tests answer for it.
+    var survey: () -> [Reply.Pane]? = { Reply.survey() }
+    /// Types into a terminal's own text field, and waits between keys.
+    var type: (String, Origin) -> Reply.Outcome = { Reply.type($0, in: $1) }
+    var wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    /// Closes a terminal.
+    var shut: (Origin) -> Reply.Outcome = { Reply.close($0) }
+    /// The sessions that could be resumed, and what opens one.
+    var oldSessions: () -> [OldSessions.Session] = { OldSessions.recent() }
+    var reopen: (OldSessions.Session) -> Reply.Outcome = { OldSessions.resume($0) }
+    var runningIDs: () -> Set<String> = { OldSessions.running() }
+
+    /// Whether `session` already has a window on the page: resuming it again would put
+    /// two terminals on one conversation.
+    private func isOpen(_ session: OldSessions.Session) -> Bool {
+        desk.turns.contains { $0.key == session.id || ($0.key.hasPrefix(PhoneDesk.paneKey) && $0.name == session.title) }
+    }
+
+    var quick: [String] { defaults.stringArray(forKey: Self.quickKey) ?? Self.quickDefault }
+
+    /// Keep `list` as the quick answers: each as it would be sent (one line), no
+    /// repeats, no more than `quickLimit`.
+    func setQuick(_ list: [String]) {
+        var kept: [String] = []
+        for raw in list {
+            guard let line = Reply.clean(raw).map({ String($0.prefix(200)) }), !kept.contains(line) else { continue }
+            kept.append(line)
+            if kept.count == Self.quickLimit { break }
+        }
+        defaults.set(kept, forKey: Self.quickKey)
+    }
     /// Keeps the list for the next run of the agent. `saved` is what the last one kept.
     var save: (Data) -> Void = { _ in }
     var log: (String) -> Void = { _ in }
@@ -4269,15 +4675,30 @@ final class Phone {
         desk = PhoneDesk(snapshot: saved)
     }
 
-    /// Ask iTerm2 what's open, so the page lists every Claude Code terminal and none
-    /// that has closed. Cheap to call: it asks at most every `scanEvery`.
+    /// Ask iTerm2 what's open and showing, so the page lists every Claude Code terminal,
+    /// none that has closed, and each one's box. Cheap to call: it asks at most every
+    /// `scanEvery`.
     func scan(now: Date = Date()) {
         guard now.timeIntervalSince(scanned) >= Self.scanEvery else { return }
         scanned = now
-        guard let open = panes() else { return }   // iTerm2 not running, or not saying: nothing learned
-        desk.met(open, claude: { [look] session in
-            look(Origin(term: "iTerm.app", session: session)).map(Reply.showsClaude) ?? false
-        }, now: now)
+        guard let open = survey() else { return }   // iTerm2 not running, or not saying: nothing learned
+        for key in desk.met(open, now: now) where away {
+            guard let turn = desk.turn(key), let box = turn.box, firstAsk(key, now) else { continue }
+            push(title: "\(turn.name) is asking", message: box.ask, key: key, name: turn.name)
+        }
+    }
+
+    /// The agent's heartbeat calls this: keep looking while someone is, or while a box
+    /// coming up would otherwise sit there unseen.
+    func tick(now: Date = Date()) {
+        if away || now.timeIntervalSince(polled) < Self.pageOpen { scan(now: now) }
+    }
+
+    /// Whether `key` hasn't been pushed as asking in the last `askGap`; marks it so.
+    private func firstAsk(_ key: String, _ now: Date) -> Bool {
+        if let last = askPushed[key], now.timeIntervalSince(last) < Self.askGap { return false }
+        askPushed[key] = now
+        return true
     }
 
     // -- away --------------------------------------------------------------
@@ -4299,7 +4720,10 @@ final class Phone {
         let asking = item.key.hasSuffix(PhoneDesk.questionSuffix)
         guard item.answerable || asking else { return }   // only Claude Code's turns have a terminal to answer in
         let first = desk.took(item, now: now)
-        if away, first { ping(item, asking: asking) }
+        guard away, first else { return }
+        let key = asking ? String(item.key.dropLast(PhoneDesk.questionSuffix.count)) : item.key
+        if asking, !firstAsk(key, now) { return }   // the screen already said so
+        push(title: asking ? "\(item.source) is asking" : item.source, message: item.text, key: key, name: item.source)
     }
 
     /// `text` as a push's body: one line, cut to length.
@@ -4308,14 +4732,12 @@ final class Phone {
         return line.count > pushLength ? String(line.prefix(pushLength - 1)) + "…" : line
     }
 
-    /// The push for `item`, or nil when there's nowhere to send one.
-    func pushRequest(for item: SpeechItem, asking: Bool) -> URLRequest? {
+    /// The push for a terminal, or nil when there's nowhere to send one. A tap on it
+    /// opens the page at that terminal's window.
+    func pushRequest(title: String, message: String, key: String) -> URLRequest? {
         guard let topicURL = config.ntfy.flatMap({ URL(string: $0) }), !topicURL.lastPathComponent.isEmpty,
               topicURL.lastPathComponent != "/" else { return nil }
-        let key = asking ? String(item.key.dropLast(PhoneDesk.questionSuffix.count)) : item.key
-        var body: [String: Any] = ["topic": topicURL.lastPathComponent,
-                                   "title": asking ? "\(item.source) is asking" : item.source,
-                                   "message": Self.brief(item.text)]
+        var body: [String: Any] = ["topic": topicURL.lastPathComponent, "title": title, "message": Self.brief(message)]
         if let url = config.url {
             body["click"] = url + "/#" + (key.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? "")
         }
@@ -4328,13 +4750,13 @@ final class Phone {
         return request
     }
 
-    private func ping(_ item: SpeechItem, asking: Bool) {
-        guard let request = pushRequest(for: item, asking: asking) else {
-            log("away: no push for \(item.source) — phone.json has no ntfy topic")
+    private func push(title: String, message: String, key: String, name: String) {
+        guard let request = pushRequest(title: title, message: message, key: key) else {
+            log("away: no push for \(name) — phone.json has no ntfy topic")
             return
         }
         transport(request) { [weak self] problem in
-            self?.log(problem.map { "away: push for \(item.source) failed — \($0)" } ?? "away: pushed \(item.source)")
+            self?.log(problem.map { "away: push for \(name) failed — \($0)" } ?? "away: pushed \(name)")
         }
     }
 
@@ -4363,6 +4785,7 @@ final class Phone {
 
     func state(now: Date = Date()) -> [String: Any] {
         ["away": away,
+         "quick": quick,
          "turns": desk.turns.map { t -> [String: Any] in
             ["key": t.key, "name": t.name, "text": t.text,
              "at": ((t.askedAt.map { max($0, t.at) } ?? t.at).timeIntervalSince1970).rounded(),
@@ -4370,7 +4793,11 @@ final class Phone {
              "canReply": Reply.canReach(t.origin),
              "question": t.question as Any? ?? NSNull(),
              "sent": t.sent as Any? ?? NSNull(),
-             "note": t.note as Any? ?? NSNull()]
+             "note": t.note as Any? ?? NSNull(),
+             "box": t.box?.json as Any? ?? NSNull(),
+             "busy": t.busy,
+             "status": t.status as Any? ?? NSNull(),
+             "context": t.context as Any? ?? NSNull()]
          }]
     }
 
@@ -4394,16 +4821,23 @@ final class Phone {
             return HTTP.Response(type: type, body: data)
         }
         if r.method == "GET", r.path == "/api/state" {
+            polled = Date()
             scan()
             return .json(state())
+        }
+        if r.method == "GET", r.path == "/api/sessions" {
+            let running = runningIDs()
+            return .json(["sessions": oldSessions().map { s -> [String: Any] in
+                ["id": s.id, "title": s.title, "folder": (s.cwd as NSString).lastPathComponent,
+                 "at": s.at.timeIntervalSince1970.rounded(), "open": running.contains(s.id) || isOpen(s)]
+            }])
         }
         if r.method == "GET", r.path == "/api/screen" {
             guard let turn = desk.turn(r.query["key"] ?? ""), let origin = turn.origin,
                   let screen = look(origin) else {
                 return .json(["error": "its terminal can't be read from here"], status: 409)
             }
-            // Back at Claude's prompt, whatever it was asking has been answered.
-            if turn.question != nil, Reply.promptText(in: screen) != nil { desk.questionClosed(turn.key) }
+            desk.saw(turn.key, screen)   // its box as it stands; back at the prompt, a question is over
             return .json(["screen": screen, "state": state()])
         }
         guard r.method == "POST", r.headers["x-speakhud"] == "1", let body = r.json else {
@@ -4414,6 +4848,69 @@ final class Phone {
             guard let on = body["on"] as? Bool else { return .json(["error": "on must be true or false"], status: 400) }
             setAway(on)
             return .json(state())
+        case "/api/quick":
+            guard let list = body["list"] as? [String] else { return .json(["error": "list must be a list of answers"], status: 400) }
+            setQuick(list)
+            return .json(state())
+        case "/api/resume":
+            // The folder and the id come from this Mac's own transcripts, looked up by the
+            // id the page sent: the page never names a command or a path.
+            guard let id = body["id"] as? String, let session = oldSessions().first(where: { $0.id == id }) else {
+                return .json(["error": "that session isn't on this Mac any more"], status: 404)
+            }
+            guard !isOpen(session), !runningIDs().contains(session.id) else {
+                return .json(["sent": false, "outcome": "it's already open"], status: 409)
+            }
+            let outcome = reopen(session)
+            log("phone resumed \(session.title): \(outcome)")
+            scanned = .distantPast   // the next look should find its new pane
+            return .json(["sent": outcome == .sent, "outcome": outcome == .sent ? "opening on the Mac" : outcome.description])
+        case "/api/close":
+            guard let key = body["key"] as? String, let turn = desk.turn(key) else {
+                return .json(["error": "that terminal isn't on the list any more"], status: 404)
+            }
+            guard let origin = turn.origin, Reply.canReach(origin) else {
+                return .json(["error": "its terminal can't be reached from here"], status: 409)
+            }
+            let outcome = shut(origin)
+            log("phone closed \(turn.name): \(outcome)")
+            if outcome == .sent { desk.closed(key) }
+            return .json(["sent": outcome == .sent, "outcome": outcome.description, "state": state()])
+        case "/api/pick":
+            // A choice in the box its terminal is showing. The box is read again here, so
+            // the keys are worked out from where its cursor is now, and a box that has
+            // moved on since the page drew it is never answered blind.
+            guard let key = body["key"] as? String, let row = body["row"] as? Int, let label = body["label"] as? String else {
+                return .json(["error": "which choice?"], status: 400)
+            }
+            guard let turn = desk.turn(key), let origin = turn.origin, Reply.canReach(origin) else {
+                return .json(["error": "its terminal can't be reached from here"], status: 409)
+            }
+            guard let screen = look(origin), let box = TerminalBox.read(screen),
+                  box.rows.indices.contains(row), box.rows[row].label == label, var keys = box.keys(toPick: row) else {
+                if let screen = look(origin) { desk.saw(key, screen) }
+                return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
+            }
+            var words: String?
+            if let text = body["text"] as? String {
+                // Its own answer: pick the row that turns into a text field, type, Enter.
+                guard box.rows[row].types, box.rows[row].checked == nil, let line = Reply.clean(text) else {
+                    return .json(["error": "that choice doesn't take words"], status: 400)
+                }
+                words = line
+                keys.append("enter")
+            }
+            var outcome = Reply.Outcome.sent
+            for (i, name) in keys.enumerated() where outcome == .sent {
+                if i > 0 { wait(0.15) }
+                if let line = words, i == keys.count - 1 {
+                    outcome = type(line, origin)
+                    if outcome == .sent { wait(0.15) }
+                }
+                if outcome == .sent { outcome = press(name, origin) }
+            }
+            log("phone pick \(row + 1) of \(box.rows.count) in \(turn.name): \(outcome)")
+            return .json(["sent": outcome == .sent, "outcome": outcome.description])
         case "/api/key":
             guard let key = body["key"] as? String, let name = body["press"] as? String, Reply.keys[name] != nil else {
                 return .json(["error": "no such key"], status: 400)
@@ -4677,6 +5174,7 @@ final class Agent {
         let timer = Timer(timeInterval: Spool.heartbeatInterval, repeats: true) { [weak self] _ in
             self?.heartbeat()
             self?.drainSpool()
+            self?.phone?.tick()
         }
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer

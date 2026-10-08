@@ -113,6 +113,59 @@ h1 {
 }
 main { margin-top: 14px; }
 
+/* The two folded sections: quick answers to edit, and old sessions to resume. */
+.fold {
+  margin: 10px 4px 0;
+}
+.fold summary {
+  padding: 6px 0;
+  font-weight: 600;
+}
+.fold ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fold li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.fold li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.fold li small { display: block; color: var(--quiet); font-size: 0.8125rem; }
+.fold li button,
+.quick-add button {
+  flex: none;
+  min-width: 68px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--win);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+}
+.quick-add {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+.quick-add input {
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--win);
+  color: var(--ink);
+  font: inherit;
+}
+#old { margin-top: 18px; }
+
 .trouble {
   margin: 14px 0 0;
   padding: 12px 14px;
@@ -155,6 +208,16 @@ main { margin-top: 14px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* "working" or "asking", said in words beside the name. */
+.win-state {
+  flex: none;
+  margin-left: auto;
+  font-size: 0.8125rem;
+  font-weight: 650;
+}
+.win-state:empty { display: none; }
+.win-state:not(:empty) + .win-when { margin-left: 0; }
 
 .win-when {
   flex: none;
@@ -206,6 +269,15 @@ main { margin-top: 14px; }
 }
 
 .win-body { padding: 12px 14px 14px; }
+
+/* Its own status line: the folder, the model, how full the context is. */
+.win-status {
+  margin: 0 0 8px;
+  color: var(--quiet);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+.win-status.is-full { color: var(--alarm); font-weight: 600; }
 
 .win-text {
   margin: 0;
@@ -260,7 +332,7 @@ main { margin-top: 14px; }
   flex-direction: column;
   gap: 8px;
 }
-.win-options button {
+.win-options > button {
   display: flex;
   gap: 10px;
   align-items: baseline;
@@ -274,7 +346,40 @@ main { margin-top: 14px; }
   font: inherit;
   text-align: left;
 }
-.win-options button b { flex: none; min-width: 1ch; }
+.win-options > button b { flex: none; min-width: 1.2ch; }
+.win-options > button > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.win-options > button small { color: var(--quiet); font-size: 0.875rem; overflow-wrap: anywhere; }
+.win-tabs {
+  margin: 0 0 8px;
+  color: var(--quiet);
+  font-size: 0.875rem;
+}
+/* The choice that takes your own words. */
+.win-own { display: flex; gap: 8px; }
+.win-own input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1.5px solid transparent;
+  border-radius: 9px;
+  background: var(--field);
+  color: var(--ink);
+  font: inherit;
+}
+.win-own input:focus { outline: none; border-color: var(--frame); }
+.win-own button {
+  flex: none;
+  min-width: 68px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--frame);
+  color: var(--on-frame);
+  font: inherit;
+  font-weight: 650;
+}
 
 .win-sent,
 .win-note {
@@ -285,6 +390,26 @@ main { margin-top: 14px; }
 .win-sent { color: var(--quiet); }
 .win-note { color: var(--alarm); font-weight: 600; }
 .win-note.is-plain { color: var(--quiet); font-weight: 400; }
+
+/* Quick answers: one tap sends it to this terminal. */
+.win-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+.win-quick button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1.5px solid var(--frame);
+  border-radius: 19px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+.win-quick + .win-answer { margin-top: 8px; }
 
 .win-answer {
   display: flex;
@@ -367,6 +492,24 @@ summary:focus-visible,
   color: var(--ink);
   font: inherit;
   font-weight: 600;
+}
+
+.win-close {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  margin: 14px 0 0;
+  border: 1.5px solid var(--line);
+  border-radius: 9px;
+  background: none;
+  color: var(--alarm);
+  font: inherit;
+  font-weight: 600;
+}
+.win-close.is-armed {
+  border-color: var(--alarm);
+  background: var(--alarm);
+  color: var(--win);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -30,24 +30,43 @@
 <p class="says" id="away-says"></p>
 <p class="says" id="speak-says" hidden></p>
 
+<details class="fold" id="quick-edit">
+  <summary>Quick answers</summary>
+  <p class="says">One tap sends one of these to a terminal. Add the things you always say.</p>
+  <ul class="quick-list" id="quick-list"></ul>
+  <form class="quick-add" id="quick-add">
+    <input type="text" id="quick-new" placeholder="A new quick answer" aria-label="A new quick answer" maxlength="200" enterkeyhint="done">
+    <button type="submit">Add</button>
+  </form>
+</details>
+
 <p class="trouble" id="trouble" hidden></p>
 
 <main id="windows"></main>
 
-<p class="empty" id="empty" hidden>No turns yet. When Claude Code finishes a turn on your Mac, it lands here.</p>
+<p class="empty" id="empty" hidden>No terminals open. Start Claude Code in iTerm2 on your Mac, or resume a session below.</p>
+
+<details class="fold" id="old">
+  <summary>Resume an old session</summary>
+  <p class="says" id="old-says">Opens a new terminal on the Mac and picks the session back up.</p>
+  <ul class="old-list" id="old-list"></ul>
+</details>
 
 <template id="window">
   <article class="win">
     <header class="win-bar">
       <h2 class="win-name"></h2>
+      <span class="win-state"></span>
       <time class="win-when"></time>
       <button type="button" class="win-read" hidden>Read</button>
     </header>
     <div class="win-body">
+      <p class="win-status" hidden></p>
       <p class="win-text"></p>
       <button type="button" class="win-more" hidden>Show all of it</button>
 
       <section class="win-asks" hidden>
+        <p class="win-tabs" hidden></p>
         <p class="win-question"></p>
         <div class="win-options"></div>
       </section>
@@ -55,6 +74,7 @@
       <p class="win-sent" hidden></p>
       <p class="win-note" hidden></p>
 
+      <div class="win-quick" hidden></div>
       <form class="win-answer">
         <textarea rows="1" placeholder="Answer" enterkeyhint="send" autocapitalize="sentences" aria-label="Answer"></textarea>
         <button type="submit">Send</button>
@@ -73,6 +93,7 @@
           <button type="button" data-press="enter">Enter</button>
           <button type="button" data-press="esc">Esc</button>
         </div>
+        <button type="button" class="win-close">Close this terminal</button>
       </details>
     </div>
   </article>
