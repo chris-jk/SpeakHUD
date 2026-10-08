@@ -597,7 +597,7 @@ enum Reply {
     /// spins a glyph at the front of it while it works and leaves ✳ there when it's
     /// waiting for you.
     static func showing(_ screen: String, title: String? = nil) -> Showing {
-        let lines = screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
+        let lines = lines(of: screen)
         let onScreen = screen.contains("esc to interrupt")
         if var prompt = prompt(in: lines) {
             prompt.working = onScreen || spins(title)
@@ -610,6 +610,11 @@ enum Reply {
         if let foot = foot, saysKeys(foot) { return .keys(foot) }
         if onScreen || spins(title) { return .working(onScreen: onScreen) }
         return .notClaude(foot == nil ? "its screen is blank" : "nothing at the foot of its screen is Claude's prompt or a box of its")
+    }
+
+    /// A screen as its lines, a no-break space read as a space.
+    private static func lines(of screen: String) -> [String] {
+        screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
     }
 
     /// What a box that takes keys as answers says about itself.
@@ -673,8 +678,15 @@ enum Reply {
     }
 
     /// The box of choices at the foot of the screen, or nil: nothing there reads as a
-    /// list of choices with a cursor on one, or nothing says keys answer it.
+    /// list of choices with a cursor on one, or nothing says it is a box of Claude's.
     private static func box(in screen: [String]) -> TerminalBox? {
+        list(in: screen).flatMap { $0.isBox ? $0.box : nil }
+    }
+
+    /// The list of choices at the foot of the screen as it reads, with a cursor on one,
+    /// whoever drew it. `isBox`: the screen itself says it is a box of Claude's.
+    /// `footed`: no more is under it than one line, however a narrow pane wrapped that.
+    private static func list(in screen: [String]) -> (box: TerminalBox, isBox: Bool, footed: Bool)? {
         var lines = screen
         while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
         func col(_ line: String) -> Int? {
@@ -696,12 +708,10 @@ enum Reply {
         while top > 0, inList(top - 1) { top -= 1 }
         while bottom < lines.count - 1, inList(bottom + 1) { bottom += 1 }
         while top < at, ruled(top) { top += 1 }
-        // Under the list there's nothing but its hint line: anything more and that ❯ was
-        // a line of the conversation, not a cursor.
-        let under = (bottom + 1..<lines.count).filter { !blank($0) }.map { lines[$0].trimmingCharacters(in: .whitespaces) }
-        guard under.count <= 1 else { return nil }
-        let hints = under.first
-        if let h = hints, !saysKeys(h) { return nil }
+        // Under a box's list there's nothing but its hint line: with anything more, that ❯
+        // was a line of the conversation, not a cursor. What "more" is, is weighed below.
+        let under = (bottom + 1..<lines.count).filter { !blank($0) }
+        let hints = under.isEmpty ? nil : under.map { lines[$0].trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
 
         var rows: [TerminalBox.Row] = []
         var labelCol = c + 2
@@ -743,14 +753,44 @@ enum Reply {
                 said.append(text)
             }
         }
-        // A box says it is one, and nothing else is read as one: not being the prompt
-        // isn't enough (a shell isn't the prompt either). Under its choices it says which
-        // keys answer it. The one box that doesn't, the last step of several questions,
-        // opens under a rule with the strip of those questions, and numbers every choice.
+        let box = TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
         let opened = open > 0 && rule(lines[open - 1]) == .solid
+        // Lines under it are one line a narrow pane wrapped if the first word of each
+        // wouldn't have fitted on the end of the one before. How wide the pane is, the
+        // rule that opens the box says; a box set in from the edge is set in at both.
+        let width = opened ? lines[open - 1].trimmingCharacters(in: .whitespaces).count : 0
+        let footed = under.count <= 1 || opened && zip(under, under.dropFirst()).allSatisfy { a, b in
+            let line = lines[a].replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression)
+            let word = lines[b].split(separator: " ").first?.count ?? 0
+            return line.count + 1 + word > width - (col(line) ?? 0)
+        }
+        // Something has to say this is a box of Claude's: not being the prompt isn't
+        // enough (a shell isn't the prompt either). One of two things does.
+        // The one line under its choices names the keys that answer it.
+        if under.count == 1, let h = hints, saysKeys(h) { return (box, true, footed) }
+        // Or it is drawn the way Claude draws every dialog, whatever words it uses: a rule
+        // across the pane, what it asks, then its choices numbered from 1, with no rule
+        // through them, and under them nothing but a line set in from the edge as they are
+        // (the plan to approve has one that names no key; some permission boxes have none).
+        // The prompt box is never that: its ❯ sits right under its rule, with nothing
+        // asked between. Nor is a shell: the line its ❯ is on has no number, and its
+        // prompt starts at the edge of the pane.
+        let headed = tabs != nil || !said.isEmpty
         let counted = rows.enumerated().allSatisfy { $0.element.number == $0.offset + 1 }
-        guard hints != nil || (opened && tabs != nil && counted) else { return nil }
-        return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
+        let unruled = at > 0 && rule(lines[at - 1]) == nil && !(top...bottom).contains { rule(lines[$0]) != nil }
+        let setIn = under.count <= 2 && under.allSatisfy { c > 0 && col(lines[$0]) == c && rule(lines[$0]) == nil }
+        return (box, opened && headed && counted && unruled && setIn, footed)
+    }
+
+    /// Whether the list of choices at the foot of `screen` is the question the hook read
+    /// out as `asked`, with its choice numbered `number` the one worded `option`. For a
+    /// screen no box is read on (its line of keys wrapped by a narrow pane, or worded
+    /// some new way): the hook's words are then what says whose list it is. No more may
+    /// be under it than its one line, so a box left on the screen over a shell's prompt
+    /// is not that.
+    private static func asks(_ screen: String, choice number: Int, worded option: String, asked: String) -> Bool {
+        guard let list = list(in: lines(of: screen)), list.footed else { return false }
+        return list.box.isChoice(number, worded: option, asked: asked)
     }
 
     /// Whether the prompt box now holds what was pasted and nothing ahead of it: it
@@ -905,7 +945,8 @@ enum Reply {
     /// Press one named key in the pane `origin` names, if the pane is showing what the
     /// page had drawn when it was `tapped`, and that takes the key:
     /// - a box takes any key, and only if it's the box that was drawn (for a hook's
-    ///   question: the box that asks it, where that number is that choice);
+    ///   question: the box that asks it, where that number is that choice; where no box
+    ///   is read, the list at the foot of the screen that is that question and choice);
     /// - something else that says it takes keys takes any, from a page with no box drawn;
     /// - Claude's prompt takes Enter and Esc (send what's typed; stop the turn). Any
     ///   other key lands in the message being typed, and the next answer is pasted after it;
@@ -915,24 +956,32 @@ enum Reply {
     static func press(_ key: String, on tapped: Tapped, in origin: Origin, via terminal: Terminal = Terminal()) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
         guard keys[key] != nil else { return .failed("no such key") }
-        switch look(session, terminal) {
+        switch tell(terminal, screenScript(session)).map({ foot($0) }) {
         case .failure(let stop): return stop
-        case .success(let showing): return refusal(of: key, on: tapped, showing: showing) ?? self.key(key, session, terminal)
+        case .success(let screen): return refusal(of: key, on: tapped, screen: screen) ?? self.key(key, session, terminal)
         }
     }
 
-    /// Why `key`, tapped on what the page had drawn, isn't pressed in a pane showing
-    /// this. Nil when it is to be.
-    private static func refusal(of key: String, on tapped: Tapped, showing: Showing) -> Outcome? {
-        switch (showing, tapped) {
+    /// Why `key`, tapped on what the page had drawn, isn't pressed in a pane whose
+    /// screen is this. Nil when it is to be.
+    private static func refusal(of key: String, on tapped: Tapped, screen: String) -> Outcome? {
+        func notClaude(_ why: String) -> Outcome { .failed("its terminal isn't showing Claude Code (\(why)), so no key is pressed there") }
+        switch (showing(screen), tapped) {
         case (.box(let box), .box(let drawn)):
             return box.isBox(drawn) ? nil : .changed
         case (.box(let box), .question(let asked, let option)):
             return box.isChoice(Int(key) ?? 0, worded: option, asked: asked) ? nil : .changed
         case (.box, .noBox):
             return .changed   // a box the page never drew: Enter would take whichever choice its cursor is on
-        case (_, .box), (_, .question):
+        case (_, .box), (.prompt, .question):
             return .changed   // the box it was tapped for has gone: Enter would now send whatever is typed
+        case (let showing, .question(let asked, let option)):
+            // No box is read there, and that isn't the same as the question having gone:
+            // its number is pressed if the list at the foot of the screen is that
+            // question with that choice. If not, what is wrong is said, not "changed".
+            if asks(screen, choice: Int(key) ?? 0, worded: option, asked: asked) { return nil }
+            if case .notClaude(let why) = showing { return notClaude(why) }
+            return .failed("no list of choices on its screen reads as that question with that choice at that number, so no key is pressed there")
         case (.keys, .noBox):
             return nil
         case (.prompt, .noBox):
@@ -941,7 +990,7 @@ enum Reply {
             // Esc stops a turn, and does nothing to a shell whose title only looked like one.
             return key == "esc" ? nil : .failed("its terminal is in the middle of a turn with no box up, where only Esc (which stops it) is pressed")
         case (.notClaude(let why), .noBox):
-            return .failed("its terminal isn't showing Claude Code (\(why)), so no key is pressed there")
+            return notClaude(why)
         }
     }
 
@@ -4847,10 +4896,13 @@ struct TerminalBox: Equatable {
 
         init(ask: String, tabs: String? = nil, rows: [String]) { (self.ask, self.tabs, self.rows) = (ask, tabs, rows) }
 
-        /// As the page sends it. Nil for anything else.
+        /// As the page sends it. Nil for anything else: a strip that is there and isn't
+        /// words is not "no strip".
         init?(json: Any?) {
             guard let o = json as? [String: Any], let ask = o["ask"] as? String, let rows = o["rows"] as? [String] else { return nil }
-            self.init(ask: ask, tabs: o["tabs"] as? String, rows: rows)
+            let tabs = o["tabs"]
+            guard tabs == nil || tabs is NSNull || tabs is String else { return nil }
+            self.init(ask: ask, tabs: tabs as? String, rows: rows)
         }
     }
 
@@ -6036,10 +6088,17 @@ final class Phone {
             // What the page had drawn when the key was tapped: a box, or the hook's
             // question with the choice this number was beside, or neither. `Reply.press`
             // looks at the pane and presses only where that still stands and takes the key.
+            // Neither is said by saying nothing. A box or a question that is there but
+            // can't be read is refused, never taken for none: Enter tapped on a box
+            // would then go into Claude's prompt.
             let tapped: Reply.Tapped
-            if let drawn = TerminalBox.Drawn(json: body["box"]) {
+            if let box = body["box"] {
+                guard let drawn = TerminalBox.Drawn(json: box) else { return .json(["error": "which box?"], status: 400) }
                 tapped = .box(drawn)
-            } else if let asked = body["asked"] as? String, let option = body["option"] as? String {
+            } else if body["asked"] != nil || body["option"] != nil {
+                guard let asked = body["asked"] as? String, let option = body["option"] as? String else {
+                    return .json(["error": "which question?"], status: 400)
+                }
                 tapped = .question(asked: asked, option: option)
             } else {
                 tapped = .noBox
