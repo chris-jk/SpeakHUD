@@ -22,7 +22,19 @@
   const voice = window.speechSynthesis;
   const canSpeak = !!voice && typeof window.SpeechSynthesisUtterance === 'function';
 
-  const shown = new Map();   // session key -> { el, turn, text, question, note }
+  const shown = new Map();   // session key -> { el, turn, text, question, note, paras }
+  // The page only reorders when you're not in the middle of something: not typing, not
+  // being read to, and not having touched it in the last few seconds.
+  const SETTLE_MS = 6000;
+  let touched = 0;
+  for (const kind of ['touchstart', 'touchmove', 'wheel', 'pointerdown']) {
+    window.addEventListener(kind, () => { touched = Date.now(); }, { passive: true });
+  }
+  const typing = () => !!document.activeElement && document.activeElement.tagName === 'TEXTAREA';
+  const settled = () => !typing() && !reading && Date.now() - touched > SETTLE_MS;
+  // Word-by-word marking uses the browser's highlights, which draw over the text without
+  // rebuilding it. Without them the paragraph being read is still marked.
+  const canMark = typeof window.Highlight === 'function' && !!(window.CSS && CSS.highlights);
   let busy = false;
   let loaded = false;        // the first draw is what was already there, not news
   let wentTo = null;         // the #key already scrolled to
@@ -49,14 +61,72 @@
     return (text || '').split(/\n+/).map((p) => p.replace(/^\s*[-*\u2022]\s*/, '').trim()).filter(Boolean);
   }
 
-  // What to say for a window: who it is, then its turn, its question, or both.
-  function wordsFor(turn, what) {
+  // What to say for a window: who it is, then its turn, its question, or both. Each
+  // part of the turn knows the paragraph on the page it's read from.
+  function partsFor(w, what) {
+    const turn = w.turn;
     const parts = [];
-    if (what !== 'question') parts.push(turn.name + '.', ...paragraphs(turn.text));
+    if (what !== 'question') {
+      parts.push({ say: turn.name + '.' });
+      for (const para of w.paras || []) parts.push({ say: para.say, para });
+    }
     if (what !== 'turn' && turn.question) {
-      parts.push(what === 'question' ? turn.name + ' is asking.' : 'It is asking.', ...paragraphs(turn.question));
+      parts.push({ say: what === 'question' ? turn.name + ' is asking.' : 'It is asking.' });
+      for (const say of paragraphs(turn.question)) parts.push({ say });
     }
     return parts;
+  }
+
+  // Put a turn's text on the page as one span per paragraph, each remembering what the
+  // voice will be given for it and where that starts in the paragraph as shown.
+  function layText(el, text) {
+    const paras = [];
+    el.replaceChildren();
+    for (const piece of (text || '').split(/(\n+)/)) {
+      if (!piece) continue;
+      if (/^\n+$/.test(piece)) { el.append(piece); continue; }
+      const say = piece.replace(/^\s*[-*\u2022]\s*/, '').trim();
+      if (!say) { el.append(piece); continue; }
+      const span = document.createElement('span');
+      const node = document.createTextNode(piece);
+      span.append(node);
+      el.append(span);
+      paras.push({ say, span, node, lead: piece.indexOf(say) });
+    }
+    return paras;
+  }
+
+  let marked = null;         // the paragraph span being read
+  function unmark() {
+    if (marked) marked.classList.remove('is-speaking');
+    marked = null;
+    if (canMark) CSS.highlights.delete('spoken');
+  }
+
+  // The voice has started `part`: mark its paragraph, and keep it on screen unless
+  // you're scrolling the page yourself.
+  function follow(part) {
+    unmark();
+    if (!part.para) return;
+    marked = part.para.span;
+    marked.classList.add('is-speaking');
+    const box = marked.getBoundingClientRect();
+    if (Date.now() - touched > SETTLE_MS && (box.top < 60 || box.bottom > window.innerHeight - 40)) {
+      marked.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+
+  // The voice has reached the word at `index` of what it was given.
+  function point(part, index, length) {
+    if (!canMark || !part.para) return;
+    const { node, lead, say } = part.para;
+    const rest = say.slice(index);
+    const size = length || (rest.match(/^\S+/) || [''])[0].length;
+    const start = Math.min(node.length, lead + index);
+    const range = new Range();
+    range.setStart(node, start);
+    range.setEnd(node, Math.min(node.length, start + size));
+    CSS.highlights.set('spoken', new window.Highlight(range));
   }
 
   function mark() {
@@ -85,17 +155,23 @@
     if (!canSpeak || !w || !w.turn) return next();
     voice.cancel();
     const mine = ++readId;
-    const parts = from ? from.parts : wordsFor(w.turn, what);
+    const parts = from ? from.parts : partsFor(w, what);
     const start = from ? from.at : 0;
-    if (start >= parts.length) { reading = null; now = null; return next(); }
+    if (start >= parts.length) { reading = null; now = null; unmark(); return next(); }
     reading = key;
     unlocked = true;
     now = { key, what, parts, at: start };
+    // The whole turn is opened, so the words being read are there to see.
+    w.el.querySelector('.win-text').classList.remove('is-clamped');
+    w.el.querySelector('.win-more').hidden = true;
     parts.slice(start).forEach((part, i) => {
-      const said = utter(part);
-      said.onstart = () => { if (mine === readId) now.at = start + i; };
+      const said = utter(part.say);
+      said.onstart = () => { if (mine === readId) { now.at = start + i; follow(part); } };
+      said.onboundary = (e) => {
+        if (mine === readId && (!e.name || e.name === 'word')) point(part, e.charIndex || 0, e.charLength || 0);
+      };
       if (start + i === parts.length - 1) {
-        said.onend = said.onerror = () => { if (mine === readId) { reading = null; now = null; next(); } };
+        said.onend = said.onerror = () => { if (mine === readId) { reading = null; now = null; unmark(); next(); } };
       }
       voice.speak(said);
     });
@@ -112,6 +188,7 @@
     if (canSpeak) voice.cancel();
     reading = null;
     now = null;
+    unmark();
     mark();
   }
 
@@ -189,16 +266,18 @@
       ? 'Finished turns are pushed to this phone. The Mac stays quiet and awake.'
       : 'The Mac reads turns aloud as usual. Switch on when you walk away.';
 
+    // Decided before anything new starts being read: a turn that has just arrived
+    // comes to the top and is read there, and then the page holds still.
+    const still = settled();
     const keys = state.turns.map((t) => t.key);
     for (const [key, w] of shown) {
       if (!keys.includes(key)) { w.el.remove(); shown.delete(key); }
     }
     for (const turn of state.turns) update(turn);
 
-    // Newest first, but never shuffle the page under a keyboard.
-    const typing = document.activeElement && document.activeElement.tagName === 'TEXTAREA';
+    // Newest first, but never shuffle the page under a keyboard, a reading, or a thumb.
     const order = Array.from(list.children).map((el) => el.dataset.key);
-    if (!typing && order.join('\n') !== keys.join('\n')) {
+    if (still && order.join('\n') !== keys.join('\n')) {
       for (const key of keys) list.appendChild(shown.get(key).el);
     }
     empty.hidden = keys.length > 0;
@@ -272,6 +351,7 @@
       if (reading === turn.key) return hush();
       line.length = 0;
       read(turn.key, 'all');
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' });   // its window, held at the top
     });
 
     screen.addEventListener('toggle', () => { if (screen.open) look(turn.key); });
@@ -315,7 +395,8 @@
     if (w.text !== turn.text) {
       w.text = turn.text;
       w.note = '';
-      text.textContent = turn.text;
+      if (reading === turn.key) hush();   // the words being read are about to be replaced
+      w.paras = layText(text, turn.text);
       text.hidden = !turn.text;
       text.classList.add('is-clamped');
       more.hidden = text.scrollHeight <= text.clientHeight + 1;

@@ -219,6 +219,18 @@ main { margin-top: 14px; }
   overflow: hidden;
 }
 
+/* Being read aloud: the paragraph is tinted, and the word the voice is on is marked. */
+.win-text .is-speaking {
+  background: color-mix(in srgb, var(--frame) 22%, transparent);
+  border-radius: 4px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+::highlight(spoken) {
+  background: var(--frame);
+  color: var(--on-frame);
+}
+
 .win-more {
   margin: 6px 0 0;
   padding: 4px 0;
