@@ -109,7 +109,7 @@ let commandSuite = Suite("Commands") { t in
         p.enqueue(turn("a", key: "A", answerable: true)); p.enqueue(turn("b", key: "B"))
         _ = r.voice.take(); _ = r.ear.take()
         r.voice.finish()
-        t.expectEqual(r.ear.take(), [.listen(2)], "the turn ends: the mic is reopened for the reply, not over the voice")
+        t.expectEqual(r.ear.take(), [.attend(2)], "the turn ends: the mic is reopened for the reply, on the same kind of mic")
         t.expect(!p.state.listening, "commands are off while you answer")
         r.ear.hear("later")
         r.fire(Playback.commandPause)

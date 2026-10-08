@@ -1886,7 +1886,10 @@ final class Playback {
             self?.closeWindow("the mic never opened")
             self?.moveOn()
         }
-        ear?.listen(window: w.id, overSpeech: false)
+        // The same kind of mic the commands use, when they're on: going from the
+        // echo-cancelling mic to the plain one failed to start 8 times in 8, and in use
+        // it twice opened to silence (10-07). Staying on one kind opened 8 times in 8.
+        ear?.listen(window: w.id, overSpeech: obeys)
     }
 
     /// The mic is open: your turn. (For commands while reading there's nothing to do.)
@@ -2478,10 +2481,32 @@ final class MicEar: Ear, @unchecked Sendable {
             }
             let analyzer = SpeechAnalyzer(modules: [transcriber])
             let (stream, feed) = AsyncStream<AnalyzerInput>.makeStream()
-            let open = try await MainActor.run {
-                try self.openMic(for: id, overSpeech: overSpeech, feed: feed, as: format, analyzer: analyzer)
+            // For a moment after one mic session shuts, the next can fail to start, or
+            // start and then give nothing. Going from the echo-cancelling mic straight to
+            // the plain one failed 8 times in 8 ("bad device", tried 10-07), and in use it
+            // twice opened to silence. Playback no longer asks for that switch, but a mic
+            // is a mic: try again a few times, and don't call it open until sound is
+            // arriving and keeps arriving.
+            var tries = 0
+            while true {
+                tries += 1
+                do {
+                    let open = try await MainActor.run {
+                        try self.openMic(for: id, overSpeech: overSpeech, feed: feed, as: format, analyzer: analyzer)
+                    }
+                    guard open else { feed.finish(); return }
+                    if try await soundArrives(for: id, within: overSpeech ? 2.0 : 1.2) { break }
+                    if tries >= Self.openTries { throw Failure("the microphone opened but gave no sound") }
+                } catch let failure as Failure {
+                    if tries >= Self.openTries { throw failure }
+                }
+                await MainActor.run { self.shutEngine() }
+                try await Task.sleep(nanoseconds: 350_000_000)
             }
-            guard open else { feed.finish(); return }
+            if tries > 1 {
+                let n = tries
+                await MainActor.run { self.listener?.log("mic opened on try \(n)") }
+            }
             try await analyzer.start(inputSequence: stream)
             await MainActor.run {
                 if self.window == id { self.listener?.earOpened(window: id) }
@@ -2507,6 +2532,30 @@ final class MicEar: Ear, @unchecked Sendable {
                 if self.window == id { self.listener?.earFailed(why, window: id) }
             }
         }
+    }
+
+    static let openTries = 5
+
+    /// Whether the mic just opened for `id` is handing sound on, steadily. Throws if
+    /// the window is shut meanwhile.
+    private func soundArrives(for id: Int, within seconds: TimeInterval) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            let count = await MainActor.run { self.window == id ? (self.tally?.count ?? 0) : -1 }
+            if count < 0 { throw CancellationError() }
+            if count >= 3 { return true }   // one buffer and then nothing has been seen
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return false
+    }
+
+    /// Let go of a mic that failed to start or gave nothing, keeping the window, the
+    /// feed and the transcriber for the next try. Main thread.
+    private func shutEngine() {
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        tally = nil
     }
 
     /// Runs on the main thread, where stop() does: a window shut while the model was
