@@ -1737,7 +1737,7 @@ final class HUDPanel: NSPanel {
 
 // ---------------------------------------------------------------------------
 // Playback: every decision about what speaks, when, and from where. The queue,
-// whose pause it is (yours or the mic's), the resume point, the speed. No AppKit
+// whose pause it is (yours, the mic's or Away's), the resume point, the speed. No AppKit
 // and no AVFoundation — it drives a `Voice` and publishes one `State` for the HUD
 // to render, so the rules run in tests against a fake voice.
 // ---------------------------------------------------------------------------
@@ -1806,7 +1806,7 @@ final class Playback {
     var log: (String) -> Void = { _ in }
 
     private let voice: Voice
-    private let retire: (SpeechItem) -> Void
+    private let release: (SpeechItem) -> Void
     private let now: () -> Date
 
     private enum Sound { case silent, speaking, paused }
@@ -1826,6 +1826,8 @@ final class Playback {
         }
     }
     private var micBusy = false
+    private var away = false       // nobody is at the Mac: nothing sounds, no mic opens
+    private var phoneHas: Set<String> = []   // spool files of the turns the phone holds: what Away may let go
     private var lastItem: SpeechItem?   // what Replay replays once the queue has run dry
     private var stopped = false    // the HUD was emptied by Stop, not by running dry
     private var startedAt = Date()
@@ -1849,18 +1851,28 @@ final class Playback {
         self.ear = ear
         self.timer = timer
         self.rateIndex = Self.rateSteps.indices.contains(rateIndex) ? rateIndex : 1
-        self.retire = retire
+        self.release = retire
         self.now = now
         state = makeState()
+    }
+
+    /// This item will never be spoken again: let go of its spool file.
+    private func retire(_ item: SpeechItem) {
+        if let file = item.file { phoneHas.remove(file) }
+        release(item)
     }
 
     // -- commands ----------------------------------------------------------
 
     /// Wait your turn. A second turn from the same session replaces the first one
     /// still waiting in line — you want the latest answer, not a stale one.
+    /// `onPhone`: the phone's page has this turn too (`Phone.took`), so Away may let
+    /// go of it unread. What became of it goes in the log.
     /// Returns true only if this item is now actually being spoken.
     @discardableResult
-    func enqueue(_ item: SpeechItem) -> Bool {
+    func enqueue(_ item: SpeechItem, onPhone: Bool = false) -> Bool {
+        if onPhone, let file = item.file { phoneHas.insert(file) }
+        if away, !waitsWhileAway(item) { return false }
         if let i = queue.firstIndex(where: { $0.key == item.key }) {
             retire(queue[i])  // the stale turn is never spoken; let go of its file
             queue[i] = item   // keep its place in line; a chatty session shouldn't jump the queue
@@ -1878,7 +1890,13 @@ final class Playback {
         let wasIdle = current == nil && window == nil
         if wasIdle { advance() }
         publish()
-        return wasIdle && sound == .speaking
+        let speaking = wasIdle && sound == .speaking
+        if !away {   // away, waitsWhileAway has said what became of it
+            log(speaking ? "speaking \(item.source)"
+                : wasIdle && current?.file == item.file ? "holding \(item.source) — mic in use or paused"
+                : "queued \(item.source) — \(queue.count) waiting")
+        }
+        return speaking
     }
 
     /// Jump the queue: you highlighted that text and asked for it now. It becomes
@@ -2004,6 +2022,45 @@ final class Playback {
             proceed()
         }
         publish()
+    }
+
+    /// Away went on or off: nobody is at the Mac, and the phone has the turns. On: what's
+    /// being read stops, and it and everything waiting that the phone has is let go for
+    /// good; a reply window or the mic open for commands shuts. Until it goes off
+    /// nothing is read and no mic opens. Off: nothing let go comes back. What the phone
+    /// couldn't show, or was asked for by hand meanwhile, has waited and is read now.
+    func awayChanged(on: Bool) {
+        guard on != away else { return }
+        away = on
+        if on {
+            closeWindow("away")
+            silence()
+            resumeAt = 0   // the one being read, if it's kept, is read from the top
+            if let c = current, !waitsWhileAway(c) {
+                lastItem = c
+                current = nil
+            }
+            queue = queue.filter(waitsWhileAway)
+            putOff = putOff.filter(waitsWhileAway)
+            if current == nil { advance() }   // what waits is up next, shown but silent
+        } else {
+            log("away off")
+            proceed()
+        }
+        publish()
+    }
+
+    /// Away: whether `item` waits to be read. Not if the phone has it, nor if nothing on
+    /// disk backs it (it was asked for by hand, or has been read to its end already):
+    /// those are let go here. One the phone couldn't show has been seen nowhere, so it waits.
+    private func waitsWhileAway(_ item: SpeechItem) -> Bool {
+        if let file = item.file, !phoneHas.contains(file) {
+            log("away: \(item.source) waits to be read: the phone can't show it")
+            return true
+        }
+        log("away: \(item.source) not read" + (item.file == nil ? "" : ", the phone has it"))
+        retire(item)
+        return false
     }
 
     // -- from the voice ----------------------------------------------------
@@ -2302,10 +2359,10 @@ final class Playback {
     /// Make the mic match the policy, as drive() does the voice: open for commands
     /// while there's something to read and nothing else has the mic. A reply window has
     /// it to itself. Paused by a key or button it shuts (your hands are on it); paused
-    /// by voice it stays, for "go on".
+    /// by voice it stays, for "go on". Away it's shut: nothing is read to say them over.
     private func attend() {
         let reading = current != nil || !queue.isEmpty
-        let want = obeys && ear != nil && !earBroken && window == nil && !micBusy && reading
+        let want = obeys && ear != nil && !earBroken && window == nil && !micBusy && !away && reading
             && (!userPaused || pausedByVoice)
         if want, attending == nil {
             windowID += 1
@@ -2411,7 +2468,7 @@ final class Playback {
     // -- policy ------------------------------------------------------------
 
     private let later: (@escaping () -> Void) -> Void
-    private var canSound: Bool { !userPaused && !micBusy }
+    private var canSound: Bool { !userPaused && !micBusy && !away }
 
     /// Something that was holding us let go (or took hold): act on it.
     private func proceed() {
@@ -2501,9 +2558,12 @@ final class Playback {
             case .sending: s.status = "➤ Sending to \(w.item.source)… “clear that” stops it"
             }
         } else if !s.isActive {
-            s.status = stopped ? "■ Stopped" : !note.isEmpty ? note : (lastItem == nil ? "" : "Done")
+            s.status = away ? "📱 Away: turns go to your phone"
+                : stopped ? "■ Stopped" : !note.isEmpty ? note : (lastItem == nil ? "" : "Done")
         } else if userPaused {
             s.status = pausedByVoice && attending != nil ? "⏸ Paused: say “go on”" : "⏸ Paused"
+        } else if away {
+            s.status = "📱 Away: this is read when you're back"
         } else if micBusy {
             s.status = sound == .paused ? "🎙 Mic in use — paused" : "🎙 Mic in use — waiting"
         } else {
@@ -5265,16 +5325,19 @@ final class Phone {
     // -- turns in ----------------------------------------------------------
 
     /// A turn or question off the spool. Kept for the page either way; pushed when away.
-    func took(_ item: SpeechItem, now: Date = Date()) {
+    /// False when the page has nowhere to show it, so the phone doesn't have it.
+    @discardableResult
+    func took(_ item: SpeechItem, now: Date = Date()) -> Bool {
         let asking = item.key.hasSuffix(PhoneDesk.questionSuffix)
-        guard item.answerable || asking else { return }   // only Claude Code's turns have a terminal to answer in
+        guard item.answerable || asking else { return false }   // only Claude Code's turns have a terminal to answer in
         let first = desk.took(item, now: now)
-        guard away, first else { return }
+        guard away, first else { return true }
         let key = asking ? String(item.key.dropLast(PhoneDesk.questionSuffix.count)) : item.key
-        if asking, !firstAsk(key, now) { return }   // the screen already said so
+        if asking, !firstAsk(key, now) { return true }   // the screen already said so
         // What came with it is said in the title: the words are cut to length.
         let with = PhoneMedia.said(item.media).map { " (\($0))" } ?? ""
         push(title: (asking ? "\(item.source) is asking" : item.source) + with, message: item.text, key: key, name: item.source)
+        return true
     }
 
     /// `text` as a push's body: one line, cut to length.
@@ -5951,23 +6014,9 @@ final class Agent {
     private func drainSpool() {
         let batch = Spool.drain()
         for drop in batch.dropped { log("spool: dropped \(drop.name) — \(drop.reason)") }
-        for item in batch.items {
-            phone?.took(item)
-            if phone?.away == true {
-                // It went to the phone: nothing is read to an empty room, and no mic
-                // opens for a reply nobody is there to give.
-                Spool.done(item.file)
-                log("away: \(item.source) went to the phone")
-                continue
-            }
-            if hud.enqueue(item) {
-                log("speaking \(item.source)")
-            } else if hud.playback.current?.file == item.file {
-                log("holding \(item.source) — mic in use or paused")
-            } else {
-                log("queued \(item.source) — \(hud.queue.count) waiting")
-            }
-        }
+        // The phone keeps what it can show. Whether a turn is read, and what Away does
+        // with it, is Playback's to decide and to log.
+        for item in batch.items { hud.playback.enqueue(item, onPhone: phone?.took(item) ?? false) }
     }
 
     // -- phone -------------------------------------------------------------
@@ -6000,10 +6049,11 @@ final class Agent {
         awayChanged(phone.away)
     }
 
-    /// Away keeps the Mac from idling to sleep (the screen can still lock and dim):
-    /// a sleeping Mac answers nothing.
+    /// Away stops the reading and shuts the mic (Playback), and keeps the Mac from
+    /// idling to sleep (the screen can still lock and dim): a sleeping Mac answers nothing.
     var onAwayChange: () -> Void = {}
     private func awayChanged(_ on: Bool) {
+        hud.playback.awayChanged(on: on)
         if on, awakeGuard == nil {
             awakeGuard = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled,
                                                                reason: "away: answering from the phone")
