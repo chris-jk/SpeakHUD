@@ -2599,6 +2599,83 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
 }
 
 // ---------------------------------------------------------------------------
+// Dictation from the phone: the page records what you say and sends it here, and the
+// Mac's own transcriber turns it into words for the page's answer box. The sound goes
+// from your phone to your Mac and no further; it's deleted once it has been heard.
+// ---------------------------------------------------------------------------
+
+enum Dictation {
+    /// What the page sends: plain 16-bit sound in a WAV, which any Mac reads.
+    static let type = "audio/wav"
+    /// The least a recording can be and still be one: a WAV's 44-byte header and a
+    /// tenth of a second at the page's 16,000 samples a second.
+    static let least = 44 + 3_200
+
+    /// Whether `data` is a WAV by its own first bytes, whatever the request called it.
+    static func looksRight(_ data: Data) -> Bool {
+        data.count >= least && data.prefix(4) == Data("RIFF".utf8) && data.dropFirst(8).prefix(4) == Data("WAVE".utf8)
+    }
+
+    /// How long `data` runs, in seconds, by its header's own figures. 0 if they're missing.
+    static func seconds(_ data: Data) -> Double {
+        guard data.count >= 44 else { return 0 }
+        func number(_ at: Int, _ bytes: Int) -> Int {
+            (0..<bytes).reduce(0) { $0 | Int(data[data.startIndex + at + $1]) << (8 * $1) }
+        }
+        let perSecond = number(28, 4)
+        return perSecond > 0 ? Double(data.count - 44) / Double(perSecond) : 0
+    }
+
+    /// The transcriber a phone's recording is given to, or nil where there is none
+    /// (before macOS 26). `done` is called on the main thread.
+    static var transcriber: ((Data, @escaping (Result<String, Failure>) -> Void) -> Void)? {
+        guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else { return nil }
+        return { data, done in
+            Task {
+                let result: Result<String, Failure>
+                do { result = .success(try await words(in: data)) }
+                catch { result = .failure(Failure((error as? MicEar.Failure)?.why ?? error.localizedDescription)) }
+                await MainActor.run { done(result) }
+            }
+        }
+    }
+
+    struct Failure: Error, Equatable {
+        let why: String
+        init(_ why: String) { self.why = why }
+    }
+
+    /// The words said in a recording. It's written to a file of your own for the
+    /// transcriber to read, and the file goes as soon as it has been.
+    @available(macOS 26.0, *)
+    static func words(in data: Data) async throws -> String {
+        let path = NSTemporaryDirectory() + "speakhud-dictation-\(UUID().uuidString).wav"
+        guard FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw MicEar.Failure("the recording couldn't be kept long enough to hear it")
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let file: AVAudioFile
+        do { file = try AVAudioFile(forReading: URL(fileURLWithPath: path)) }
+        catch { throw MicEar.Failure("the recording isn't sound this Mac can read") }
+        let transcriber = await MicEar.transcriber()
+        try await MicEar.install(transcriber)
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        // Each result is one stretch of speech, guessed at and then final: the finals are it.
+        async let heard: String = {
+            var settled = ""
+            for try await result in transcriber.results where result.isFinal { settled += String(result.text.characters) }
+            return settled
+        }()
+        if let end = try await analyzer.analyzeSequence(from: file) {
+            try await analyzer.finalizeAndFinish(through: end)
+        } else {
+            await analyzer.cancelAndFinishNow()
+        }
+        return try await heard.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The ear: the mic, and the Mac's own transcriber turning what it hears into words
 // (SpeechAnalyzer, macOS 26). On-device: nothing said leaves the Mac. The model is the
 // system's; this app's first use registers it, and downloads it if the Mac lacks it.
@@ -2681,14 +2758,14 @@ final class MicEar: Ear, @unchecked Sendable {
         }
     }
 
-    private static func transcriber() async -> SpeechTranscriber {
+    static func transcriber() async -> SpeechTranscriber {
         let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
             ?? Locale(identifier: "en-US")
         // Progressive: words are reported as they're heard, and firmed up after.
         return SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
     }
 
-    private static func install(_ transcriber: SpeechTranscriber) async throws {
+    static func install(_ transcriber: SpeechTranscriber) async throws {
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             try await request.downloadAndInstall()
         }
@@ -4552,6 +4629,10 @@ struct PhoneDesk {
 enum HTTP {
     static let maxHead = 16 * 1024
     static let maxBody = 64 * 1024
+    /// A recording to be turned into words is the one body allowed to be bigger: three
+    /// minutes of what the page records (16-bit sound, 16,000 samples a second).
+    static let maxUpload = 6 * 1024 * 1024
+    static let uploads: Set<String> = ["/api/hear"]
 
     struct Request: Equatable {
         var method = "GET"
@@ -4604,7 +4685,8 @@ enum HTTP {
         guard r.headers["transfer-encoding"] == nil else { return .bad }   // nothing here sends chunks
         var length = 0
         if let raw = r.headers["content-length"] {
-            guard let n = Int(raw), (0...maxBody).contains(n) else { return .bad }
+            let most = r.method == "POST" && uploads.contains(r.path) ? maxUpload : maxBody
+            guard let n = Int(raw), (0...most).contains(n) else { return .bad }
             length = n
         }
         guard data.endIndex - gap.upperBound >= length else { return .incomplete }
@@ -4679,7 +4761,7 @@ enum HTTP {
 
         private static let reasons = [200: "OK", 206: "Partial Content", 303: "See Other", 400: "Bad Request",
                                       401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict",
-                                      416: "Range Not Satisfiable"]
+                                      416: "Range Not Satisfiable", 501: "Not Implemented", 503: "Service Unavailable"]
 
         /// The status line and headers. Every response says what it is, that nothing may
         /// frame it, that the page loads nothing from anywhere else, and (unless it says
@@ -4706,8 +4788,16 @@ enum HTTP {
 final class PhoneServer {
     private let listener: NWListener
     private let handle: (HTTP.Request) -> HTTP.Response
+    /// Asked first: a request it takes (true) is answered when it calls back, on the
+    /// main queue, however long that is. Turning a recording into words takes a moment.
+    var slow: ((HTTP.Request, @escaping (HTTP.Response) -> Void) -> Bool)?
     /// The port it's on, once it is (0 asks for any free one; tests do).
     private(set) var port: UInt16?
+    /// How long a request may take to arrive; one still arriving that is already bigger
+    /// than any ordinary request (a recording) gets this long again from each piece,
+    /// up to `longest` in all. And how long a slow answer may take.
+    static let patience: TimeInterval = 10
+    static let longest: TimeInterval = 120
 
     init(port: UInt16, handle: @escaping (HTTP.Request) -> HTTP.Response) throws {
         let params = NWParameters.tcp
@@ -4734,8 +4824,14 @@ final class PhoneServer {
     private func serve(_ connection: NWConnection) {
         var buffer = Data()
         // A connection that never finishes its request doesn't get to sit there.
-        let giveUp = DispatchWorkItem { connection.cancel() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: giveUp)
+        var giveUp = DispatchWorkItem { connection.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.patience, execute: giveUp)
+        let began = Date()
+        func wait(_ seconds: TimeInterval) {
+            giveUp.cancel()
+            giveUp = DispatchWorkItem { connection.cancel() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: giveUp)
+        }
         func answer(_ response: HTTP.Response) {
             if let slice = response.file {
                 giveUp.cancel()
@@ -4751,10 +4847,25 @@ final class PhoneServer {
                 guard let self = self else { return connection.cancel() }
                 if let data = data { buffer.append(data) }
                 switch HTTP.parse(buffer) {
-                case .request(let r): answer(self.handle(r))
+                case .request(let r):
+                    var answered = false
+                    let later: (HTTP.Response) -> Void = { response in
+                        guard !answered else { return }
+                        answered = true
+                        answer(response)
+                    }
+                    if let slow = self.slow, slow(r, later) {
+                        // Its answer is on its way: the connection waits for that, not for more of a request.
+                        if !answered { wait(Self.longest) }
+                    } else {
+                        answer(self.handle(r))
+                    }
                 case .bad: answer(.json(["error": "bad request"], status: 400))
                 case .incomplete:
-                    if done || error != nil { giveUp.cancel(); connection.cancel() } else { read() }
+                    if done || error != nil { giveUp.cancel(); connection.cancel(); return }
+                    let left = Self.longest - Date().timeIntervalSince(began)
+                    if buffer.count > HTTP.maxBody, left > 0 { wait(min(Self.patience, left)) }
+                    read()
                 }
             }
         }
@@ -4810,7 +4921,8 @@ final class Phone {
     static let pushLength = 300
     static let assets = ["/": ("index.html", "text/html; charset=utf-8"),
                          "/app.css": ("app.css", "text/css; charset=utf-8"),
-                         "/app.js": ("app.js", "text/javascript; charset=utf-8")]
+                         "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                         "/mic.js": ("mic.js", "text/javascript; charset=utf-8")]
 
     /// How often, at most, iTerm2 is asked what its panes are showing: while a page is
     /// polling, or while you're away and a box coming up needs a push.
@@ -4872,6 +4984,9 @@ final class Phone {
         }
         defaults.set(kept, forKey: Self.quickKey)
     }
+    /// Turns a recording from the page into words, where this Mac can. Tests answer for it.
+    var hear: ((Data, @escaping (Result<String, Dictation.Failure>) -> Void) -> Void)? = Dictation.transcriber
+    private var hearing = false
     /// Keeps the list for the next run of the agent. `saved` is what the last one kept.
     var save: (Data) -> Void = { _ in }
     var log: (String) -> Void = { _ in }
@@ -4996,6 +5111,7 @@ final class Phone {
     func state(now: Date = Date()) -> [String: Any] {
         ["away": away,
          "quick": quick,
+         "canHear": hear != nil,   // whether a recording sent here comes back as words
          "turns": desk.turns.map { t -> [String: Any] in
             ["key": t.key, "name": t.name, "text": t.text,
              "at": ((t.askedAt.map { max($0, t.at) } ?? t.at).timeIntervalSince1970).rounded(),
@@ -5031,6 +5147,43 @@ final class Phone {
             return HTTP.Response(type: small.type, headers: [("Cache-Control", "private, max-age=3600")], body: small.data)
         }
         return .file(file.path, size: file.size, type: file.type, range: range)
+    }
+
+    /// The one request whose answer takes a while: a recording of what you said, to be
+    /// turned into words for the page's answer box. False for any other request, which
+    /// `respond` answers at once. The words are never logged, only how many.
+    func respondLater(to r: HTTP.Request, done: @escaping (HTTP.Response) -> Void) -> Bool {
+        guard r.method == "POST", r.path == "/api/hear" else { return false }
+        guard paired(r) else { done(.json(["error": "not paired"], status: 401)); return true }
+        guard r.headers["x-speakhud"] == "1" else { done(.json(["error": "not found"], status: 404)); return true }
+        guard let hear = hear else {
+            done(.json(["error": "this Mac can't turn speech into words (it needs macOS 26)"], status: 501))
+            return true
+        }
+        guard r.headers["content-type"]?.lowercased().hasPrefix(Dictation.type) == true, Dictation.looksRight(r.body) else {
+            done(.json(["error": "that isn't a recording"], status: 400))
+            return true
+        }
+        guard !hearing else {
+            done(.json(["error": "the Mac is still hearing the last one"], status: 409))
+            return true
+        }
+        hearing = true
+        let began = Date(), length = Dictation.seconds(r.body)
+        hear(r.body) { [weak self] result in
+            self?.hearing = false
+            let took = String(format: "%.1f", Date().timeIntervalSince(began))
+            switch result {
+            case .success(let text):
+                let words = text.split(whereSeparator: { $0.isWhitespace }).count
+                self?.log("phone dictated \(words) word\(words == 1 ? "" : "s") (\(String(format: "%.1f", length)) s of sound, heard in \(took) s)")
+                done(.json(["text": text]))
+            case .failure(let failure):
+                self?.log("phone dictation failed after \(took) s: \(failure.why)")
+                done(.json(["error": failure.why], status: 503))
+            }
+        }
+        return true
     }
 
     func respond(to r: HTTP.Request) -> HTTP.Response {
@@ -5098,6 +5251,14 @@ final class Phone {
                 }
             }
             log("phone reading: " + said.joined(separator: ", "))
+            return .json(["ok": true])
+        case "/api/mic":
+            // A dictation that never reached the Mac, for the log: the name of what went
+            // wrong on the phone (its browser's own word for it), and nothing else.
+            guard let why = body["why"] as? String, why.range(of: #"^[A-Za-z]{1,40}$"#, options: .regularExpression) != nil else {
+                return .json(["error": "why?"], status: 400)
+            }
+            log("phone dictation didn't start: \(why)")
             return .json(["ok": true])
         case "/api/quick":
             guard let list = body["list"] as? [String] else { return .json(["error": "list must be a list of answers"], status: 400) }
@@ -5480,6 +5641,7 @@ final class Agent {
         phone.onAwayChange = { [weak self] in self?.awayChanged($0) }
         do {
             let server = try PhoneServer(port: config.port) { phone.respond(to: $0) }
+            server.slow = { phone.respondLater(to: $0, done: $1) }
             server.start { [weak self] in self?.log("phone: the page stopped — \($0)") }
             phoneServer = server
             log("phone: page on 127.0.0.1:\(config.port)" + (config.url == nil ? " (no url in phone.json: pushes won't link to it)" : ""))

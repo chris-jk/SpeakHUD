@@ -106,4 +106,36 @@ let earSuite = Suite("Ear") { t in
     t.expect(again.failure == nil, "…and opened a second time (\(again.failure ?? "no failure"))")
     t.expect(again.sent.isEmpty, "a command isn't sent to Claude")
     t.expectEqual(again.voice, [.speak("the turn", from: 0, rate: Playback.rateSteps[1])], "it's done: the turn is read again")
+
+    // Dictation from the phone: a recording as the page sends one (a WAV, 16-bit, one
+    // channel, 16,000 samples a second), through the real transcriber, comes back as words.
+    do {
+        var heard: Result<String, Dictation.Failure>?
+        let wav = dir + "/dictated.wav"
+        if let spoken = recording(of: "Yes, go ahead and merge it, then tell me what failed.", in: dir, "dictated") {
+            let convert = Process()
+            convert.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+            convert.arguments = ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", spoken, wav]
+            try? convert.run()
+            convert.waitUntilExit()
+        }
+        let sound = fm.contents(atPath: wav) ?? Data()
+        t.expect(Dictation.looksRight(sound) && (2...8).contains(Dictation.seconds(sound)),
+                 "the test recording is a WAV a few seconds long (\(sound.count) bytes, \(Dictation.seconds(sound)) s)")
+        if let transcriber = Dictation.transcriber {
+            transcriber(sound) { heard = $0 }
+            spin(40) { heard != nil }
+        }
+        var said = ""
+        if case .success(let text)? = heard { said = text }
+        t.expectEqual(SpokenCommand.words(said), "yes go ahead and merge it then tell me what failed",
+                      "a recording from the phone comes back as the words said (\(String(describing: heard)))")
+        t.expect(((try? fm.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? []).allSatisfy { !$0.hasPrefix("speakhud-dictation-") },
+                 "and the recording isn't kept once it has been heard")
+        var refused: Result<String, Dictation.Failure>?
+        Dictation.transcriber?(Data("RIFF....WAVEnot really a recording at all".utf8) + Data(count: 4_000)) { refused = $0 }
+        spin(20) { refused != nil }
+        if case .failure? = refused { t.expect(true, "sound that isn't sound is refused, not heard as nothing") }
+        else { t.expect(false, "sound that isn't sound is refused (\(String(describing: refused)))") }
+    }
 }

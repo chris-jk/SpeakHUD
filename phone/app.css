@@ -566,6 +566,32 @@ main { margin-top: 14px; }
   outline: none;
   border-color: var(--frame);
 }
+/* Say it instead of typing it. Red while it listens, with a ring that swells as you talk. */
+.win-answer .win-mic {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  background: var(--win);
+  color: var(--ink);
+  transition: box-shadow 0.15s;
+}
+.win-answer .win-mic.is-listening {
+  border-color: var(--alarm);
+  background: var(--alarm);
+  color: var(--win);
+  box-shadow: 0 0 0 calc(3px + var(--level, 0) * 9px) color-mix(in srgb, var(--alarm) 30%, transparent);
+}
+.win-answer .win-mic.is-working { opacity: 0.55; }
+.win-mic-says {
+  margin: 8px 0 0;
+  color: var(--quiet);
+  font-size: 0.875rem;
+}
+
 .win-answer button {
   flex: none;
   min-width: 68px;

@@ -57,6 +57,9 @@ private final class Bench {
     var running: Set<String> = []
     var reopened: [String] = []
     var saves = 0
+    var heardSizes: [Int] = []       // each recording the page sent to be turned into words
+    var hearAnswer: Result<String, Dictation.Failure>? = .success("Yes, go ahead.")   // nil: still hearing it
+    var hearDone: ((Result<String, Dictation.Failure>) -> Void)?
     var screen: String? = "some output\n────────────────\n❯ \n────────────────\n  status"
 
     init(url: String? = "https://my-mac.example.ts.net", ntfy: String? = "https://push.example.com/terminals") {
@@ -77,6 +80,10 @@ private final class Bench {
         phone.runningIDs = { [unowned self] in self.running }
         phone.reopen = { [unowned self] session in self.reopened.append(session.id + " in " + session.cwd); return self.outcome }
         phone.save = { [unowned self] _ in self.saves += 1 }
+        phone.hear = { [unowned self] data, done in
+            self.heardSizes.append(data.count)
+            if let answer = self.hearAnswer { done(answer) } else { self.hearDone = done }
+        }
         phone.transport = { [unowned self] request, done in self.pushes.append(request); done(nil) }
         phone.asset = { fm.contents(atPath: "phone/" + $0) }
         phone.log = { [unowned self] in self.logs.append($0) }
@@ -732,6 +739,82 @@ let phoneSuite = Suite("Phone") { t in
     t.expectEqual(pushed["title"] as? String ?? "", "Grow guide replies (1 video)", "away, the push says something came with the turn")
     m.phone.setAway(false)
 
+    // -- dictation: a recording from the page comes back as words -------------
+    /// A WAV as the page makes one: 44 bytes of header, then `seconds` of 16-bit sound.
+    func recording(_ seconds: Double) -> Data {
+        let sound = Data(count: Int(seconds * 16_000) * 2)
+        var head = Data("RIFF".utf8)
+        func put(_ n: Int, _ bytes: Int) { for i in 0..<bytes { head.append(UInt8((n >> (8 * i)) & 0xff)) } }
+        put(36 + sound.count, 4)
+        head.append(Data("WAVEfmt ".utf8))
+        put(16, 4); put(1, 2); put(1, 2); put(16_000, 4); put(32_000, 4); put(2, 2); put(16, 2)
+        head.append(Data("data".utf8))
+        put(sound.count, 4)
+        return head + sound
+    }
+    func said(_ body: Data, type: String? = "audio/wav", header: Bool = true, paired: Bool = true, to phone: Phone) -> HTTP.Response? {
+        var headers: [String: String] = paired ? ["cookie": "\(Phone.cookie)=\(token)"] : [:]
+        if let type = type { headers["content-type"] = type }
+        if header { headers["x-speakhud"] = "1" }
+        var answer: HTTP.Response?
+        let taken = phone.respondLater(to: HTTP.Request(method: "POST", path: "/api/hear", headers: headers, body: body)) { answer = $0 }
+        return taken ? answer : HTTP.Response(status: -1)
+    }
+    let twoSeconds = recording(2)
+    t.expect(Dictation.looksRight(twoSeconds) && Dictation.seconds(twoSeconds) == 2 && !Dictation.looksRight(Data(count: 9_000))
+             && !Dictation.looksRight(recording(0.05)), "a recording is told by its own first bytes, and by being long enough to hold a word")
+    let h = Bench()
+    h.phone.took(turn("a", "Want me to merge it?"))
+    t.expect(h.phone.state()["canHear"] as? Bool == true, "the page is told this Mac can turn a recording into words")
+    var never: HTTP.Response?
+    t.expect(!h.phone.respondLater(to: get("/api/state")) { never = $0 } && never == nil
+             && !h.phone.respondLater(to: post("/api/reply", ["key": "a", "text": "x"])) { never = $0 } && never == nil,
+             "every other request is answered at once, the usual way")
+    t.expect(said(twoSeconds, paired: false, to: h.phone)?.status == 401 && said(twoSeconds, header: false, to: h.phone)?.status == 404
+             && h.heardSizes.isEmpty, "an unpaired phone, or another site's page, is never heard")
+    t.expect(said(twoSeconds, type: "application/json", to: h.phone)?.status == 400 && said(Data(count: 9_000), to: h.phone)?.status == 400
+             && said(recording(0.05), to: h.phone)?.status == 400 && h.heardSizes.isEmpty, "what isn't a recording isn't given to the transcriber")
+    let words = said(twoSeconds, to: h.phone)
+    t.expect(words?.status == 200 && json(words ?? HTTP.Response())["text"] as? String == "Yes, go ahead." && h.heardSizes == [twoSeconds.count],
+             "a recording comes back as its words")
+    t.expect(h.logs.contains { $0.hasPrefix("phone dictated 3 words (2.0 s of sound, heard in ") } && !h.logs.contains { $0.contains("go ahead") },
+             "the log says how much was said, never what")
+    h.hearAnswer = nil
+    let waiting = said(twoSeconds, to: h.phone)
+    t.expect(waiting == nil && h.hearDone != nil, "while the Mac is hearing it, the page's request waits")
+    t.expectEqual(said(twoSeconds, to: h.phone)?.status ?? 0, 409, "and a second recording meanwhile is turned away")
+    var late: HTTP.Response?
+    _ = h.phone.respondLater(to: HTTP.Request(method: "GET", path: "/nothing")) { late = $0 }
+    h.hearDone?(.failure(Dictation.Failure("the speech model couldn't be readied")))
+    h.hearAnswer = .success("")
+    let nothing = said(twoSeconds, to: h.phone)
+    t.expect(late == nil && nothing?.status == 200 && json(nothing ?? HTTP.Response())["text"] as? String == "",
+             "once it has answered, the next is heard; a recording with no words in it comes back empty, not as an error")
+    t.expect(h.logs.contains("phone dictation failed after 0.0 s: the speech model couldn't be readied")
+             || h.logs.contains { $0.hasPrefix("phone dictation failed after ") && $0.hasSuffix(": the speech model couldn't be readied") },
+             "a failure is logged with its reason")
+    let deaf = Bench()
+    deaf.phone.hear = nil
+    t.expect(deaf.phone.state()["canHear"] as? Bool == false && said(twoSeconds, to: deaf.phone)?.status == 501,
+             "a Mac with no transcriber says so, and its page shows no mic")
+    let micScript = h.phone.respond(to: get("/mic.js"))
+    t.expect(micScript.status == 200 && micScript.type.hasPrefix("text/javascript") && String(decoding: micScript.body, as: UTF8.self).contains("registerProcessor"),
+             "the page's microphone script is served with the page")
+
+    t.expect(h.phone.respond(to: post("/api/mic", ["why": "NotAllowedError"])).status == 200
+             && h.logs.contains("phone dictation didn't start: NotAllowedError")
+             && h.phone.respond(to: post("/api/mic", ["why": "said: my password is 1234"])).status == 400
+             && !h.logs.contains { $0.contains("password") },
+             "a microphone that wouldn't start on the phone is logged by its error's name, and nothing else gets in")
+
+    func announced(_ path: String, bytes: Int, method: String = "POST") -> HTTP.Parsed {
+        HTTP.parse(Data("\(method) \(path) HTTP/1.1\r\nContent-Length: \(bytes)\r\n\r\n".utf8))
+    }
+    t.expect(announced("/api/hear", bytes: HTTP.maxBody + 1) == .incomplete && announced("/api/hear", bytes: HTTP.maxUpload) == .incomplete,
+             "a recording may be far bigger than any other request")
+    t.expect(announced("/api/hear", bytes: HTTP.maxUpload + 1) == .bad && announced("/api/reply", bytes: HTTP.maxBody + 1) == .bad
+             && announced("/api/hear", bytes: HTTP.maxBody + 1, method: "PUT") == .bad, "but only so big, and only there")
+
     // -- through the real server, on this Mac's loopback --------------------
     guard let server = try? PhoneServer(port: 0, handle: { b.phone.respond(to: $0) }) else {
         t.expect(false, "the server can listen on a free loopback port")
@@ -797,4 +880,41 @@ let phoneSuite = Suite("Phone") { t in
     t.expectEqual(download("bytes=-5")?.data ?? Data(), clip.suffix(5), "down to its last few bytes")
     try? fm.removeItem(atPath: shots + "/clip one.mp4")
     t.expectEqual(download(nil)?.status ?? 0, 404, "a file gone by the time it's asked for: nothing")
+
+    // A recording through the real server: far bigger than an ordinary request, and
+    // answered only when the transcriber (a stand-in here) has had its say, a moment later.
+    server.slow = { b.phone.respondLater(to: $0, done: $1) }
+    let minute = recording(60)
+    b.hearAnswer = nil
+    func dictate(_ body: Data, cookie: Bool = true) -> (status: Int, body: String)? {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/hear")!)
+        request.httpMethod = "POST"
+        request.httpShouldHandleCookies = false
+        request.timeoutInterval = 15
+        if cookie { request.setValue("\(Phone.cookie)=\(token)", forHTTPHeaderField: "Cookie") }
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-SpeakHUD")
+        request.httpBody = body
+        var got: (Int, String)?
+        var finished = false
+        URLSession(configuration: .ephemeral).dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse { got = (http.statusCode, String(decoding: data ?? Data(), as: UTF8.self)) }
+            finished = true
+        }.resume()
+        // The stand-in transcriber answers half a second after the recording has arrived.
+        var answered = false
+        spin(14) {
+            if let done = b.hearDone, !answered {
+                answered = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { done(.success("Run the tests again.")) }
+            }
+            return finished
+        }
+        return got.map { (status: $0.0, body: $0.1) }
+    }
+    t.expect(minute.count > 20 * HTTP.maxBody, "the test recording is a minute long, thirty times an ordinary request's limit")
+    let dictated = dictate(minute)
+    t.expect(dictated?.status == 200 && dictated?.body.contains("Run the tests again.") == true && b.heardSizes.last == minute.count,
+             "over a real connection a minute's recording arrives whole, and its words come back when they're ready")
+    t.expectEqual(dictate(minute, cookie: false)?.status ?? 0, 401, "an unpaired phone's recording is turned away")
 }

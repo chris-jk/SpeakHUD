@@ -214,6 +214,12 @@ What's on the page:
   buttons, where your thumb is, for as long as its terminal is at work. Under the bar
   at the top is the terminal's own status line, which is where your model and context
   figure show if your status line has them.
+- **Say it instead of typing it.** A mic button by each answer box. Tap it and talk:
+  it stops by itself two seconds after you do (or tap it again), and what you said
+  lands in the box as words, after anything already there, for you to read over and
+  send. The phone only records; your Mac's own transcriber turns the recording into
+  words, so the sound goes from your phone to your Mac and no further. See
+  [Dictation from the phone](#dictation-from-the-phone).
 - **What the turn made.** Pictures, video and sound a turn made or named show under it:
   a picture as a lighter copy (tap it for the real one), a video or a recording to play
   right there, a PDF as its name to open. They come straight from the Mac over your
@@ -270,6 +276,27 @@ launchctl kickstart -k gui/$(id -u)/com.chris.speakhud.agent
 Settings live in `~/.config/speakhud/phone.json` (yours alone, mode 600). Delete it and
 restart the agent to turn the page off; `tailscale serve --https=443 off` stops the
 tailnet carrying it.
+
+### Dictation from the phone
+
+The page records through the phone's microphone as plain sound (16-bit, one channel,
+16,000 samples a second, about two megabytes a minute), and when you stop it sends the
+recording to the Mac. The Mac writes it to a temporary file of your own, has the same
+on-device transcriber Listen After Reading uses turn it into words (macOS 26; a few
+seconds of speech takes a fraction of a second), deletes the file, and answers with the
+words. Nothing is sent anywhere else, and the agent's log says how many words were
+heard and how long it took, never what they were.
+
+- It stops two seconds after you go quiet, eight seconds in if nothing was said at
+  all, and at two minutes whatever happens. A tap on the mic stops it at once.
+- The words are never sent for you: they go in the box, and Send is yours to tap.
+- While it listens the phone's own reading is paused, and the other windows' mics are
+  out of reach: one dictation at a time.
+- The button shows only where it can work: the page has to be open over `https` (a
+  phone won't give a plain `http` page its microphone), the browser has to allow the
+  microphone for the site (it asks the first time), and the Mac has to have the
+  transcriber. A microphone that won't start says why on the page and in the Mac's log.
+- It hears the language your Mac is set to.
 
 ### What the turn made
 
@@ -470,7 +497,7 @@ instead. You lose the queue in that mode, so simultaneous turns can talk over ea
   spool watcher, menu bar), and `--set-hotkey`.
 - `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn, or
   speaks it directly when the agent isn't running.
-- `phone/` — the phone page (`index.html`, `app.css`, `app.js`), copied into the app's
+- `phone/` — the phone page (`index.html`, `app.css`, `app.js`, and `mic.js`, its microphone), copied into the app's
   resources by `build.sh` and served by `Phone` in `speak-hud.swift`.
 - `make-icon.swift` — build-time tool that renders `AppIcon.icns`; not part of the app.
 - `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.

@@ -33,7 +33,7 @@
     window.addEventListener(kind, () => { touched = Date.now(); }, { passive: true });
   }
   const typing = () => !!document.activeElement && document.activeElement.tagName === 'TEXTAREA';
-  const settled = () => !typing() && !reading && Date.now() - touched > SETTLE_MS;
+  const settled = () => !typing() && !reading && !hearing && Date.now() - touched > SETTLE_MS;
   // The word being read is marked by a soft block that sits behind the text and glides
   // from word to word, which the browser's own text highlights can't do: those jump.
   const canMark = true;
@@ -458,6 +458,7 @@
       quick = state.quick;
       drawQuickList();
     }
+    canHear = !!state.canHear;
     // Decided before anything new starts being read: a turn that has just arrived
     // comes to the top and is read there, and then the page holds still.
     const still = settled();
@@ -476,6 +477,7 @@
     goToHash();
     loaded = true;
     mark();
+    drawMics();
   }
 
   function build(turn) {
@@ -485,7 +487,11 @@
     const more = el.querySelector('.win-more');
     const form = el.querySelector('.win-answer');
     const box = form.querySelector('textarea');
-    const send = form.querySelector('button');
+    const send = form.querySelector('button[type="submit"]');
+    form.querySelector('.win-mic').addEventListener('click', () => {
+      if (hearing && hearing.key === turn.key) finish(hearing);   // done talking: off to the Mac
+      else if (!hearing) listen(turn.key);
+    });
     const screen = el.querySelector('.win-screen');
 
     more.addEventListener('click', () => {
@@ -719,7 +725,7 @@
     sent.textContent = turn.sent ? 'You sent: ' + turn.sent
       : idle ? 'No finished turn from this terminal yet. Its screen shows where it is.' : '';
     sent.hidden = !turn.sent && !idle;
-    const sendButton = el.querySelector('.win-answer button');
+    const sendButton = el.querySelector('.win-answer button[type="submit"]');
     if (!sendButton.disabled) sendButton.textContent = turn.busy ? 'Queue' : 'Send';
 
     const form = el.querySelector('.win-answer');
@@ -901,6 +907,194 @@
       mark();
     }, true);
   }
+
+  // -- dictation --------------------------------------------------------------
+  // The mic by an answer box: say it instead of typing it. The phone records what you
+  // say, the Mac turns the recording into words with its own transcriber (the sound goes
+  // from this phone to your Mac and no further), and the words land in the box for you
+  // to read over and send. It stops by itself when you stop talking.
+  const HEARD_RATE = 16000;      // what the Mac is sent: one channel, 16-bit
+  const LOUD = 0.02;             // a stretch this loud is someone talking
+  const QUIET_MS = 2000;         // this long quiet once you've spoken: you're done
+  const NOTHING_MS = 8000;       // this long with nothing said: stop, and let the Mac say so
+  const LONGEST_MS = 120000;
+  const AudioContextKind = window.AudioContext || window.webkitAudioContext;
+  const canDictate = !!(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+    && AudioContextKind && window.AudioWorkletNode);
+  let canHear = false;           // the Mac can turn a recording into words
+  let hearing = null;            // the one dictation going: { key, blocks, spoke, began, last, level, ... }
+
+  function micSays(key, words) {
+    const w = shown.get(key);
+    if (!w) return;
+    const line = w.el.querySelector('.win-mic-says');
+    line.textContent = words;
+    line.hidden = !words;
+  }
+
+  // Every window's mic: there if this phone can record and the Mac can hear, red while
+  // it's listening to you, and out of reach while another window's is.
+  function drawMics() {
+    for (const [key, w] of shown) {
+      const mic = w.el.querySelector('.win-mic');
+      const mine = !!hearing && hearing.key === key;
+      mic.hidden = !(canDictate && canHear);
+      mic.classList.toggle('is-listening', mine && !hearing.ending);
+      mic.classList.toggle('is-working', mine && !!hearing.ending);
+      mic.disabled = !!hearing && (!mine || !!hearing.ending);
+      mic.setAttribute('aria-label', mine && !hearing.ending ? 'Stop: I have said it' : 'Dictate');
+      if (!mine) mic.style.removeProperty('--level');
+    }
+  }
+
+  // Let go of the phone's microphone.
+  function letGo(session) {
+    clearInterval(session.timer);
+    if (session.stream) for (const track of session.stream.getTracks()) track.stop();
+    if (session.context) session.context.close().catch(() => {});
+    session.stream = session.context = null;
+  }
+
+  async function listen(key) {
+    if (hearing || !shown.has(key)) return;
+    const session = hearing = { key, blocks: [], spoke: false, level: 0, began: Date.now(), last: Date.now() };
+    pause();   // the phone's own voice would be heard as you
+    micSays(key, 'Getting the microphone');
+    drawMics();
+    try {
+      // Made and started inside the tap itself: a phone lets a page's sound run only
+      // from something you did, and by the time the microphone answers that moment has passed.
+      session.context = new AudioContextKind();
+      session.context.resume().catch(() => {});
+      session.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      await session.context.audioWorklet.addModule('/mic.js');
+      if (session.context.state !== 'running') await session.context.resume();
+      session.rate = session.context.sampleRate;
+      const node = new AudioWorkletNode(session.context, 'mic');
+      node.port.onmessage = (e) => {
+        if (hearing !== session || session.ending) return;
+        const block = e.data;
+        session.blocks.push(block);
+        let sum = 0;
+        for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
+        session.level = Math.sqrt(sum / block.length);
+        if (session.level > LOUD) { session.spoke = true; session.last = Date.now(); }
+      };
+      session.context.createMediaStreamSource(session.stream).connect(node);
+      node.connect(session.context.destination);   // it plays nothing; a node that leads nowhere may not run
+      session.began = session.last = Date.now();
+      session.timer = setInterval(() => {
+        if (hearing !== session || session.ending) return;
+        const w = shown.get(key);
+        if (!w) return finish(session);   // its terminal closed under you
+        w.el.querySelector('.win-mic').style.setProperty('--level', String(Math.min(1, session.level * 10)));
+        const now = Date.now();
+        const quiet = session.spoke ? now - session.last > QUIET_MS : now - session.began > NOTHING_MS;
+        if (quiet || now - session.began > LONGEST_MS) finish(session);
+      }, 150);
+      micSays(key, 'Listening. It stops when you do, or tap the mic.');
+    } catch (e) {
+      letGo(session);
+      hearing = null;
+      drawMics();
+      const why = (e && e.name) || 'Error';
+      micSays(key, why === 'NotAllowedError' || why === 'SecurityError'
+        ? "This phone won't let the page use its microphone. Allow the microphone for this site in the browser's settings."
+        : "The microphone wouldn't start (" + why + ').');
+      missed(why);
+    }
+  }
+
+  // A dictation that never got as far as the Mac, said to its log by name: nothing on
+  // the Mac can see why a phone's microphone didn't start.
+  function missed(why) { call('/api/mic', { why }).catch(() => {}); }
+
+  // Everything heard, as one run of samples at the rate the Mac is sent: each sample
+  // out is the average of the ones it stands for.
+  function gather(blocks, from) {
+    let total = 0;
+    for (const block of blocks) total += block.length;
+    const all = new Float32Array(total);
+    let at = 0;
+    for (const block of blocks) { all.set(block, at); at += block.length; }
+    if (!from || from === HEARD_RATE) return all;
+    const step = from / HEARD_RATE;
+    const out = new Float32Array(Math.floor(total / step));
+    for (let i = 0; i < out.length; i++) {
+      const start = Math.floor(i * step);
+      const end = Math.max(start + 1, Math.min(total, Math.floor((i + 1) * step)));
+      let sum = 0;
+      for (let j = start; j < end; j++) sum += all[j];
+      out[i] = sum / (end - start);
+    }
+    return out;
+  }
+
+  // Samples as a WAV file: the 44 bytes that say what follows, then 16-bit sound.
+  function wav(samples) {
+    const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    const tag = (at, word) => { for (let i = 0; i < 4; i++) view.setUint8(at + i, word.charCodeAt(i)); };
+    tag(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); tag(8, 'WAVE');
+    tag(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, HEARD_RATE, true); view.setUint32(28, HEARD_RATE * 2, true);
+    view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    tag(36, 'data'); view.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return view.buffer;
+  }
+
+  // You've said it: the microphone goes off at once, the recording goes to the Mac, and
+  // its words go on the end of whatever is in the box.
+  async function finish(session) {
+    if (hearing !== session || session.ending) return;
+    session.ending = true;
+    const key = session.key;
+    const rate = session.rate;
+    letGo(session);
+    drawMics();
+    const samples = gather(session.blocks, rate);
+    session.blocks = [];
+    if (samples.length < HEARD_RATE / 5) {
+      hearing = null;
+      drawMics();
+      missed('NothingRecorded');
+      return micSays(key, 'Nothing was recorded. Tap the mic and say it again.');
+    }
+    micSays(key, 'Turning it into words');
+    try {
+      const res = await fetch('/api/hear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/wav', 'X-SpeakHUD': '1' },
+        body: wav(samples),
+      });
+      let data = {};
+      try { data = await res.json(); } catch (e) { /* not JSON: the status says enough */ }
+      const w = shown.get(key);
+      if (res.ok && data.text && w) {
+        const box = w.el.querySelector('.win-answer textarea');
+        box.value = (box.value.trim() ? box.value.replace(/\s+$/, '') + ' ' : '') + data.text;
+        box.dispatchEvent(new Event('input'));   // the box grows to fit
+        micSays(key, '');
+      } else if (res.ok) {
+        micSays(key, "Didn't catch any words. Tap the mic and say it again.");
+      } else {
+        micSays(key, 'Not heard: ' + (data.error || 'the Mac did not say why') + '.');
+      }
+    } catch (e) {
+      micSays(key, "Not heard: can't reach the Mac.");
+    } finally {
+      hearing = null;
+      drawMics();
+    }
+  }
+
+  // A page you've left can't keep the microphone: send what it has.
+  document.addEventListener('visibilitychange', () => { if (document.hidden && hearing) finish(hearing); });
 
   // -- quick answers, kept on the Mac ---------------------------------------
   const quickList = document.getElementById('quick-list');
