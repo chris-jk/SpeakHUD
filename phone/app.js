@@ -1008,6 +1008,15 @@
     return [model, 'context ' + turn.context + '%'].concat(rest).filter(Boolean).join(' · ');
   }
 
+  // A turn's question as a string, to tell when it has changed: `stands` is all of it
+  // as the Mac read it, `looks` only what the page draws of it. Where a box's cursor
+  // sits and its key hints aren't drawn, and they change while you type your own answer
+  // into the box's field: a redraw for those would empty the field under your thumbs.
+  const stands = (turn) => (turn.box ? JSON.stringify(turn.box) : (turn.question || ''));
+  const looks = (turn) => (turn.box
+    ? JSON.stringify([turn.box.ask, turn.box.tabs, (turn.box.rows || []).map((row) => [row.label, row.detail, row.number, row.checked, row.types])])
+    : (turn.question || ''));
+
   function update(turn) {
     const w = shown.get(turn.key) || build(turn);
     const el = w.el;
@@ -1063,7 +1072,7 @@
     const asks = el.querySelector('.win-asks');
     const box = turn.box;
     const asking = !!(box || turn.question);
-    const drawn = box ? JSON.stringify(box) : (turn.question || '');
+    const drawn = looks(turn);
     if (w.question !== drawn) {
       w.question = drawn;
       const options = el.querySelector('.win-options');
@@ -1221,7 +1230,7 @@
         pre.scrollLeft = 0;
         // The Mac has just read its box afresh: redraw if it isn't what's showing here.
         const now = data.state && data.state.turns.find((t) => t.key === key);
-        if (now && (now.box ? JSON.stringify(now.box) : (now.question || '')) !== w.question) show(data.state);
+        if (now && stands(now) !== stands(w.turn)) show(data.state);
       } else if (!quiet) {
         pre.textContent = data.error || "Can't read its screen.";
       }

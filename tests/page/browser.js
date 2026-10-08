@@ -55,7 +55,13 @@ function makeWorld(opts = {}) {
     clear: (id) => { timers.delete(id); },
   };
   // Let everything already under way (promises, the fake Mac's answers) run to rest.
-  async function settle() { for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r)); }
+  let flying = 0;   // requests the Mac has yet to answer (not the ones held on the line)
+  async function settle() {
+    for (let turns = 0; turns < 3 || flying > 0; turns++) {
+      if (turns > 500) throw new Error('the page never stops asking the Mac');
+      await new Promise((r) => setImmediate(r));
+    }
+  }
   // Move the clock on by `ms`, running each timer at the moment it falls due.
   async function advance(ms) {
     const end = t + ms;
@@ -325,8 +331,11 @@ function makeWorld(opts = {}) {
     const p = String(url).split(/[?#]/)[0];
     const req = { url: String(url), path: p, method: init.method || 'GET', headers: init.headers || {}, body: typeof init.body === 'string' ? JSON.parse(init.body) : init.body };
     requests.push(req);
-    if (mac.down) throw new sandbox.TypeError('Load failed');
     if (held[p]) await new Promise((go) => held[p].waiting.push(go));
+    // An answer never lands in the moment it was asked for: it takes a turn of its own.
+    flying++;
+    try { await new Promise((r) => setImmediate(r)); } finally { flying--; }
+    if (mac.down) throw new sandbox.TypeError('Load failed');
     let answer;
     if (mac.routes[p]) answer = mac.routes[p](req) || {};
     else if (p === '/api/state') answer = { data: mac.state };

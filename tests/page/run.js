@@ -77,6 +77,29 @@ scenario('a question box shows its choices as buttons and takes the answer box a
   assert.strictEqual(el.querySelector('.win-answer').hidden, true);
 });
 
+scenario('an own answer half typed is kept when only the box\'s cursor or hints change', async () => {
+  const box = (cursorAt, hints, first = 'First') => ({ ask: 'Which one?', tabs: null, hints, rows: [
+    { label: first, detail: null, number: 1, cursor: cursorAt === 0, checked: null, types: false },
+    { label: 'Type something', detail: null, number: 2, cursor: cursorAt === 1, checked: null, types: true }] });
+  const other = turn('b', 'Bee.', { box: box(0, 'Enter to select') });
+  const w = await open([turn('a', 'Alpha.', { box: box(0, 'Enter to select') }), other]);
+  const field = w.win('a').querySelector('.win-options input');
+  await w.type(field, 'my half-typed own answer');
+  w.mac.state.turns = [turn('a', 'Alpha.', { box: box(1, 'Enter to select') }), other];   // the cursor moved
+  await w.advance(2500);
+  w.mac.state.turns = [turn('a', 'Alpha.', { box: box(1, 'Esc to cancel') }), other];     // the hints changed
+  await w.advance(2500);
+  assert.ok(w.win('a').querySelector('.win-options input') === field, 'the own-answer field was rebuilt, and what was typed in it is gone');
+  assert.strictEqual(field.value, 'my half-typed own answer');
+  const looks = w.mac.gets('/api/screen').length;
+  await w.advance(5000);
+  assert.strictEqual(w.mac.gets('/api/screen').length, looks + 4);   // each asking window's screen is looked at once a poll, no more
+
+  w.mac.state.turns = [turn('a', 'Alpha.', { box: box(1, 'Esc to cancel', 'Another choice') }), other];   // a choice changed
+  await w.advance(2500);
+  assert.strictEqual(w.win('a').querySelector('.win-options button').textContent, '1Another choice');
+});
+
 scenario('the status line reads model first, then context, and takes a colour as it fills', async () => {
   const w = await open([
     turn('a', 'Alpha.', { status: 'speakhud (main*) | Opus 5.5 ctx:51% used', context: 51 }),
