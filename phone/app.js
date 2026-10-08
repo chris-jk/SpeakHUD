@@ -90,7 +90,7 @@
       parts.push({ say: what === 'question' ? turn.name + ' is asking.' : 'It is asking.' });
       if (turn.box) {
         for (const say of paragraphs(turn.box.ask)) parts.push({ say });
-        for (const row of turn.box.rows) {
+        for (const row of turn.box.rows || []) {
           if (row.types) continue;   // "type something" is the field, not a choice to hear
           parts.push({ say: (row.number ? row.number + '. ' : '') + row.label + '.' + (row.detail ? ' ' + row.detail : '') });
         }
@@ -755,7 +755,23 @@
     }
   }
 
+  // The page itself tripped: a turn in a shape it doesn't expect, or a fault in this
+  // script. Said as that, never as a lost Mac, and left where a debugger can see it.
+  function fault(e, turn) {
+    console.error(e);
+    say(turn
+      ? "This page couldn't show " + ((turn && turn.name) || 'one terminal') + " properly. That's a fault in the page, not the Mac out of reach: the other terminals are as they stand."
+      : "This page tripped while drawing. That's a fault in the page, not the Mac out of reach.");
+  }
+
+  // Draw what the Mac says. Nothing is thrown from here: whoever calls has just asked
+  // the Mac something, and a fault in the drawing would land in their "can't reach the
+  // Mac" (or "not sent", after an answer that went).
   function show(state) {
+    try { draw(state); } catch (e) { fault(e); }
+  }
+
+  function draw(state) {
     if (!state || !Array.isArray(state.turns)) return;
     awaySwitch.checked = !!state.away;
     awaySays.textContent = state.away
@@ -775,12 +791,16 @@
     for (const [key, w] of shown) {
       if (!keys.includes(key)) { w.el.remove(); shown.delete(key); gone(key); }
     }
-    for (const turn of state.turns) update(turn);
+    for (const turn of state.turns) {
+      // One turn the page can't draw doesn't take the others with it.
+      try { update(turn); } catch (e) { fault(e, turn); }
+    }
 
     // Newest first, but never shuffle the page under a keyboard, a reading, or a thumb.
     const order = Array.from(list.children).map((el) => el.dataset.key);
-    if (still && order.join('\n') !== keys.join('\n')) {
-      for (const key of keys) list.appendChild(shown.get(key).el);
+    const wanted = keys.filter((key) => shown.has(key));
+    if (still && order.join('\n') !== wanted.join('\n')) {
+      for (const key of wanted) list.appendChild(shown.get(key).el);
     }
     empty.hidden = keys.length > 0;
     goToHash();
@@ -1230,7 +1250,8 @@
 
   // A push's link ends in #<session>: bring that window up.
   function goToHash() {
-    const key = decodeURIComponent(location.hash.slice(1));
+    let key = location.hash.slice(1);
+    try { key = decodeURIComponent(key); } catch (e) { /* not a link this page was sent with: no window answers to it */ }
     if (!key || key === wentTo) return;
     const w = shown.get(key);
     if (!w) return;

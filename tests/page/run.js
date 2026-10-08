@@ -99,6 +99,42 @@ scenario('the Mac out of reach is said on the page, and unsaid once it answers a
   assert.strictEqual(w.$('trouble').hidden, true);
 });
 
+scenario('a link the page cannot read is not called a lost Mac, and the page goes on working', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')], Object.assign({ hash: '#%E0%A4%A', mic: true }, SPEAK_ON));
+  assert.deepStrictEqual(w.keys(), ['a', 'b']);
+  assert.strictEqual(w.$('trouble').hidden, true);
+  assert.strictEqual(w.win('a').querySelector('.win-mic').hidden, false);   // the draw got to its end
+  await firstTap(w);
+  w.mac.state.turns = [turn('a', 'Alpha, a second turn.'), turn('b', 'Bee.')];
+  await w.advance(4000);
+  assert.deepStrictEqual(w.voice.texts().filter((t) => t.trim()), ['T-a.', 'Alpha, a second turn.']);   // and news is still news
+});
+
+scenario('one turn the page cannot draw is said as the page\'s own fault, and the others are drawn', async () => {
+  const w = await open([turn('a', 'Alpha.', { box: { ask: 'Pick one', tabs: null, hints: null } }), turn('b', 'Bee.')]);
+  assert.deepStrictEqual(w.keys(), ['a', 'b']);
+  assert.strictEqual(w.win('b').querySelector('.win-text').textContent, 'Bee.');
+  assert.strictEqual(w.win('b').querySelector('.win-read').hidden, false);
+  assert.strictEqual(w.$('trouble').hidden, false);
+  assert.doesNotMatch(w.$('trouble').textContent, /reach the Mac/);
+  assert.match(w.$('trouble').textContent, /T-a/);
+  assert.strictEqual(w.logged.length, 1);       // and it's left where a debugger can see it
+  await w.tap(readButton(w, 'a'));              // reading it doesn't trip either
+  await w.advance(3000);
+  assert.deepStrictEqual(w.voice.texts(), ['T-a.', 'Alpha.', 'It is asking.', 'Pick one']);
+});
+
+scenario('a fault in the drawing after an answer has gone is not called a failure to send', async () => {
+  const w = await open([turn('a', 'Alpha.')]);
+  w.mac.routes['/api/reply'] = () => ({ data: { sent: true, outcome: 'sent', state: { away: false, quick: [], turns: [null] } } });
+  await w.type(answerBox(w, 'a'), 'yes');
+  await w.tap(w.win('a').querySelector('.win-answer button[type="submit"]'));
+  assert.strictEqual(w.win('a').querySelector('.win-note').textContent, '');
+  assert.strictEqual(answerBox(w, 'a').value, '');
+  assert.doesNotMatch(w.$('trouble').textContent, /reach the Mac/);
+  assert.strictEqual(w.$('trouble').hidden, false);
+});
+
 // -- reading aloud -------------------------------------------------------------
 
 scenario('Read says who it is, then the turn a paragraph at a time, and tells the Mac how it went', async () => {
