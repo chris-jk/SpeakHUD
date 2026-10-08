@@ -579,16 +579,21 @@ enum Reply {
     /// the marker Claude Code folds one into. Text you had already typed there fails
     /// this, and Return is left to you.
     ///
-    /// A picture's path doesn't stay in the words: Claude Code takes it out and puts
-    /// "[Image #1]" at the front of the box instead (seen in 2.1.294: a paste of
-    /// "Look at this picture from my phone: /…/a.jpg" shows as "[Image #1]Look at this
-    /// picture from my phone:"). So those markers at the front aren't something typed
-    /// ahead, and the paths aren't looked for.
-    static func shows(_ text: String, inPrompt box: String) -> Bool {
+    /// `pictures` are the paths this paste itself put on the end of the words (the
+    /// phone's, sent with an answer). Such a path doesn't stay in the words: Claude Code
+    /// takes it out and puts "[Image #1]" at the front of the box instead (seen in
+    /// 2.1.294: a paste of "Look at this picture from my phone: /…/a.jpg" shows as
+    /// "[Image #1]Look at this picture from my phone:"). So those paths aren't looked
+    /// for, and that many markers at the front aren't something put there ahead. Only
+    /// those: a link or a path the reply names in its own words stays where it was said,
+    /// and a picture already in the box is yours.
+    static func shows(_ text: String, inPrompt box: String, pictures: [String] = []) -> Bool {
         func squash(_ s: String) -> String { String(s.unicodeScalars.filter { !CharacterSet.whitespaces.contains($0) }) }
-        let words = text.replacingOccurrences(of: #"\s?/\S+\.(?:jpe?g|png|gif|webp|heic)(?=\s|$)"#, with: "",
-                                              options: [.regularExpression, .caseInsensitive])
-        let held = box.replacingOccurrences(of: #"^(\s*\[Image #\d+\])+"#, with: "", options: .regularExpression)
+        var words = text, held = box
+        for path in pictures where !path.isEmpty {
+            words = words.replacingOccurrences(of: path, with: "")
+            held = held.replacingOccurrences(of: #"^\s*\[Image #\d+\]"#, with: "", options: .regularExpression)
+        }
         let want = squash(words), have = squash(held)
         guard !want.isEmpty else { return false }
         return have.hasPrefix(String(want.prefix(40))) || have.hasPrefix("[Pastedtext#")
@@ -874,8 +879,9 @@ enum Reply {
     }
 
     /// Paste `heard` into the prompt of the pane `origin` names and press Return.
+    /// `pictures` are the paths on the end of it that are pictures being sent with it.
     /// `ask` and `wait` are the seams tests drive it through.
-    static func send(_ heard: String, to origin: Origin,
+    static func send(_ heard: String, to origin: Origin, pictures: [String] = [],
                      ask: (String) -> Answer = Reply.ask,
                      wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
@@ -905,14 +911,14 @@ enum Reply {
             wait(lookGap)
             let now = screen()
             if let stop = now.stop { return stop }
-            if let box = promptText(in: now.text ?? ""), shows(line, inPrompt: box) {
+            if let box = promptText(in: now.text ?? ""), shows(line, inPrompt: box, pictures: pictures) {
                 if let stop = done(ask(returnScript(session))) { return stop }
                 // Sent means gone from the box. Still sitting there, Return didn't take.
                 for _ in 0..<looks {
                     wait(lookGap)
                     let after = screen()
                     if let stop = after.stop { return stop }
-                    guard let left = promptText(in: after.text ?? ""), shows(line, inPrompt: left) else { return .sent }
+                    guard let left = promptText(in: after.text ?? ""), shows(line, inPrompt: left, pictures: pictures) else { return .sent }
                 }
                 return .unconfirmed
             }
@@ -5240,8 +5246,9 @@ final class Phone {
     private var scanned = Date.distantPast
     private var polled = Date.distantPast
     private var askPushed: [String: Date] = [:]
-    /// Puts the words in a terminal. Tests answer for iTerm2.
-    var deliver: (String, Origin) -> Reply.Outcome = { Reply.send($0, to: $1) }
+    /// Puts the words in a terminal; the paths are the pictures the phone put on the end
+    /// of them. Tests answer for iTerm2.
+    var deliver: (String, [String], Origin) -> Reply.Outcome = { Reply.send($0, to: $2, pictures: $1) }
     /// Presses a key in a terminal, and reads the foot of its screen.
     var press: (String, Origin) -> Reply.Outcome = { Reply.press($0, in: $1) }
     var look: (Origin) -> String? = { Reply.screen(of: $0) }
@@ -5808,7 +5815,9 @@ final class Phone {
             guard let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
-            let outcome = deliver(text, origin)
+            // Only the paths put on the end here count as pictures: a path or a link in
+            // the words themselves is words.
+            let outcome = deliver(text, paths, origin)
             let with = paths.isEmpty ? "" : paths.count == 1 ? "1 picture" : "\(paths.count) pictures"
             desk.answered(key, with: [Reply.clean(said), with.isEmpty ? nil : "[\(with)]"].compactMap { $0 }.joined(separator: " "), outcome)
             log("phone reply to \(turn.name) (\(said.count) chars\(with.isEmpty ? "" : ", " + with)): \(outcome)")

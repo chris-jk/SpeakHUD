@@ -164,15 +164,32 @@ let replySuite = Suite("Reply") { t in
     t.expect(Reply.shows(String(repeating: "word ", count: 400), inPrompt: "[Pasted text #1]"), "a long paste shows as Claude's marker")
     t.expect(!Reply.shows("blue please", inPrompt: "half a thought blue please"), "text you'd typed ahead of it: not confirmed")
     // As Claude Code 2.1.294 really showed these two pastes (captured from a scratch session).
-    t.expect(Reply.shows("Look at this picture from my phone: /Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg",
-                         inPrompt: "[Image #1]Look at this picture from my phone:"),
+    let fromPhone = "/Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg"
+    t.expect(Reply.shows("Look at this picture from my phone: " + fromPhone, inPrompt: "[Image #1]Look at this picture from my phone:", pictures: [fromPhone]),
              "a pasted picture's path becomes a marker at the front of the box: the words after it are the paste showing")
     t.expect(Reply.shows("which is it The pictures from my phone: /Users/you/a/one.jpg /Users/you/a/two.png",
-                         inPrompt: "[Image #2] [Image #3]which is it The pictures from my phone:"), "and so with two")
-    t.expect(!Reply.shows("which is it The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1]half a thought which is it The picture from my phone:")
+                         inPrompt: "[Image #2] [Image #3]which is it The pictures from my phone:", pictures: ["/Users/you/a/one.jpg", "/Users/you/a/two.png"]),
+             "and so with two")
+    t.expect(!Reply.shows("which is it The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1]half a thought which is it The picture from my phone:",
+                          pictures: ["/Users/you/a/one.jpg"])
              && !Reply.shows("blue please", inPrompt: "half a thought [Image #1]blue please"),
              "words typed ahead of the paste still aren't confirmed, picture or no picture")
+    t.expect(!Reply.shows("this one The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1] [Image #2]this one The picture from my phone:",
+                          pictures: ["/Users/you/a/one.jpg"]),
+             "one marker more than the pictures sent is a picture of yours that was there first: not confirmed")
+    t.expect(Reply.shows("this one The picture from my phone: /Users/you/a/one.jpg", inPrompt: "this one The picture from my phone: /Users/you/a/one.jpg",
+                         pictures: ["/Users/you/a/one.jpg"]),
+             "a picture's path left in the words as it was pasted is the paste showing all the same")
+    t.expect(!Reply.shows("Look at this picture from my phone: " + fromPhone, inPrompt: "[Image #1]Look at this picture from my phone:"),
+             "a path nobody said was a picture being sent is looked for like any other word")
     t.expect(Reply.shows("open /tmp/notes.txt and fix it", inPrompt: "open /tmp/notes.txt and fix it"), "a path that isn't a picture's stays in the words")
+    // What a reply says itself stays in the prompt as it was said, a picture's link or path included.
+    t.expect(Reply.shows("Use https://x.com/logo.png for the header", inPrompt: "Use https://x.com/logo.png for the header"),
+             "a link to a picture, named in a reply, is part of its words and is looked for")
+    t.expect(Reply.shows("compare docs/a.png with docs/b.png please", inPrompt: "compare docs/a.png with docs/b.png please"),
+             "and so is a picture's path")
+    t.expect(!Reply.shows("blue please", inPrompt: "[Image #1]blue please"),
+             "a picture already in the prompt was put there ahead of the paste, like words typed ahead of it: not confirmed")
     t.expect(!Reply.shows("blue please", inPrompt: ""), "an empty box hasn't taken it")
     t.expect(!Reply.shows("blue please", inPrompt: "Try \"edit <filepath> to...\""), "nor has one still showing its placeholder")
 
@@ -240,6 +257,25 @@ let replySuite = Suite("Reply") { t in
         let term = FakeTerm(atPrompt("❯ half a thought"))
         term.onPaste = { term, text in term.screen = atPrompt("❯ half a thought" + text) }
         t.expectEqual(term.send("blue please"), .unconfirmed, "a reply that landed after your own typing isn't sent for you")
+        t.expect(!term.calls.contains(.enter), "no Return")
+    }
+    do {  // a reply that names a picture itself, by link or by path
+        t.expectEqual(FakeTerm(atPrompt("❯  ")).send("Use https://x.com/logo.png for the header"), .sent,
+                      "a reply that names a link to a picture is sent, not left in the prompt")
+        t.expectEqual(FakeTerm(atPrompt("❯  ")).send("compare docs/a.png with docs/b.png please"), .sent, "and so is one that names a picture's path")
+    }
+    do {  // pictures sent with it: Claude Code swaps each path for a marker at the front of the box
+        let one = "/Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg"
+        let term = FakeTerm(atPrompt("❯  "))
+        term.onPaste = { term, text in term.screen = atPrompt("❯ [Image #1]" + text.replacingOccurrences(of: " " + one, with: "")) }
+        t.expectEqual(Reply.send("this one The picture from my phone: " + one, to: pane, pictures: [one], ask: term.ask, wait: { _ in }), .sent,
+                      "an answer with a picture is sent once its words show after the picture's marker")
+        t.expect(term.calls.contains(.enter), "with Return")
+    }
+    do {  // a picture of your own was already in the prompt
+        let term = FakeTerm(atPrompt("❯ [Image #1]"))
+        term.onPaste = { term, text in term.screen = atPrompt("❯ [Image #1]" + text) }
+        t.expectEqual(term.send("blue please"), .unconfirmed, "a reply that landed after a picture you'd put in the prompt isn't sent for you")
         t.expect(!term.calls.contains(.enter), "no Return")
     }
     do {  // the question box opens between the look and the paste

@@ -52,7 +52,7 @@ private final class Bench {
     let suite = "speakhud-phone-tests-\(UUID().uuidString)"
     let defaults: UserDefaults
     let phone: Phone
-    var delivered: [(text: String, session: String?)] = []
+    var delivered: [(text: String, session: String?, pictures: [String])] = []
     var pressed: [String] = []
     var pushes: [URLRequest] = []
     var logs: [String] = []
@@ -79,7 +79,7 @@ private final class Bench {
         config.ntfy = ntfy
         config.ntfyToken = ntfy == nil ? nil : "tk_secret"
         phone = Phone(config: config, defaults: defaults)
-        phone.deliver = { [unowned self] text, origin in self.delivered.append((text, origin.session)); return self.outcome }
+        phone.deliver = { [unowned self] text, pictures, origin in self.delivered.append((text, origin.session, pictures)); return self.outcome }
         phone.press = { [unowned self] key, _ in self.pressed.append(key); return self.outcome }
         phone.look = { [unowned self] _ in self.screen }
         phone.survey = { [unowned self] in self.open }
@@ -476,6 +476,10 @@ let phoneSuite = Suite("Phone") { t in
     let withPics = json(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "this one", "pictures": [firstID, secondID]])))
     t.expect(withPics["sent"] as? Bool == true && p.delivered.last?.text == "this one The pictures from my phone: \(firstPath) \(secondPath)",
              "an answer with pictures says where they are on the Mac, for the terminal's Claude to read")
+    t.expectEqual(p.delivered.last?.pictures ?? [], [firstPath, secondPath], "and which of its words are those pictures: Claude Code takes exactly those out of the prompt")
+    _ = p.phone.respond(to: post("/api/reply", ["key": "a", "text": "use /tmp/logo.png and https://x.com/logo.png"]))
+    t.expect(p.delivered.last?.text == "use /tmp/logo.png and https://x.com/logo.png" && p.delivered.last?.pictures == [],
+             "a picture the answer names in its own words is words: none is said to have been sent with it")
     t.expect(turns(withPics["state"] as? [String: Any] ?? [:]).first?["sent"] as? String == "this one [2 pictures]"
              && p.logs.contains("phone reply to Grow guide replies (8 chars, 2 pictures): sent") && !p.logs.contains { $0.contains("from phone") },
              "the page and the log say there were pictures, not where they are")
