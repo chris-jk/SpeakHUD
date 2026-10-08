@@ -601,6 +601,55 @@ main { margin-top: 14px; }
   box-shadow: 0 0 0 calc(3px + var(--level, 0) * 9px) color-mix(in srgb, var(--alarm) 30%, transparent);
 }
 .win-answer .win-mic.is-working { opacity: 0.55; }
+/* Add a picture from the phone to go with the answer: the same round button as the mic. */
+.win-answer .win-pic {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  background: var(--win);
+  color: var(--ink);
+}
+/* The pictures waiting to go, each a tap away from being taken off again. */
+.win-pics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+.win-pics button {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: var(--field);
+  overflow: hidden;
+}
+.win-pics canvas {
+  display: block;
+  width: 64px;
+  height: 64px;
+}
+.win-pics button::after {
+  content: "\00d7";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  color: #ffffff;
+  font-size: 15px;
+  line-height: 20px;
+  text-align: center;
+}
+.win-pics + .win-answer { margin-top: 8px; }
 .win-mic-says {
   margin: 8px 0 0;
   color: var(--quiet);

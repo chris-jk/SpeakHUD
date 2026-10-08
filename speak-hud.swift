@@ -4632,7 +4632,7 @@ enum HTTP {
     /// A recording to be turned into words is the one body allowed to be bigger: three
     /// minutes of what the page records (16-bit sound, 16,000 samples a second).
     static let maxUpload = 6 * 1024 * 1024
-    static let uploads: Set<String> = ["/api/hear"]
+    static let uploads: Set<String> = ["/api/hear", "/api/picture"]
 
     struct Request: Equatable {
         var method = "GET"
@@ -4762,7 +4762,8 @@ enum HTTP {
 
         private static let reasons = [200: "OK", 206: "Partial Content", 303: "See Other", 400: "Bad Request",
                                       401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict",
-                                      416: "Range Not Satisfiable", 501: "Not Implemented", 503: "Service Unavailable"]
+                                      416: "Range Not Satisfiable", 500: "Internal Server Error", 501: "Not Implemented",
+                                      503: "Service Unavailable"]
 
         /// The status line and headers. Every response says what it is, that nothing may
         /// frame it, that the page loads nothing from anywhere else, and (unless it says
@@ -5132,6 +5133,47 @@ final class Phone {
          }]
     }
 
+    // -- pictures from the phone -------------------------------------------
+
+    /// Where a picture sent with an answer is kept for the terminal's Claude to read, and
+    /// for how long. The page shrinks it first; here it only has to be a picture.
+    var picturesDir = (Spool.dir as NSString).deletingLastPathComponent + "/from-phone"
+    static let pictureAge: TimeInterval = 7 * 86_400
+    private var pictures: [String: String] = [:]   // what the page was told to call it -> where it is
+    private var pictureCount = 0
+
+    /// A picture the page will name in its next answer. It's kept under a name with no
+    /// spaces in it, so the path can go into a terminal's prompt as it is.
+    private func picture(_ r: HTTP.Request, now: Date = Date()) -> HTTP.Response {
+        guard r.headers["x-speakhud"] == "1" else { return .json(["error": "not found"], status: 404) }
+        let jpeg = r.body.starts(with: [0xFF, 0xD8, 0xFF])
+        let png = r.body.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        guard jpeg || png else { return .json(["error": "that isn't a picture"], status: 400) }
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: picturesDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd-HHmmss"
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        pictureCount += 1
+        let name = "\(stamp.string(from: now))-\(pictureCount).\(jpeg ? "jpg" : "png")"
+        guard fm.createFile(atPath: picturesDir + "/" + name, contents: r.body, attributes: [.posixPermissions: 0o600]) else {
+            return .json(["error": "the Mac couldn't keep that picture"], status: 500)
+        }
+        pictures[name] = picturesDir + "/" + name
+        return .json(["id": name])
+    }
+
+    /// Pictures from the phone are for the turn they went with: old ones go.
+    func sweepPictures(now: Date = Date()) {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: picturesDir)) ?? [] {
+            let path = picturesDir + "/" + name
+            guard let changed = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
+                  now.timeIntervalSince(changed) > Self.pictureAge else { continue }
+            try? fm.removeItem(atPath: path)
+        }
+    }
+
     /// A file a turn made or named, for the page to show under it. Asked for by the
     /// turn and its place in that turn's list, so nothing else on this Mac can be.
     private func media(_ r: HTTP.Request) -> HTTP.Response {
@@ -5215,6 +5257,7 @@ final class Phone {
             return .json(state())
         }
         if r.method == "GET", r.path == "/api/file" { return media(r) }
+        if r.method == "POST", r.path == "/api/picture" { return picture(r) }
         if r.method == "GET", r.path == "/api/sessions" {
             let running = runningIDs()
             return .json(["sessions": oldSessions().map { s -> [String: Any] in
@@ -5347,8 +5390,24 @@ final class Phone {
             log("phone key \(name) to \(turn.name): \(outcome)")
             return .json(["sent": outcome == .sent, "outcome": outcome.description])
         case "/api/reply":
-            guard let key = body["key"] as? String, let text = body["text"] as? String,
-                  Reply.clean(text) != nil else { return .json(["error": "nothing to send"], status: 400) }
+            guard let key = body["key"] as? String, let said = body["text"] as? String else {
+                return .json(["error": "nothing to send"], status: 400)
+            }
+            // Pictures sent ahead of this answer go with it as where they are on the Mac:
+            // a terminal's Claude reads a picture from its path.
+            let ids = body["pictures"] as? [String] ?? []
+            let paths = ids.compactMap { pictures[$0] }.filter { FileManager.default.fileExists(atPath: $0) }
+            guard paths.count == ids.count else {
+                return .json(["error": "a picture didn't reach the Mac: add it again"], status: 400)
+            }
+            var text = said
+            if !paths.isEmpty {
+                let words = Reply.clean(said)
+                let lead = paths.count == 1 ? "picture" : "pictures"
+                text = (words.map { $0 + " The \(lead) from my phone:" } ?? "Look at \(paths.count == 1 ? "this" : "these") \(lead) from my phone:")
+                    + " " + paths.joined(separator: " ")
+            }
+            guard Reply.clean(text) != nil else { return .json(["error": "nothing to send"], status: 400) }
             guard let turn = desk.turn(key) else {
                 return .json(["error": "that terminal isn't on the list any more"], status: 404)
             }
@@ -5356,8 +5415,9 @@ final class Phone {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
             let outcome = deliver(text, origin)
-            desk.answered(key, with: text, outcome)
-            log("phone reply to \(turn.name) (\(text.count) chars): \(outcome)")
+            let with = paths.isEmpty ? "" : paths.count == 1 ? "1 picture" : "\(paths.count) pictures"
+            desk.answered(key, with: [Reply.clean(said), with.isEmpty ? nil : "[\(with)]"].compactMap { $0 }.joined(separator: " "), outcome)
+            log("phone reply to \(turn.name) (\(said.count) chars\(with.isEmpty ? "" : ", " + with)): \(outcome)")
             // `pasted`: the words are in its prompt, unsent. Sending them again would double them.
             return .json(["sent": outcome == .sent, "pasted": outcome == .unconfirmed,
                           "outcome": outcome.description, "state": state()])
@@ -5642,6 +5702,7 @@ final class Agent {
             FileManager.default.createFile(atPath: kept, contents: data, attributes: [.posixPermissions: 0o600])
         }
         phone.log = { [weak self] in self?.log($0) }
+        phone.sweepPictures()
         phone.onAwayChange = { [weak self] in self?.awayChanged($0) }
         do {
             let server = try PhoneServer(port: config.port) { phone.respond(to: $0) }

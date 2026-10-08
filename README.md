@@ -227,6 +227,12 @@ What's on the page:
   that's Save Image, Save Video, Save to Files, AirDrop), as a plain download otherwise. They come straight from the Mac over your
   tailnet; nothing is uploaded anywhere. A question brings what its turn has made so
   far, so "which of these?" comes with them. See [What the turn made](#what-the-turn-made).
+- **Send a picture.** The picture button by the answer box picks photos or screenshots
+  from the phone (up to six). They wait as chips above the box, a tap takes one off,
+  and they go with the answer: the page shrinks each to a JPEG no more than 2000 pixels
+  a side, the Mac keeps it in `~/.local/state/speakhud/from-phone` for a week, and the
+  answer that reaches the terminal ends with where the pictures are, which is how a
+  terminal's Claude reads one.
 - **Quick answers.** The things you always send ("Wrap up") as one-tap buttons on every
   window. Add and remove your own under **Quick answers** at the top; they're kept on
   the Mac.

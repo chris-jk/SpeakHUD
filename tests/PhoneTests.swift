@@ -317,6 +317,49 @@ let phoneSuite = Suite("Phone") { t in
     o.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: screenshot("ask-single"))]
     o.phone.scan(now: Date().addingTimeInterval(5 * Phone.scanEvery + 5))
 
+    // -- a picture sent with an answer ----------------------------------------
+    let p = Bench()
+    p.phone.picturesDir = dir + "/from phone"
+    p.phone.took(turn("a", "Which one is broken?"))
+    func upload(_ bytes: [UInt8], header: Bool = true, paired: Bool = true) -> HTTP.Response {
+        var headers = ["content-type": "image/jpeg"]
+        if paired { headers["cookie"] = "\(Phone.cookie)=\(token)" }
+        if header { headers["x-speakhud"] = "1" }
+        return p.phone.respond(to: HTTP.Request(method: "POST", path: "/api/picture", headers: headers, body: Data(bytes)))
+    }
+    let jpegBytes: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0] + [UInt8](repeating: 7, count: 2_000)
+    let pngBytes: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] + [UInt8](repeating: 9, count: 500)
+    t.expect(upload(jpegBytes, paired: false).status == 401 && upload(jpegBytes, header: false).status == 404,
+             "a picture is taken only from a paired phone's own page")
+    t.expect(upload(Array("#!/bin/sh\nrm -rf ~".utf8)).status == 400 && ((try? fm.contentsOfDirectory(atPath: p.phone.picturesDir)) ?? []).isEmpty,
+             "what isn't a picture isn't kept")
+    let firstID = json(upload(jpegBytes))["id"] as? String ?? "", secondID = json(upload(pngBytes))["id"] as? String ?? ""
+    let firstPath = p.phone.picturesDir + "/" + firstID, secondPath = p.phone.picturesDir + "/" + secondID
+    t.expect(firstID.hasSuffix(".jpg") && secondID.hasSuffix(".png") && firstID != secondID && !firstID.contains(" ") && !firstID.contains("/"),
+             "a picture is kept under a plain name of its kind")
+    t.expect(fm.contents(atPath: firstPath) == Data(jpegBytes) && (try? fm.attributesOfItem(atPath: firstPath))?[.posixPermissions] as? Int == 0o600,
+             "as it came, for you alone")
+    let withPics = json(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "this one", "pictures": [firstID, secondID]])))
+    t.expect(withPics["sent"] as? Bool == true && p.delivered.last?.text == "this one The pictures from my phone: \(firstPath) \(secondPath)",
+             "an answer with pictures says where they are on the Mac, for the terminal's Claude to read")
+    t.expect(turns(withPics["state"] as? [String: Any] ?? [:]).first?["sent"] as? String == "this one [2 pictures]"
+             && p.logs.contains("phone reply to Grow guide replies (8 chars, 2 pictures): sent") && !p.logs.contains { $0.contains("from phone") },
+             "the page and the log say there were pictures, not where they are")
+    _ = p.phone.respond(to: post("/api/reply", ["key": "a", "text": "  ", "pictures": [firstID]]))
+    t.expectEqual(p.delivered.last?.text ?? "", "Look at this picture from my phone: \(firstPath)", "a picture with no words still says what it is")
+    let before = p.delivered.count
+    t.expect(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "and this", "pictures": ["../../etc/passwd"]])).status == 400
+             && p.phone.respond(to: post("/api/reply", ["key": "a", "text": "", "pictures": []])).status == 400 && p.delivered.count == before,
+             "a picture the Mac wasn't sent is refused, by the name it gave and nothing else; and nothing at all is still nothing")
+    t.expect(HTTP.parse(Data("POST /api/picture HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n".utf8)) == .incomplete
+             && HTTP.parse(Data("POST /api/reply HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n".utf8)) == .bad
+             && HTTP.parse(Data("POST /api/picture HTTP/1.1\r\nContent-Length: \(HTTP.maxUpload + 1)\r\n\r\n".utf8)) == .bad,
+             "a picture may be bigger than an answer, up to the upload limit and no further")
+    try? fm.setAttributes([.modificationDate: Date().addingTimeInterval(-Phone.pictureAge - 3_600)], ofItemAtPath: firstPath)
+    p.phone.sweepPictures()
+    t.expect(!fm.fileExists(atPath: firstPath) && fm.fileExists(atPath: secondPath), "pictures older than a week are cleared out; newer ones stay")
+    t.expectEqual(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "again", "pictures": [firstID]])).status, 400, "and one that's gone can't be sent again")
+
     // -- what a reading did on the phone ---------------------------------------
     _ = o.phone.respond(to: post("/api/heard", ["parts": 5, "words": 140, "sized": 0, "backwards": 12, "gap": 900, "scrolls": 4, "seconds": 41,
                                               "speed": 1.25, "voices": 60, "marks": true, "lang": "en-US", "text": "what was read", "extra": "x\ny",

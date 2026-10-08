@@ -421,6 +421,35 @@
     return figure;
   }
 
+  // A picture from the phone, made no bigger than a terminal's Claude needs to read it:
+  // a JPEG no more than 2000 pixels a side, drawn the right way up. A phone's photo is
+  // several megabytes as it comes. `thumb` is what the page shows while it waits to go.
+  const PICTURE_SIDE = 2000;
+  const PICTURE_MOST = 6;
+  async function shrink(file) {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const fit = (side) => {
+      const scale = Math.min(1, side / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const pen = canvas.getContext('2d');
+      pen.fillStyle = '#ffffff';   // a see-through screenshot would otherwise turn black as a JPEG
+      pen.fillRect(0, 0, canvas.width, canvas.height);
+      pen.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      return canvas;
+    };
+    const blob = await new Promise((done) => fit(PICTURE_SIDE).toBlob(done, 'image/jpeg', 0.85));
+    if (!blob) throw new Error('no picture');
+    // The chip is square: the middle of the picture, cut to fit.
+    const thumb = document.createElement('canvas');
+    thumb.width = thumb.height = 128;
+    const crop = Math.min(bitmap.width, bitmap.height);
+    thumb.getContext('2d').drawImage(bitmap, (bitmap.width - crop) / 2, (bitmap.height - crop) / 2, crop, crop, 0, 0, 128, 128);
+    if (bitmap.close) bitmap.close();
+    return { blob, thumb };
+  }
+
   // Save a file a turn made onto the phone. Where the phone can hand a file to its share
   // sheet (on an iPhone that's where Save Image and Save Video put it in Photos, beside
   // Save to Files and AirDrop), the file is fetched and handed over. A very big one, or
@@ -556,14 +585,55 @@
     box.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
     });
-    // Send `words` to this terminal: what's in the box (cleared once it has gone), or
-    // a quick answer.
+    // Pictures from the phone, waiting to go with the next answer from the box.
+    const pics = [];
+    const picRow = el.querySelector('.win-pics');
+    const picker = el.querySelector('.win-file');
+    function drawPics() {
+      picRow.replaceChildren(...pics.map((pic) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.setAttribute('aria-label', 'Take this picture off');
+        chip.append(pic.thumb);
+        chip.addEventListener('click', () => { pics.splice(pics.indexOf(pic), 1); drawPics(); });
+        return chip;
+      }));
+      picRow.hidden = !pics.length;
+    }
+    el.querySelector('.win-pic').addEventListener('click', () => picker.click());
+    picker.addEventListener('change', async () => {
+      for (const file of Array.from(picker.files || []).slice(0, PICTURE_MOST - pics.length)) {
+        try { pics.push(await shrink(file)); } catch (e) { note(el, "That picture couldn't be read."); }
+      }
+      picker.value = '';   // the same picture can be picked again
+      drawPics();
+    });
+
+    // Send `words` to this terminal: what's in the box (cleared once it has gone), with
+    // any pictures added to it, or a quick answer.
     async function sendWords(words, button, fromBox) {
-      if (!words || button.disabled) return;
+      const going = fromBox ? pics.slice() : [];
+      if ((!words && !going.length) || button.disabled) return;
       button.disabled = true;
       if (fromBox) button.textContent = 'Sending';
       try {
-        const { data } = await call('/api/reply', { key: turn.key, text: words });
+        // The pictures go first, each to be named in the answer that follows.
+        const ids = [];
+        for (const pic of going) {
+          const res = await fetch('/api/picture', {
+            method: 'POST',
+            headers: { 'Content-Type': 'image/jpeg', 'X-SpeakHUD': '1' },
+            body: pic.blob,
+          });
+          const kept = await res.json().catch(() => ({}));
+          if (!res.ok || !kept.id) { note(el, "Not sent: a picture didn't reach the Mac."); return; }
+          ids.push(kept.id);
+        }
+        const { data } = await call('/api/reply', ids.length ? { key: turn.key, text: words, pictures: ids } : { key: turn.key, text: words });
+        if (data.sent || data.pasted) {
+          for (const pic of going) { const i = pics.indexOf(pic); if (i >= 0) pics.splice(i, 1); }
+          drawPics();
+        }
         if (data.sent) {
           note(el, '');
           // Only what was sent is cleared: anything typed since stays.
