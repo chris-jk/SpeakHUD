@@ -25,7 +25,7 @@ let harnessSuite = Suite("Harness") { t in
 
 // One line per suite; each lives in its own file.
 let suites = [harnessSuite, playbackSuite, spoolSuite, claudeHookSuite, configSuite, hookSuite, originSuite, linkSuite,
-              replySuite, commandSuite, earSuite, micWatchSuite]
+              replySuite, commandSuite, earSuite, micWatchSuite, logKeepSuite]
 
 var failed = 0, total = 0
 for s in suites {

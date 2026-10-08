@@ -3775,6 +3775,56 @@ func parseHotkey(_ spec: String) -> (keyCode: UInt32, mods: UInt32)? {
     return (code, mods)
 }
 
+/// How long the agent's log is kept. launchd only ever appends to it, so without this
+/// it grows for ever: at start, and once a day after, lines older than `days` go.
+/// The file is cut down in place. launchd holds it open for appending, and a file
+/// swapped in under that would leave the agent writing to one nobody can see.
+enum LogKeep {
+    static let days = 30
+
+    /// Where the kept part of `log` starts and how many lines come before it: from the
+    /// first line stamped at or after `cutoff` on. nil when there's nothing old to drop
+    /// (a log with no stamps at all is left alone). Stamps are "[2026-10-08T04:31:34Z] …",
+    /// which sort as text.
+    static func cut(_ log: Data, before cutoff: Date) -> (offset: Int, lines: Int)? {
+        let oldest = Array(ISO8601DateFormatter().string(from: cutoff).utf8)
+        var start = log.startIndex, lines = 0, sawOld = false
+        while start < log.endIndex {
+            let end = log[start...].firstIndex(of: 0x0A) ?? log.endIndex
+            let close = start + oldest.count + 1
+            if close < end, log[start] == UInt8(ascii: "["), log[close] == UInt8(ascii: "]") {
+                if !log[(start + 1)..<close].lexicographicallyPrecedes(oldest) { break }
+                sawOld = true
+            }
+            lines += 1
+            start = min(end + 1, log.endIndex)
+        }
+        return sawOld ? (start - log.startIndex, lines) : nil
+    }
+
+    /// Drop what's older than `days` from the log at `path`. Returns how many lines went.
+    @discardableResult
+    static func trim(_ path: String, now: Date = Date()) -> Int {
+        guard let log = FileManager.default.contents(atPath: path),
+              let cut = cut(log, before: now.addingTimeInterval(-Double(days) * 86_400)),
+              let file = FileHandle(forWritingAtPath: path) else { return 0 }
+        defer { try? file.close() }
+        do {
+            try file.truncate(atOffset: 0)
+            try file.write(contentsOf: log.suffix(from: log.startIndex + cut.offset))
+        } catch { return 0 }
+        return cut.lines
+    }
+
+    /// The file stderr goes to, when it is one (launchd's StandardErrorPath).
+    static func stderrFile() -> String? {
+        var st = stat()
+        guard fstat(STDERR_FILENO, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        return fcntl(STDERR_FILENO, F_GETPATH, &buf) == 0 ? String(cString: buf) : nil
+    }
+}
+
 // Background listener: owns the one HUD, the speech queue, and the global hotkey.
 // Runs from a LaunchAgent; no window/Dock until something needs reading.
 final class Agent {
@@ -3782,6 +3832,7 @@ final class Agent {
     let hud = Controller()
     var spoolSource: DispatchSourceFileSystemObject?
     var pollTimer: Timer?
+    var logTrimTimer: Timer?
     var napGuard: NSObjectProtocol?
     var heartbeatOK = true
     var usr1: DispatchSourceSignal?
@@ -3792,12 +3843,21 @@ final class Agent {
         FileHandle.standardError.write("[\(ts)] \(message)\n".data(using: .utf8)!)
     }
 
+    /// Keep the log to LogKeep.days. Says so only when something went.
+    private func trimLog() {
+        guard let path = LogKeep.stderrFile() else { return }   // run by hand: stderr is the terminal
+        let gone = LogKeep.trim(path)
+        if gone > 0 { log("log trimmed: \(gone) lines older than \(LogKeep.days) days dropped") }
+    }
+
     func run() {
         Agent.shared = self
         hud.onIdle = { [weak self] in self?.hud.hidePanel() }
         hud.log = { [weak self] in self?.log($0) }
         hud.watchMic()
         hud.hotkeyHint = "Anywhere:  ⌃⌥P pause / resume    ⌃⌥H show / hide this window"
+        trimLog()
+        logTrimTimer = Timer.scheduledTimer(withTimeInterval: 86_400, repeats: true) { [weak self] _ in self?.trimLog() }
         log("agent started (pid \(getpid()))")
         // The one thing you can't tell from outside the process: whether macOS will
         // let us see the text you've highlighted.

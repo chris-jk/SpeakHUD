@@ -238,7 +238,9 @@ tail -f ~/Library/Logs/speakhud-agent.log                       # what it's doin
 The log records whether Accessibility was granted, which hotkey it bound, and each
 item it picks up off the queue. It's the only place to see the permission state, since
 running `speak-hud` from a terminal reports *the terminal's* Accessibility grant rather
-than SpeakHUD's.
+than SpeakHUD's. It also names whichever app took the mic when speech holds
+(`mic taken by …`). The log keeps the last 30 days: older lines are dropped when the
+agent starts and once a day after.
 
 ### Accessibility permission
 
