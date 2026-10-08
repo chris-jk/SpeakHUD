@@ -30,6 +30,8 @@ if [ ! -f AppIcon.icns ]; then
 fi
 cp AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
 cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the in-app Claude Code setup
+mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in speak-hud.swift)
+cp phone/index.html phone/app.css phone/app.js "$STAGE/Contents/Resources/phone/"
 
 echo "== Info.plist =="
 cat > "$STAGE/Contents/Info.plist" <<PLIST

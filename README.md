@@ -34,6 +34,10 @@ a standalone app.
   ticked, say *"skip"*, *"later"*, *"again"*, *"pause"* or *"go on"* while a turn is being
   read. The Mac's own voice is cancelled out of the mic, so it doesn't obey itself. See
   [Listen While Reading](#listen-while-reading).
+- **Answer from your phone** (off until you set it up). A page on your own tailnet shows
+  each terminal's last turn in a window the colour of that terminal, takes your answer,
+  and answers question boxes with a tap. Switch **Away** on and finished turns are pushed
+  to your phone instead of read to an empty room. See [The phone](#the-phone).
 - **Global hotkey to read your highlighted text** from any app (default `⌃⌥S`), with
   play / pause / speed controls in the HUD. The combo is **user-configurable**.
 - **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,
@@ -184,6 +188,61 @@ phrase said on its own is a command. A *bottle* sound means it heard one.
 - Bluetooth headsets drop to call quality while their mic is open. This is for speakers,
   or wired headphones with the Mac's own mic.
 
+## The phone
+
+Walk away from the Mac and keep answering. SpeakHUD serves one page, on this Mac only
+(`127.0.0.1`); your tailnet carries it to your phone, so nothing here listens on a
+network and nothing leaves your own devices.
+
+What's on the page:
+
+- **A window per terminal**, newest first, with a bar in that terminal's own frame
+  colour, its last finished turn, and a box to answer in. An answer is pasted into that
+  terminal's prompt and sent, by the same guarded paste as a spoken reply: only into
+  Claude Code's prompt box, never into a question or permission box.
+- **Question boxes as buttons.** When Claude asks a multiple-choice question, its
+  choices show as buttons; a tap presses that number in the terminal.
+- **Its screen**: the foot of the terminal as text, with keys (1 to 4, up, down, Enter,
+  Esc) for anything that wants a key: a permission box, or Esc to stop a turn.
+- **Away.** On: finished turns are pushed to your phone and not read aloud, no mic opens
+  for a reply nobody is there to give, and the Mac is kept from idling to sleep (the
+  screen can still lock). The menu bar icon turns into a phone while it's on. Off: the
+  Mac reads aloud as usual, and the page still works.
+
+Set it up once (the names below are examples: use your own):
+
+```sh
+SPEAKHUD=/Applications/SpeakHUD.app/Contents/MacOS/speak-hud
+tailscale serve --bg http://127.0.0.1:4778        # tailnet only; says the address it gave you
+$SPEAKHUD --setup-phone --url https://my-mac.my-tailnet.ts.net \
+          --ntfy https://ntfy.example.com/terminals
+launchctl kickstart -k gui/$(id -u)/com.chris.speakhud.agent
+```
+
+- `--url` is the address your phone reaches the page at. `--ntfy` is an
+  [ntfy](https://ntfy.sh) topic for the pushes; subscribe to it in the ntfy app. If the
+  topic needs a token, pass `--ntfy-token`, or set `$SPEAKHUD_NTFY_TOKEN` to keep it out
+  of your shell history. Without `--ntfy` the page works and Away pushes nothing.
+- Then **Phone ▸ Pair a Phone…** in the menu bar shows a QR code. Open it with the
+  phone's camera while the phone is on your tailnet. That link is the key to your
+  terminals: it leaves a cookie on the phone, and without the cookie the page shows
+  nothing. A pushed notification opens the page at the terminal it's about.
+- Lost the phone, or the link got out? `speak-hud --setup-phone --new-token`, restart the
+  agent, and pair again: the old key opens nothing.
+
+Settings live in `~/.config/speakhud/phone.json` (yours alone, mode 600). Delete it and
+restart the agent to turn the page off; `tailscale serve --https=443 off` stops the
+tailnet carrying it.
+
+Limits:
+
+- A sleeping Mac answers nothing. Away holds off idle sleep, but a closed lid still
+  sleeps.
+- Only iTerm2 panes can be answered, as with a spoken reply.
+- Turns are listed from when the agent started; a restart empties the list until each
+  terminal finishes another turn.
+- A question's free-text "Other" choice can't be typed from the page yet.
+
 ## How it picks what to read
 
 In priority order:
@@ -299,6 +358,8 @@ The background agent shows a small **speaker icon** in the menu bar:
   (see [Listen After Reading](#listen-after-reading)). Needs macOS 26.
 - **Listen While Reading** — off by default: say "skip", "later", "again", "pause" while
   a turn is read (see [Listen While Reading](#listen-while-reading)). Needs macOS 26.
+- **Phone** — **Away: Turns Go to My Phone** and **Pair a Phone…** (see
+  [The phone](#the-phone)); a note instead, until `--setup-phone` has been run.
 - **Global Hotkey** — pick a preset or open the config file (a warning line appears
   here if the file is invalid).
 - **Grant Accessibility Access…** — shown only until the permission is granted.
@@ -348,5 +409,7 @@ instead. You lose the queue in that mode, so simultaneous turns can talk over ea
   spool watcher, menu bar), and `--set-hotkey`.
 - `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn, or
   speaks it directly when the agent isn't running.
+- `phone/` — the phone page (`index.html`, `app.css`, `app.js`), copied into the app's
+  resources by `build.sh` and served by `Phone` in `speak-hud.swift`.
 - `make-icon.swift` — build-time tool that renders `AppIcon.icns`; not part of the app.
 - `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.

@@ -4,6 +4,7 @@ import Speech
 import ApplicationServices
 import Carbon.HIToolbox
 import CoreAudio
+import Network
 
 // Shared prefs domain so the speed setting is the same no matter how the reader
 // was launched (double-click app, Claude Code hook, or the global hotkey).
@@ -612,6 +613,43 @@ enum Reply {
         tell s to write text (character id 13) newline no
                             return "ok"
         """)
+    }
+
+    /// What the phone's key buttons send: the bytes the keys send themselves.
+    static let keys: [String: [Int]] = [
+        "enter": [13], "esc": [27], "tab": [9], "space": [32],
+        "up": [27, 91, 65], "down": [27, 91, 66],
+        "1": [49], "2": [50], "3": [51], "4": [52], "5": [53], "6": [54], "7": [55], "8": [56], "9": [57],
+    ]
+
+    static func keyScript(_ session: String, _ codes: [Int]) -> String {
+        let chars = codes.map { "(character id \($0))" }.joined(separator: " & ")
+        return script(session, """
+        tell s to write text (\(chars)) newline no
+                            return "ok"
+        """)
+    }
+
+    /// Press one named key in the pane `origin` names: how a question or permission
+    /// box, which takes no paste, is answered from the phone.
+    static func press(_ key: String, in origin: Origin, ask: (String) -> Answer = Reply.ask) -> Outcome {
+        guard canReach(origin), let session = origin.session else { return .gone }
+        guard let codes = keys[key] else { return .failed("no such key") }
+        let a = ask(keyScript(session, codes))
+        if let code = a.errorCode {
+            return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
+        }
+        return a.reply?.hasPrefix("ok") == true ? .sent : .gone
+    }
+
+    /// The foot of the pane's screen as text, for the phone to show. Nil when it's gone.
+    static func screen(of origin: Origin, lines: Int = 40, ask: (String) -> Answer = Reply.ask) -> String? {
+        guard canReach(origin), let session = origin.session,
+              let reply = ask(screenScript(session)).reply, reply.hasPrefix("ok") else { return nil }
+        let all = String(reply.dropFirst(2)).components(separatedBy: .newlines)
+        var end = all.count
+        while end > 0, all[end - 1].trimmingCharacters(in: .whitespaces).isEmpty { end -= 1 }
+        return all[max(0, end - lines)..<end].joined(separator: "\n").trimmingCharacters(in: .newlines)
     }
 
     enum Outcome: Equatable, CustomStringConvertible {
@@ -3775,6 +3813,558 @@ func parseHotkey(_ spec: String) -> (keyCode: UInt32, mods: UInt32)? {
     return (code, mods)
 }
 
+// ---------------------------------------------------------------------------
+// The phone. A page that shows each terminal's last turn and takes an answer for it,
+// and a push when a turn finishes while you're away. The page is served on this Mac
+// only (127.0.0.1): reaching it from a phone is your tailnet's job (`tailscale serve`),
+// so nothing here listens on a network. Off until ~/.config/speakhud/phone.json exists
+// (`speak-hud --setup-phone`).
+// ---------------------------------------------------------------------------
+
+/// phone.json. `token` is what a paired phone holds: it opens the page, and the page
+/// types into your terminals. It never goes in the log.
+struct PhoneConfig: Equatable {
+    static let defaultPort: UInt16 = 4778
+    static var path: String { NSString(string: "~/.config/speakhud/phone.json").expandingTildeInPath }
+
+    var port = PhoneConfig.defaultPort
+    var token: String
+    /// How the phone reaches the page ("https://my-mac.my-tailnet.ts.net"). Pushes link here.
+    var url: String? = nil
+    /// The ntfy topic pushes go to ("https://ntfy.example.com/terminals"), and its access token.
+    var ntfy: String? = nil
+    var ntfyToken: String? = nil
+
+    static func newToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// nil when the file is missing or its token is no good: the page stays off rather
+    /// than open. Anything else that doesn't look right is left out.
+    static func load(_ path: String = PhoneConfig.path) -> PhoneConfig? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = o["token"] as? String, token.count >= 32,
+              token.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.alphanumerics.contains($0) })
+        else { return nil }
+        var c = PhoneConfig(token: token)
+        if let p = o["port"] as? NSNumber, CFGetTypeID(p) != CFBooleanGetTypeID(),
+           p.doubleValue == p.doubleValue.rounded(), (1024...65535).contains(p.intValue) {
+            c.port = UInt16(p.intValue)
+        }
+        c.url = web(o["url"])
+        c.ntfy = web(o["ntfy"])
+        if let t = o["ntfy_token"] as? String, !t.isEmpty { c.ntfyToken = t }
+        return c
+    }
+
+    /// An http(s) address with a host, without its trailing slash.
+    static func web(_ raw: Any?) -> String? {
+        guard var s = raw as? String, let u = URL(string: s), let scheme = u.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", u.host?.isEmpty == false else { return nil }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+
+    /// Written for you alone (0600): it holds the token and the push server's.
+    @discardableResult
+    func save(to path: String = PhoneConfig.path) -> Bool {
+        var o: [String: Any] = ["port": Int(port), "token": token]
+        if let url = url { o["url"] = url }
+        if let ntfy = ntfy { o["ntfy"] = ntfy }
+        if let t = ntfyToken { o["ntfy_token"] = t }
+        guard let data = try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted, .sortedKeys]),
+              var text = String(data: data, encoding: .utf8) else { return false }
+        text = text.replacingOccurrences(of: "\\/", with: "/") + "\n"
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        guard fm.createFile(atPath: path, contents: text.data(using: .utf8), attributes: [.posixPermissions: 0o600])
+        else { return false }
+        return (try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)) != nil
+    }
+
+    /// The link that pairs a phone: opened once, it leaves the token there as a cookie.
+    var pairLink: String? { url.map { "\($0)/pair?k=\(token)" } }
+}
+
+/// What the page shows: the last turn of each terminal, the newest first.
+struct PhoneDesk {
+    static let keep = 30
+    /// The question hook's key is its session's with this on the end (read-question.py).
+    static let questionSuffix = ":question"
+    /// A question comes in pieces (the question, a pause, its options). Pieces this
+    /// close together are one box; later than that it's the next question.
+    static let questionGap: TimeInterval = 90
+
+    struct Turn: Equatable {
+        let key: String              // the session: one terminal
+        var name: String
+        var text: String             // its last finished turn, as read aloud
+        var at: Date
+        var origin: Origin?
+        var question: String? = nil  // a question box it has up, with its options
+        var askedAt: Date? = nil
+        var sent: String? = nil      // what the phone last sent it, until its next turn
+        var note: String? = nil      // why a send didn't go
+    }
+
+    private(set) var turns: [Turn] = []
+
+    func turn(_ key: String) -> Turn? { turns.first { $0.key == key } }
+
+    /// Whether `item` is a turn's first word: a finished turn, or the first piece of a
+    /// question. (Its options follow by themselves and shouldn't ping twice.)
+    @discardableResult
+    mutating func took(_ item: SpeechItem, now: Date = Date()) -> Bool {
+        let asking = item.key.hasSuffix(Self.questionSuffix)
+        let key = asking ? String(item.key.dropLast(Self.questionSuffix.count)) : item.key
+        var first = true
+        var t: Turn
+        if asking {
+            t = turn(key) ?? Turn(key: key, name: item.source, text: "", at: now, origin: item.origin)
+            if let had = t.question, let at = t.askedAt, now.timeIntervalSince(at) < Self.questionGap {
+                t.question = had + "\n\n" + item.text
+                first = false
+            } else {
+                t.question = item.text
+            }
+            t.askedAt = now
+            t.origin = item.origin ?? t.origin
+            (t.sent, t.note) = (nil, nil)
+        } else {
+            t = Turn(key: key, name: item.source, text: item.text, at: now, origin: item.origin)
+        }
+        turns.removeAll { $0.key == key }
+        turns.insert(t, at: 0)
+        if turns.count > Self.keep { turns.removeLast(turns.count - Self.keep) }
+        return first
+    }
+
+    /// Its question box has closed: answered here with a key, or at the Mac.
+    mutating func questionClosed(_ key: String) {
+        guard let i = turns.firstIndex(where: { $0.key == key }) else { return }
+        (turns[i].question, turns[i].askedAt) = (nil, nil)
+    }
+
+    /// The phone sent `text` to `key`, and this is how it went.
+    mutating func answered(_ key: String, with text: String, _ outcome: Reply.Outcome) {
+        guard let i = turns.firstIndex(where: { $0.key == key }) else { return }
+        if outcome == .sent {
+            (turns[i].sent, turns[i].note, turns[i].question) = (text, nil, nil)
+        } else {
+            turns[i].note = outcome.description
+        }
+    }
+}
+
+/// Just enough HTTP for one page and a few JSON calls: a request read whole, one
+/// response, connection closed.
+enum HTTP {
+    static let maxHead = 16 * 1024
+    static let maxBody = 64 * 1024
+
+    struct Request: Equatable {
+        var method = "GET"
+        var path = "/"
+        var query: [String: String] = [:]
+        var headers: [String: String] = [:]   // names lowercased
+        var body = Data()
+
+        var cookies: [String: String] {
+            var out: [String: String] = [:]
+            for pair in (headers["cookie"] ?? "").split(separator: ";") {
+                let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                if kv.count == 2 { out[kv[0].trimmingCharacters(in: .whitespaces)] = kv[1].trimmingCharacters(in: .whitespaces) }
+            }
+            return out
+        }
+        var json: [String: Any]? {
+            guard headers["content-type"]?.lowercased().hasPrefix("application/json") == true else { return nil }
+            return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        }
+    }
+
+    enum Parsed: Equatable { case incomplete, bad, request(Request) }
+
+    /// `data` is everything received so far. `.incomplete` means keep reading.
+    static func parse(_ data: Data) -> Parsed {
+        guard let gap = data.range(of: Data("\r\n\r\n".utf8)) else {
+            return data.count > maxHead ? .bad : .incomplete
+        }
+        guard gap.lowerBound - data.startIndex <= maxHead,
+              let head = String(data: data[data.startIndex..<gap.lowerBound], encoding: .utf8) else { return .bad }
+        var lines = head.components(separatedBy: "\r\n")
+        let first = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: false)
+        guard first.count == 3, first[2].hasPrefix("HTTP/1."), first[1].hasPrefix("/") else { return .bad }
+        var r = Request()
+        r.method = String(first[0])
+        let target = first[1].split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        r.path = String(target[0])
+        if target.count > 1 {
+            for pair in target[1].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard let k = String(kv[0]).removingPercentEncoding else { return .bad }
+                r.query[k] = kv.count > 1 ? (String(kv[1]).removingPercentEncoding ?? "") : ""
+            }
+        }
+        for line in lines {
+            guard let colon = line.firstIndex(of: ":") else { return .bad }
+            r.headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        }
+        guard r.headers["transfer-encoding"] == nil else { return .bad }   // nothing here sends chunks
+        var length = 0
+        if let raw = r.headers["content-length"] {
+            guard let n = Int(raw), (0...maxBody).contains(n) else { return .bad }
+            length = n
+        }
+        guard data.endIndex - gap.upperBound >= length else { return .incomplete }
+        r.body = data.subdata(in: gap.upperBound..<(gap.upperBound + length))
+        return .request(r)
+    }
+
+    struct Response {
+        var status = 200
+        var type = "application/json"
+        var headers: [(String, String)] = []
+        var body = Data()
+
+        static func json(_ o: Any, status: Int = 200) -> Response {
+            Response(status: status, body: (try? JSONSerialization.data(withJSONObject: o)) ?? Data("{}".utf8))
+        }
+        static func text(_ s: String, type: String = "text/plain; charset=utf-8", status: Int = 200) -> Response {
+            Response(status: status, type: type, body: Data(s.utf8))
+        }
+
+        private static let reasons = [200: "OK", 303: "See Other", 400: "Bad Request", 401: "Unauthorized",
+                                      403: "Forbidden", 404: "Not Found", 409: "Conflict"]
+
+        /// The bytes to send. Every response says what it is, that nothing may keep or
+        /// frame it, and that the page loads nothing from anywhere else.
+        func wire() -> Data {
+            var head = "HTTP/1.1 \(status) \(Self.reasons[status] ?? "OK")\r\n"
+            let fixed = [("Content-Type", type), ("Content-Length", String(body.count)), ("Connection", "close"),
+                         ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                         ("X-Frame-Options", "DENY"), ("Referrer-Policy", "no-referrer"),
+                         ("Content-Security-Policy",
+                          "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'")]
+            for (k, v) in fixed + headers { head += "\(k): \(v)\r\n" }
+            return Data((head + "\r\n").utf8) + body
+        }
+    }
+}
+
+/// The page's server: this Mac only. Connections and the handler run on the main queue.
+final class PhoneServer {
+    private let listener: NWListener
+    private let handle: (HTTP.Request) -> HTTP.Response
+    /// The port it's on, once it is (0 asks for any free one; tests do).
+    private(set) var port: UInt16?
+
+    init(port: UInt16, handle: @escaping (HTTP.Request) -> HTTP.Response) throws {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port) ?? .any)
+        listener = try NWListener(using: params)
+        self.handle = handle
+    }
+
+    func start(failed: @escaping (String) -> Void = { _ in }) {
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready: self?.port = self?.listener.port?.rawValue
+            case .failed(let error): failed(error.localizedDescription)
+            default: break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] in self?.serve($0) }
+        listener.start(queue: .main)
+    }
+
+    func stop() { listener.cancel() }
+
+    private func serve(_ connection: NWConnection) {
+        var buffer = Data()
+        // A connection that never finishes its request doesn't get to sit there.
+        let giveUp = DispatchWorkItem { connection.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: giveUp)
+        func answer(_ response: HTTP.Response) {
+            connection.send(content: response.wire(), completion: .contentProcessed { _ in
+                giveUp.cancel()
+                connection.cancel()
+            })
+        }
+        func read() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, done, error in
+                guard let self = self else { return connection.cancel() }
+                if let data = data { buffer.append(data) }
+                switch HTTP.parse(buffer) {
+                case .request(let r): answer(self.handle(r))
+                case .bad: answer(.json(["error": "bad request"], status: 400))
+                case .incomplete:
+                    if done || error != nil { giveUp.cancel(); connection.cancel() } else { read() }
+                }
+            }
+        }
+        connection.start(queue: .main)
+        read()
+    }
+}
+
+/// What the page asks and what it's told, and the push when you're away. No network of
+/// its own: PhoneServer hands it requests, and `transport` takes the pushes.
+final class Phone {
+    static let awayKey = "phoneAway"
+    static let cookie = "speakhud"
+    static let pushLength = 300
+    static let assets = ["/": ("index.html", "text/html; charset=utf-8"),
+                         "/app.css": ("app.css", "text/css; charset=utf-8"),
+                         "/app.js": ("app.js", "text/javascript; charset=utf-8")]
+
+    let config: PhoneConfig
+    private(set) var desk = PhoneDesk()
+    private let defaults: UserDefaults
+    /// Puts the words in a terminal. Tests answer for iTerm2.
+    var deliver: (String, Origin) -> Reply.Outcome = { Reply.send($0, to: $1) }
+    /// Presses a key in a terminal, and reads the foot of its screen.
+    var press: (String, Origin) -> Reply.Outcome = { Reply.press($0, in: $1) }
+    var look: (Origin) -> String? = { Reply.screen(of: $0) }
+    /// Sends a push. Tests keep the request instead.
+    var transport: (URLRequest, @escaping (String?) -> Void) -> Void = Phone.post
+    /// A file of the page, by name. The app's are in its bundle; tests read the repo's.
+    var asset: (String) -> Data? = { name in
+        Bundle.main.resourcePath.flatMap { FileManager.default.contents(atPath: $0 + "/phone/" + name) }
+    }
+    var log: (String) -> Void = { _ in }
+    var onAwayChange: (Bool) -> Void = { _ in }
+
+    init(config: PhoneConfig, defaults: UserDefaults = prefs) {
+        self.config = config
+        self.defaults = defaults
+    }
+
+    // -- away --------------------------------------------------------------
+
+    /// Away: finished turns go to the phone instead of being read to an empty room.
+    var away: Bool { defaults.bool(forKey: Self.awayKey) }
+
+    func setAway(_ on: Bool) {
+        guard on != away else { return }
+        defaults.set(on, forKey: Self.awayKey)
+        log("away: \(on ? "on — turns go to the phone" : "off")")
+        onAwayChange(on)
+    }
+
+    // -- turns in ----------------------------------------------------------
+
+    /// A turn or question off the spool. Kept for the page either way; pushed when away.
+    func took(_ item: SpeechItem, now: Date = Date()) {
+        let asking = item.key.hasSuffix(PhoneDesk.questionSuffix)
+        guard item.answerable || asking else { return }   // only Claude Code's turns have a terminal to answer in
+        let first = desk.took(item, now: now)
+        if away, first { ping(item, asking: asking) }
+    }
+
+    /// `text` as a push's body: one line, cut to length.
+    static func brief(_ text: String) -> String {
+        let line = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return line.count > pushLength ? String(line.prefix(pushLength - 1)) + "…" : line
+    }
+
+    /// The push for `item`, or nil when there's nowhere to send one.
+    func pushRequest(for item: SpeechItem, asking: Bool) -> URLRequest? {
+        guard let topicURL = config.ntfy.flatMap({ URL(string: $0) }), !topicURL.lastPathComponent.isEmpty,
+              topicURL.lastPathComponent != "/" else { return nil }
+        let key = asking ? String(item.key.dropLast(PhoneDesk.questionSuffix.count)) : item.key
+        var body: [String: Any] = ["topic": topicURL.lastPathComponent,
+                                   "title": asking ? "\(item.source) is asking" : item.source,
+                                   "message": Self.brief(item.text)]
+        if let url = config.url {
+            body["click"] = url + "/#" + (key.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? "")
+        }
+        var request = URLRequest(url: topicURL.deletingLastPathComponent())
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("SpeakHUD", forHTTPHeaderField: "User-Agent")
+        if let token = config.ntfyToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+
+    private func ping(_ item: SpeechItem, asking: Bool) {
+        guard let request = pushRequest(for: item, asking: asking) else {
+            log("away: no push for \(item.source) — phone.json has no ntfy topic")
+            return
+        }
+        transport(request) { [weak self] problem in
+            self?.log(problem.map { "away: push for \(item.source) failed — \($0)" } ?? "away: pushed \(item.source)")
+        }
+    }
+
+    /// Sends `request`; `done` gets what went wrong, or nil, on the main queue.
+    static func post(_ request: URLRequest, done: @escaping (String?) -> Void) {
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let problem = error?.localizedDescription ?? ((200..<300).contains(code) ? nil : "the server answered \(code)")
+            DispatchQueue.main.async { done(problem) }
+        }.resume()
+    }
+
+    // -- the page ----------------------------------------------------------
+
+    private func paired(_ r: HTTP.Request) -> Bool {
+        Self.same(r.cookies[Self.cookie] ?? "", config.token)
+    }
+
+    /// Compared without stopping at the first difference, so timing says nothing.
+    static func same(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        var diff = UInt8(x.count == y.count ? 0 : 1)
+        for i in 0..<y.count { diff |= (i < x.count ? x[i] : 0) ^ y[i] }
+        return diff == 0
+    }
+
+    func state(now: Date = Date()) -> [String: Any] {
+        ["away": away,
+         "turns": desk.turns.map { t -> [String: Any] in
+            ["key": t.key, "name": t.name, "text": t.text,
+             "at": ((t.askedAt.map { max($0, t.at) } ?? t.at).timeIntervalSince1970).rounded(),
+             "color": t.origin?.color as Any? ?? NSNull(),
+             "canReply": Reply.canReach(t.origin),
+             "question": t.question as Any? ?? NSNull(),
+             "sent": t.sent as Any? ?? NSNull(),
+             "note": t.note as Any? ?? NSNull()]
+         }]
+    }
+
+    func respond(to r: HTTP.Request) -> HTTP.Response {
+        if r.method == "GET", r.path == "/pair" {
+            guard Self.same(r.query["k"] ?? "", config.token) else {
+                return .text("That link doesn't open this Mac. Get a fresh one from SpeakHUD's menu: Phone, Pair a Phone.", status: 403)
+            }
+            let secure = config.url?.lowercased().hasPrefix("https:") == true ? "; Secure" : ""
+            return HTTP.Response(status: 303, type: "text/plain; charset=utf-8", headers: [
+                ("Location", "/"),
+                ("Set-Cookie", "\(Self.cookie)=\(config.token); Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax\(secure)")])
+        }
+        guard paired(r) else {
+            return r.path.hasPrefix("/api/")
+                ? .json(["error": "not paired"], status: 401)
+                : .text("This phone isn't paired with the Mac. On the Mac, open SpeakHUD's menu: Phone, Pair a Phone.", status: 401)
+        }
+        if r.method == "GET", let (name, type) = Self.assets[r.path] {
+            guard let data = asset(name) else { return .text("The page's files are missing from the app.", status: 404) }
+            return HTTP.Response(type: type, body: data)
+        }
+        if r.method == "GET", r.path == "/api/state" { return .json(state()) }
+        if r.method == "GET", r.path == "/api/screen" {
+            guard let turn = desk.turn(r.query["key"] ?? ""), let origin = turn.origin,
+                  let screen = look(origin) else {
+                return .json(["error": "its terminal can't be read from here"], status: 409)
+            }
+            // Back at Claude's prompt, whatever it was asking has been answered.
+            if turn.question != nil, Reply.promptText(in: screen) != nil { desk.questionClosed(turn.key) }
+            return .json(["screen": screen, "state": state()])
+        }
+        guard r.method == "POST", r.headers["x-speakhud"] == "1", let body = r.json else {
+            return .json(["error": "not found"], status: 404)
+        }
+        switch r.path {
+        case "/api/away":
+            guard let on = body["on"] as? Bool else { return .json(["error": "on must be true or false"], status: 400) }
+            setAway(on)
+            return .json(state())
+        case "/api/key":
+            guard let key = body["key"] as? String, let name = body["press"] as? String, Reply.keys[name] != nil else {
+                return .json(["error": "no such key"], status: 400)
+            }
+            guard let turn = desk.turn(key) else {
+                return .json(["error": "that terminal isn't on the list any more"], status: 404)
+            }
+            guard let origin = turn.origin, Reply.canReach(origin) else {
+                return .json(["error": "its terminal can't be reached from here"], status: 409)
+            }
+            let outcome = press(name, origin)
+            log("phone key \(name) to \(turn.name): \(outcome)")
+            return .json(["sent": outcome == .sent, "outcome": outcome.description])
+        case "/api/reply":
+            guard let key = body["key"] as? String, let text = body["text"] as? String,
+                  Reply.clean(text) != nil else { return .json(["error": "nothing to send"], status: 400) }
+            guard let turn = desk.turn(key) else {
+                return .json(["error": "that terminal isn't on the list any more"], status: 404)
+            }
+            guard let origin = turn.origin, Reply.canReach(origin) else {
+                return .json(["error": "its terminal can't be reached from here"], status: 409)
+            }
+            let outcome = deliver(text, origin)
+            desk.answered(key, with: text, outcome)
+            log("phone reply to \(turn.name) (\(text.count) chars): \(outcome)")
+            return .json(["sent": outcome == .sent, "outcome": outcome.description, "state": state()])
+        default:
+            return .json(["error": "not found"], status: 404)
+        }
+    }
+}
+
+/// Getting the token onto a phone, and phone.json onto the Mac.
+enum PhonePair {
+    /// `text` as a QR code, black on white with a quiet border, `side` points square.
+    static func qr(_ text: String, side: CGFloat) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let code = filter.outputImage, code.extent.width > 0 else { return nil }
+        let scale = (side / code.extent.width).rounded(.down)
+        let rep = NSCIImageRep(ciImage: code.transformed(by: CGAffineTransform(scaleX: max(scale, 1), y: max(scale, 1))))
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: side, height: side).fill()
+        rep.draw(in: NSRect(x: (side - rep.size.width) / 2, y: (side - rep.size.height) / 2,
+                            width: rep.size.width, height: rep.size.height))
+        image.unlockFocus()
+        return image
+    }
+
+    /// `speak-hud --setup-phone [--url U] [--ntfy TOPIC_URL] [--ntfy-token T] [--port N] [--new-token]`:
+    /// writes phone.json, keeping the token and whatever isn't given again. The ntfy
+    /// token can come from $SPEAKHUD_NTFY_TOKEN instead, which keeps it out of `ps`.
+    /// `--new-token` is for a lost phone or a leaked link: every phone has to pair again.
+    static func setup(_ argv: [String], env: [String: String] = ProcessInfo.processInfo.environment,
+                      path: String = PhoneConfig.path) -> (message: String, exitCode: Int32) {
+        func value(_ flag: String) -> String? {
+            argv.firstIndex(of: flag).flatMap { $0 + 1 < argv.count ? argv[$0 + 1] : nil }
+        }
+        var config = PhoneConfig.load(path) ?? PhoneConfig(token: PhoneConfig.newToken())
+        let renewed = argv.contains("--new-token")
+        if renewed { config.token = PhoneConfig.newToken() }
+        if let raw = value("--url") {
+            guard let url = PhoneConfig.web(raw) else { return ("error: --url wants an http(s) address, like https://my-mac.my-tailnet.ts.net", 2) }
+            config.url = url
+        }
+        if let raw = value("--ntfy") {
+            guard let topic = PhoneConfig.web(raw), URL(string: topic)?.path.count ?? 0 > 1 else {
+                return ("error: --ntfy wants a topic's address, like https://ntfy.example.com/terminals", 2)
+            }
+            config.ntfy = topic
+        }
+        if let token = value("--ntfy-token") ?? env["SPEAKHUD_NTFY_TOKEN"], !token.isEmpty { config.ntfyToken = token }
+        if let raw = value("--port") {
+            guard let port = UInt16(raw), port >= 1024 else { return ("error: --port wants a number from 1024 to 65535", 2) }
+            config.port = port
+        }
+        guard config.save(to: path) else { return ("error: couldn't write \(path)", 1) }
+        var lines = ["phone page set up in \(path) (port \(config.port), this Mac only)"]
+        lines.append(config.url == nil ? "no --url yet: share the port on your tailnet (tailscale serve --bg \(config.port)), then give its address with --url"
+                                       : "reached at \(config.url!)")
+        lines.append(config.ntfy == nil ? "no --ntfy topic: Away won't push" : "pushes go to \(config.ntfy!)")
+        if renewed { lines.append("new key: every phone has to pair again") }
+        lines.append("restart SpeakHUD, then pair from its menu: Phone, Pair a Phone")
+        return (lines.joined(separator: "\n"), 0)
+    }
+}
+
 /// How long the agent's log is kept. launchd only ever appends to it, so without this
 /// it grows for ever: at start, and once a day after, lines older than `days` go.
 /// The file is cut down in place. launchd holds it open for appending, and a file
@@ -3833,6 +4423,9 @@ final class Agent {
     var spoolSource: DispatchSourceFileSystemObject?
     var pollTimer: Timer?
     var logTrimTimer: Timer?
+    private(set) var phone: Phone?
+    private var phoneServer: PhoneServer?
+    private var awakeGuard: NSObjectProtocol?
     var napGuard: NSObjectProtocol?
     var heartbeatOK = true
     var usr1: DispatchSourceSignal?
@@ -3880,6 +4473,7 @@ final class Agent {
             log("could not register ⌃⌥H — use the menu bar to show/hide the HUD")
             hud.hotkeyHint = "Pause / Resume anywhere:  ⌃⌥P    (show / hide: menu bar)"
         }
+        startPhone()
         watchSpool()
         // SIGUSR1 also triggers a read — lets the install step self-test without keys.
         signal(SIGUSR1, SIG_IGN)
@@ -3957,6 +4551,14 @@ final class Agent {
         let batch = Spool.drain()
         for drop in batch.dropped { log("spool: dropped \(drop.name) — \(drop.reason)") }
         for item in batch.items {
+            phone?.took(item)
+            if phone?.away == true {
+                // It went to the phone: nothing is read to an empty room, and no mic
+                // opens for a reply nobody is there to give.
+                Spool.done(item.file)
+                log("away: \(item.source) went to the phone")
+                continue
+            }
             if hud.enqueue(item) {
                 log("speaking \(item.source)")
             } else if hud.playback.current?.file == item.file {
@@ -3965,6 +4567,40 @@ final class Agent {
                 log("queued \(item.source) — \(hud.queue.count) waiting")
             }
         }
+    }
+
+    // -- phone -------------------------------------------------------------
+
+    /// The page and the pushes, if phone.json sets them up. Without it nothing listens.
+    private func startPhone() {
+        guard let config = PhoneConfig.load() else { return }
+        let phone = Phone(config: config)
+        phone.log = { [weak self] in self?.log($0) }
+        phone.onAwayChange = { [weak self] in self?.awayChanged($0) }
+        do {
+            let server = try PhoneServer(port: config.port) { phone.respond(to: $0) }
+            server.start { [weak self] in self?.log("phone: the page stopped — \($0)") }
+            phoneServer = server
+            log("phone: page on 127.0.0.1:\(config.port)" + (config.url == nil ? " (no url in phone.json: pushes won't link to it)" : ""))
+        } catch {
+            log("phone: can't serve the page on port \(config.port) — \(error.localizedDescription)")
+        }
+        self.phone = phone
+        awayChanged(phone.away)
+    }
+
+    /// Away keeps the Mac from idling to sleep (the screen can still lock and dim):
+    /// a sleeping Mac answers nothing.
+    var onAwayChange: () -> Void = {}
+    private func awayChanged(_ on: Bool) {
+        if on, awakeGuard == nil {
+            awakeGuard = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled,
+                                                               reason: "away: answering from the phone")
+        } else if !on, let held = awakeGuard {
+            ProcessInfo.processInfo.endActivity(held)
+            awakeGuard = nil
+        }
+        onAwayChange()
     }
 
     // -- reads -------------------------------------------------------------
@@ -4020,6 +4656,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     var micItem: NSMenuItem!
     var listenItem: NSMenuItem!
     var obeyItem: NSMenuItem!
+    var awayItem: NSMenuItem!
+    var pairItem: NSMenuItem!
+    var phoneNote: NSMenuItem!
 
     init(_ agent: Agent) {
         self.agent = agent
@@ -4028,6 +4667,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         // Hiding via the panel's own button has to move the menu item too. Only the
         // visibility bits: the hook check compares whole files, so it waits for the menu.
         agent.hud.onVisibilityChange = { [weak self] in self?.refreshVisibility() }
+        agent.onAwayChange = { [weak self] in self?.refresh() }   // the phone can switch it too
     }
 
     private func build() {
@@ -4088,6 +4728,21 @@ final class MenuController: NSObject, NSMenuDelegate {
         hkParent.submenu = hk
         menu.addItem(hkParent)
 
+        let ph = NSMenu()
+        ph.autoenablesItems = false   // keep the note, and an unset-up Away, disabled
+        awayItem = item("Away: Turns Go to My Phone", #selector(toggleAway))
+        awayItem.toolTip = "Finished turns are pushed to your phone instead of read aloud, no mic opens, and the Mac stays awake."
+        ph.addItem(awayItem)
+        pairItem = item("Pair a Phone…", #selector(pairPhone))
+        ph.addItem(pairItem)
+        // Only shown until phone.json exists.
+        phoneNote = NSMenuItem(title: "Not set up — run: speak-hud --setup-phone", action: nil, keyEquivalent: "")
+        phoneNote.isEnabled = false
+        ph.addItem(phoneNote)
+        let phParent = NSMenuItem(title: "Phone", action: nil, keyEquivalent: "")
+        phParent.submenu = ph
+        menu.addItem(phParent)
+
         // Only surfaced when we can't read selections yet — otherwise it's noise.
         axItem = item("Grant Accessibility Access…", #selector(grantAccessibility))
         menu.addItem(axItem)
@@ -4120,6 +4775,13 @@ final class MenuController: NSObject, NSMenuDelegate {
         micItem.state = micItem.isEnabled && agent.hud.pauseWhileRecording ? .on : .off
         listenItem.state = agent.hud.listenAfterReading ? .on : .off
         obeyItem.state = agent.hud.listenWhileReading ? .on : .off
+        let phone = agent.phone
+        phoneNote.isHidden = phone != nil
+        awayItem.isEnabled = phone != nil
+        awayItem.state = phone?.away == true ? .on : .off
+        pairItem.isEnabled = phone?.config.pairLink != nil
+        pairItem.toolTip = phone != nil && phone?.config.pairLink == nil
+            ? "phone.json has no url: set the address your phone reaches this Mac at" : nil
     }
 
     private func refreshVisibility() {
@@ -4128,6 +4790,13 @@ final class MenuController: NSObject, NSMenuDelegate {
         // A hollow icon is the standing reminder that the panel is only hidden,
         // not gone — otherwise a hidden HUD is indistinguishable from a broken one.
         if let btn = statusItem.button {
+            // Away, nothing is read aloud: a phone in the menu bar says why it's quiet.
+            if agent.phone?.away == true,
+               let phone = NSImage(systemSymbolName: "iphone.radiowaves.left.and.right",
+                                   accessibilityDescription: "SpeakHUD (away: turns go to your phone)") {
+                btn.image = phone
+                return
+            }
             btn.image = NSImage(systemSymbolName: hidden ? "speaker.wave.2" : "speaker.wave.2.fill",
                                 accessibilityDescription: hidden ? "SpeakHUD (hidden)" : "SpeakHUD")
         }
@@ -4198,6 +4867,29 @@ final class MenuController: NSObject, NSMenuDelegate {
         alert.runModal()
         refresh()
     }
+    @objc private func toggleAway() {
+        guard let phone = agent.phone else { return }
+        phone.setAway(!phone.away)
+        refresh()
+    }
+    @objc private func pairPhone() {
+        guard let link = agent.phone?.config.pairLink else { return }
+        let alert = NSAlert()
+        alert.messageText = "Pair a phone"
+        alert.informativeText = "Point the phone's camera at this while it's on your tailnet. The link is the key to your terminals: don't share it."
+        if let qr = PhonePair.qr(link, side: 240) {
+            let view = NSImageView(frame: NSRect(x: 0, y: 0, width: 240, height: 240))
+            view.image = qr
+            alert.accessoryView = view
+        }
+        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Copy Link")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(link, forType: .string)
+        }
+    }
     @objc private func openHotkeyConfig() {
         HotkeyConfig.ensureFile()   // create it if missing; never overwrite a broken one you're fixing
         NSWorkspace.shared.open(URL(fileURLWithPath: HotkeyConfig.path))
@@ -4249,6 +4941,16 @@ enum Main {
             print(c.problems.isEmpty ? c.status.rawValue
                                      : c.status.rawValue + ": " + c.problems.joined(separator: "; "))
             exit(0)
+        }
+
+        if argv.contains("--setup-phone") {
+            let outcome = PhonePair.setup(argv)
+            if outcome.exitCode == 0 {
+                print(outcome.message)
+            } else {
+                FileHandle.standardError.write((outcome.message + "\n").data(using: .utf8)!)
+            }
+            exit(outcome.exitCode)
         }
 
         if argv.contains("--agent") {

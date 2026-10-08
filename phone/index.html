@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Terminals">
+<title>Terminals</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="top">
+  <h1>Terminals</h1>
+  <label class="away">
+    <span>Away</span>
+    <input type="checkbox" role="switch" id="away">
+  </label>
+</header>
+<p class="away-says" id="away-says"></p>
+
+<p class="trouble" id="trouble" hidden></p>
+
+<main id="windows"></main>
+
+<p class="empty" id="empty" hidden>No turns yet. When Claude Code finishes a turn on your Mac, it lands here.</p>
+
+<template id="window">
+  <article class="win">
+    <header class="win-bar">
+      <h2 class="win-name"></h2>
+      <time class="win-when"></time>
+    </header>
+    <div class="win-body">
+      <p class="win-text"></p>
+      <button type="button" class="win-more" hidden>Show all of it</button>
+
+      <section class="win-asks" hidden>
+        <p class="win-question"></p>
+        <div class="win-options"></div>
+      </section>
+
+      <p class="win-sent" hidden></p>
+      <p class="win-note" hidden></p>
+
+      <form class="win-answer">
+        <textarea rows="1" placeholder="Answer" enterkeyhint="send" autocapitalize="sentences" aria-label="Answer"></textarea>
+        <button type="submit">Send</button>
+      </form>
+
+      <details class="win-screen">
+        <summary>Its screen</summary>
+        <pre class="win-pre" tabindex="0"></pre>
+        <div class="win-keys">
+          <button type="button" data-press="1">1</button>
+          <button type="button" data-press="2">2</button>
+          <button type="button" data-press="3">3</button>
+          <button type="button" data-press="4">4</button>
+          <button type="button" data-press="up" aria-label="Up">&#9650;</button>
+          <button type="button" data-press="down" aria-label="Down">&#9660;</button>
+          <button type="button" data-press="enter">Enter</button>
+          <button type="button" data-press="esc">Esc</button>
+        </div>
+      </details>
+    </div>
+  </article>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>
