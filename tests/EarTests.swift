@@ -111,6 +111,11 @@ let earSuite = Suite("Ear") { t in
     // channel, 16,000 samples a second), through the real transcriber, comes back as words.
     do {
         var heard: Result<String, Dictation.Failure>?
+        // The agent running on this Mac keeps its recordings in the same folder: only ones new since now count.
+        func kept() -> Set<String> {
+            Set(((try? fm.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? []).filter { $0.hasPrefix(Dictation.filePrefix) })
+        }
+        let keptBefore = kept()
         let wav = dir + "/dictated.wav"
         if let spoken = recording(of: "Yes, go ahead and merge it, then tell me what failed.", in: dir, "dictated") {
             let convert = Process()
@@ -119,7 +124,17 @@ let earSuite = Suite("Ear") { t in
             try? convert.run()
             convert.waitUntilExit()
         }
-        let sound = fm.contents(atPath: wav) ?? Data()
+        // The converter adds a chunk of its own before the sound; the page doesn't. Rebuilt
+        // here as the page writes it: 44 bytes of header, then the sound and nothing else.
+        var sound = Data()
+        if let made = fm.contents(atPath: wav), let tag = made.range(of: Data("data".utf8)), made.count >= tag.upperBound + 4 {
+            let size = (0..<4).reduce(0) { $0 | Int(made[tag.upperBound + $1]) << (8 * $1) }
+            let samples = made.subdata(in: (tag.upperBound + 4)..<min(made.count, tag.upperBound + 4 + size))
+            func put(_ n: Int, _ bytes: Int) { for i in 0..<bytes { sound.append(UInt8((n >> (8 * i)) & 0xff)) } }
+            sound.append(Data("RIFF".utf8)); put(36 + samples.count, 4); sound.append(Data("WAVEfmt ".utf8))
+            put(16, 4); put(1, 2); put(1, 2); put(16_000, 4); put(32_000, 4); put(2, 2); put(16, 2)
+            sound.append(Data("data".utf8)); put(samples.count, 4); sound.append(samples)
+        }
         t.expect(Dictation.looksRight(sound) && (2...8).contains(Dictation.seconds(sound)),
                  "the test recording is a WAV a few seconds long (\(sound.count) bytes, \(Dictation.seconds(sound)) s)")
         if let transcriber = Dictation.transcriber {
@@ -130,8 +145,14 @@ let earSuite = Suite("Ear") { t in
         if case .success(let text)? = heard { said = text }
         t.expectEqual(SpokenCommand.words(said), "yes go ahead and merge it then tell me what failed",
                       "a recording from the phone comes back as the words said (\(String(describing: heard)))")
-        t.expect(((try? fm.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? []).allSatisfy { !$0.hasPrefix("speakhud-dictation-") },
-                 "and the recording isn't kept once it has been heard")
+        t.expect(kept().subtracting(keptBefore).isEmpty, "and the recording isn't kept once it has been heard")
+        let attic = dir + "/attic"
+        try? fm.createDirectory(atPath: attic, withIntermediateDirectories: true)
+        for name in [Dictation.filePrefix + "1.wav", Dictation.filePrefix + "2.wav", "someone-elses.wav"] {
+            fm.createFile(atPath: attic + "/" + name, contents: Data("x".utf8))
+        }
+        t.expect(Dictation.sweep(in: attic) == 2 && ((try? fm.contentsOfDirectory(atPath: attic)) ?? []) == ["someone-elses.wav"],
+                 "recordings a past dictation left behind are deleted when the agent starts, and nothing else is")
         var refused: Result<String, Dictation.Failure>?
         Dictation.transcriber?(Data("RIFF....WAVEnot really a recording at all".utf8) + Data(count: 4_000)) { refused = $0 }
         spin(20) { refused != nil }

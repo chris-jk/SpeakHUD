@@ -817,6 +817,13 @@ let phoneSuite = Suite("Phone") { t in
     let twoSeconds = recording(2)
     t.expect(Dictation.looksRight(twoSeconds) && Dictation.seconds(twoSeconds) == 2 && !Dictation.looksRight(Data(count: 9_000))
              && !Dictation.looksRight(recording(0.05)), "a recording is told by its own first bytes, and by being long enough to hold a word")
+    // Only exactly what the page writes: a header that doesn't match what follows it once
+    // kept the real transcriber busy for ever (10-08), and every later recording was turned away.
+    var longer = twoSeconds; longer.append(Data(count: 64_000))
+    var stereo = twoSeconds; stereo[22] = 2
+    var extra = twoSeconds; extra.replaceSubrange(36..<40, with: Data("LIST".utf8))
+    t.expect(!Dictation.looksRight(longer) && !Dictation.looksRight(stereo) && !Dictation.looksRight(extra) && !Dictation.looksRight(twoSeconds.dropLast(2)),
+             "a header that says one length over sound of another, two channels, or a chunk the page never writes: not a recording")
     let h = Bench()
     h.phone.took(turn("a", "Want me to merge it?"))
     t.expect(h.phone.state()["canHear"] as? Bool == true, "the page is told this Mac can turn a recording into words")
@@ -971,4 +978,24 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(dictated?.status == 200 && dictated?.body.contains("Run the tests again.") == true && b.heardSizes.last == minute.count,
              "over a real connection a minute's recording arrives whole, and its words come back when they're ready")
     t.expectEqual(dictate(minute, cookie: false)?.status ?? 0, 401, "an unpaired phone's recording is turned away")
+
+    // A transcriber that never answers: the page is told after a while, and the next
+    // recording is heard. (The first build left every later one turned away.)
+    let stuck = Bench()
+    stuck.phone.hearPatience = 0.3
+    stuck.hearAnswer = nil
+    var gaveUp: HTTP.Response?, answers = 0
+    _ = stuck.phone.respondLater(to: HTTP.Request(method: "POST", path: "/api/hear",
+                                                   headers: ["cookie": "\(Phone.cookie)=\(token)", "content-type": "audio/wav", "x-speakhud": "1"],
+                                                   body: twoSeconds)) { gaveUp = $0; answers += 1 }
+    t.expect(gaveUp == nil, "a transcriber that hasn't answered yet: the page waits")
+    spin(3) { gaveUp != nil }
+    t.expect(gaveUp?.status == 503 && String(decoding: gaveUp?.body ?? Data(), as: UTF8.self).contains("took too long")
+             && stuck.logs.contains { $0.hasPrefix("phone dictation failed after ") && $0.hasSuffix("the Mac took too long to hear it") },
+             "past its patience the page is told the Mac took too long, and the log says so")
+    stuck.hearDone?(.success("words that came far too late"))
+    stuck.hearAnswer = .success("Heard this one.")
+    let heardNext = said(twoSeconds, to: stuck.phone)
+    t.expect(answers == 1 && heardNext?.status == 200 && json(heardNext ?? HTTP.Response())["text"] as? String == "Heard this one.",
+             "the late answer goes nowhere, and the next recording is heard instead of being turned away")
 }

@@ -2611,18 +2611,31 @@ enum Dictation {
     /// tenth of a second at the page's 16,000 samples a second.
     static let least = 44 + 3_200
 
-    /// Whether `data` is a WAV by its own first bytes, whatever the request called it.
+    /// How long the transcriber gets with one recording before it's given up on. Three
+    /// minutes of speech takes it a few seconds; a recording it can't make sense of has
+    /// been seen to keep it for ever (10-08: a WAV whose header didn't match its length).
+    static let patience: TimeInterval = 45
+
+    /// A number in a WAV's header: `bytes` of them at `at`, smallest first.
+    private static func number(_ data: Data, _ at: Int, _ bytes: Int) -> Int {
+        (0..<bytes).reduce(0) { $0 | Int(data[data.startIndex + at + $1]) << (8 * $1) }
+    }
+
+    /// Whether `data` is exactly what the page makes, by its own bytes and whatever the
+    /// request called it: a 44-byte header saying plain 16-bit sound on one channel, then
+    /// just as much sound as the header says. Anything else never reaches the transcriber.
     static func looksRight(_ data: Data) -> Bool {
-        data.count >= least && data.prefix(4) == Data("RIFF".utf8) && data.dropFirst(8).prefix(4) == Data("WAVE".utf8)
+        guard data.count >= least else { return false }
+        func tag(_ at: Int) -> String { String(decoding: data.dropFirst(at).prefix(4), as: UTF8.self) }
+        return tag(0) == "RIFF" && tag(8) == "WAVE" && tag(12) == "fmt " && number(data, 16, 4) == 16
+            && number(data, 20, 2) == 1 && number(data, 22, 2) == 1 && (8_000...48_000).contains(number(data, 24, 4))
+            && number(data, 34, 2) == 16 && tag(36) == "data" && number(data, 40, 4) == data.count - 44
     }
 
     /// How long `data` runs, in seconds, by its header's own figures. 0 if they're missing.
     static func seconds(_ data: Data) -> Double {
         guard data.count >= 44 else { return 0 }
-        func number(_ at: Int, _ bytes: Int) -> Int {
-            (0..<bytes).reduce(0) { $0 | Int(data[data.startIndex + at + $1]) << (8 * $1) }
-        }
-        let perSecond = number(28, 4)
+        let perSecond = number(data, 28, 4)
         return perSecond > 0 ? Double(data.count - 44) / Double(perSecond) : 0
     }
 
@@ -2645,11 +2658,23 @@ enum Dictation {
         init(_ why: String) { self.why = why }
     }
 
+    /// What a recording's file is called while the transcriber reads it.
+    static let filePrefix = "speakhud-dictation-"
+
+    /// Delete any recording left behind in `dir`: one the transcriber never finished
+    /// with outlives the agent that was waiting on it. Run when the agent starts, when
+    /// nothing can be in the middle of being heard. Returns how many went.
+    @discardableResult
+    static func sweep(in dir: String = NSTemporaryDirectory()) -> Int {
+        let left = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasPrefix(filePrefix) }
+        return left.filter { (try? FileManager.default.removeItem(atPath: (dir as NSString).appendingPathComponent($0))) != nil }.count
+    }
+
     /// The words said in a recording. It's written to a file of your own for the
     /// transcriber to read, and the file goes as soon as it has been.
     @available(macOS 26.0, *)
     static func words(in data: Data) async throws -> String {
-        let path = NSTemporaryDirectory() + "speakhud-dictation-\(UUID().uuidString).wav"
+        let path = NSTemporaryDirectory() + "\(filePrefix)\(UUID().uuidString).wav"
         guard FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) else {
             throw MicEar.Failure("the recording couldn't be kept long enough to hear it")
         }
@@ -2660,6 +2685,13 @@ enum Dictation {
         let transcriber = await MicEar.transcriber()
         try await MicEar.install(transcriber)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
+        // A transcriber that hasn't finished in `patience` is stopped where it is.
+        let began = Date()
+        let watch = Task {
+            try? await Task.sleep(nanoseconds: UInt64(patience * 1_000_000_000))
+            if !Task.isCancelled { await analyzer.cancelAndFinishNow() }
+        }
+        defer { watch.cancel() }
         // Each result is one stretch of speech, guessed at and then final: the finals are it.
         async let heard: String = {
             var settled = ""
@@ -2671,7 +2703,9 @@ enum Dictation {
         } else {
             await analyzer.cancelAndFinishNow()
         }
-        return try await heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = try await heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Date().timeIntervalSince(began) < patience else { throw MicEar.Failure("the Mac took too long to hear it") }
+        return words
     }
 }
 
@@ -4989,6 +5023,10 @@ final class Phone {
     /// Turns a recording from the page into words, where this Mac can. Tests answer for it.
     var hear: ((Data, @escaping (Result<String, Dictation.Failure>) -> Void) -> Void)? = Dictation.transcriber
     private var hearing = false
+    /// How long the page waits for its words. Past this the transcriber is taken to be
+    /// stuck, the page is told, and the next recording is heard: one that never answers
+    /// must not leave every later one turned away.
+    var hearPatience: TimeInterval = Dictation.patience + 15
     /// Keeps the list for the next run of the agent. `saved` is what the last one kept.
     var save: (Data) -> Void = { _ in }
     var log: (String) -> Void = { _ in }
@@ -5216,7 +5254,10 @@ final class Phone {
         }
         hearing = true
         let began = Date(), length = Dictation.seconds(r.body)
-        hear(r.body) { [weak self] result in
+        var answered = false
+        let finish: (Result<String, Dictation.Failure>) -> Void = { [weak self] result in
+            guard !answered else { return }   // the transcriber and the wait for it can both get here
+            answered = true
             self?.hearing = false
             let took = String(format: "%.1f", Date().timeIntervalSince(began))
             switch result {
@@ -5228,6 +5269,10 @@ final class Phone {
                 self?.log("phone dictation failed after \(took) s: \(failure.why)")
                 done(.json(["error": failure.why], status: 503))
             }
+        }
+        hear(r.body, finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + hearPatience) {
+            finish(.failure(Dictation.Failure("the Mac took too long to hear it")))
         }
         return true
     }
@@ -5704,6 +5749,8 @@ final class Agent {
         phone.log = { [weak self] in self?.log($0) }
         phone.sweepPictures()
         phone.onAwayChange = { [weak self] in self?.awayChanged($0) }
+        let leftBehind = Dictation.sweep()
+        if leftBehind > 0 { log("phone: deleted \(leftBehind) recording\(leftBehind == 1 ? "" : "s") a past dictation left behind") }
         do {
             let server = try PhoneServer(port: config.port) { phone.respond(to: $0) }
             server.slow = { phone.respondLater(to: $0, done: $1) }
