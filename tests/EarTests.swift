@@ -153,6 +153,34 @@ let earSuite = Suite("Ear") { t in
         }
         t.expect(Dictation.sweep(in: attic) == 2 && ((try? fm.contentsOfDirectory(atPath: attic)) ?? []) == ["someone-elses.wav"],
                  "recordings a past dictation left behind are deleted when the agent starts, and nothing else is")
+        // Word for word: the same sound, a half-second piece at a time at the pace it was said,
+        // through the real transcriber kept open. The words grow, and end as the whole of it.
+        if let live = Dictation.live, sound.count > 44 {
+            let pcm = sound.subdata(in: 44..<sound.count)
+            var answers: [String] = [], failed: String?, done = false
+            var at = 0
+            func next() {
+                let end = min(pcm.count, at + 16_000), last = end == pcm.count
+                let piece = pcm.subdata(in: at..<end)
+                at = end
+                live("eartest01", 16_000, piece, last) { result in
+                    switch result {
+                    case .success(let text): answers.append(text)
+                    case .failure(let failure): failed = failure.why
+                    }
+                    if last || failed != nil { done = true } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } }
+                }
+            }
+            next()
+            spin(60) { done }
+            t.expect(failed == nil && done, "the transcriber stayed open for the pieces (\(failed ?? "no failure"), \(answers.count) answers)")
+            t.expectEqual(SpokenCommand.words(answers.last ?? ""), "yes go ahead and merge it then tell me what failed",
+                          "the last piece's answer is everything that was said")
+            let partway = answers.dropLast().map(SpokenCommand.words).filter { !$0.isEmpty }
+            t.expect(partway.contains { $0.hasPrefix("yes") && $0.count < "yes go ahead and merge it then tell me what failed".count },
+                     "and before it, the words came as they were said (\(answers.dropLast()))")
+        }
+
         var refused: Result<String, Dictation.Failure>?
         Dictation.transcriber?(Data("RIFF....WAVEnot really a recording at all".utf8) + Data(count: 4_000)) { refused = $0 }
         spin(20) { refused != nil }

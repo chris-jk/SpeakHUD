@@ -60,6 +60,8 @@ private final class Bench {
     var heardSizes: [Int] = []       // each recording the page sent to be turned into words
     var hearAnswer: Result<String, Dictation.Failure>? = .success("Yes, go ahead.")   // nil: still hearing it
     var hearDone: ((Result<String, Dictation.Failure>) -> Void)?
+    var livePieces: [String] = []    // each piece of a word-for-word dictation: "id rate bytes last"
+    var liveAnswer: Result<String, Dictation.Failure> = .success("Yes, go")
     var screen: String? = "some output\n────────────────\n❯ \n────────────────\n  status"
 
     init(url: String? = "https://my-mac.example.ts.net", ntfy: String? = "https://push.example.com/terminals") {
@@ -83,6 +85,10 @@ private final class Bench {
         phone.hear = { [unowned self] data, done in
             self.heardSizes.append(data.count)
             if let answer = self.hearAnswer { done(answer) } else { self.hearDone = done }
+        }
+        phone.hearLive = { [unowned self] id, rate, sound, last, done in
+            self.livePieces.append("\(id) \(rate) \(sound.count) \(last ? "last" : "more")")
+            done(self.liveAnswer)
         }
         phone.transport = { [unowned self] request, done in self.pushes.append(request); done(nil) }
         phone.asset = { fm.contents(atPath: "phone/" + $0) }
@@ -858,6 +864,49 @@ let phoneSuite = Suite("Phone") { t in
     deaf.phone.hear = nil
     t.expect(deaf.phone.state()["canHear"] as? Bool == false && said(twoSeconds, to: deaf.phone)?.status == 501,
              "a Mac with no transcriber says so, and its page shows no mic")
+    // Word for word: the same route, a piece of sound at a time, each answered with the words so far.
+    func piece(_ bytes: Int, id: String = "ab12cd34ef", rate: String? = "16000", last: Bool = false, type: String = "audio/pcm",
+               header: Bool = true, paired: Bool = true, to phone: Phone) -> HTTP.Response? {
+        var query = ["live": id]
+        if let rate = rate { query["rate"] = rate }
+        if last { query["last"] = "1" }
+        var headers: [String: String] = paired ? ["cookie": "\(Phone.cookie)=\(token)"] : [:]
+        headers["content-type"] = type
+        if header { headers["x-speakhud"] = "1" }
+        var answer: HTTP.Response?
+        _ = phone.respondLater(to: HTTP.Request(method: "POST", path: "/api/hear", query: query, headers: headers, body: Data(count: bytes))) { answer = $0 }
+        return answer
+    }
+    let w = Bench()
+    w.phone.took(turn("a", "Want me to merge it?"))
+    t.expect(w.phone.state()["canHearLive"] as? Bool == true, "the page is told this Mac can hear word for word")
+    let soFar = piece(16_000, to: w.phone)
+    t.expect(soFar?.status == 200 && json(soFar ?? HTTP.Response())["text"] as? String == "Yes, go" && w.livePieces == ["ab12cd34ef 16000 16000 more"],
+             "a piece of sound comes back as the words so far")
+    w.liveAnswer = .success("Yes, go ahead.")
+    let final = piece(8_000, last: true, to: w.phone)
+    t.expect(final?.status == 200 && json(final ?? HTTP.Response())["text"] as? String == "Yes, go ahead."
+             && w.livePieces.last == "ab12cd34ef 16000 8000 last", "and the last piece as the words as they finally stand")
+    t.expect(w.logs.contains { $0.hasPrefix("phone dictated 3 words word for word (0.8 s of sound, done ") } && !w.logs.contains { $0.contains("go ahead") },
+             "logged once, when it's done: how much was said, never what")
+    t.expect(piece(0, last: true, to: w.phone)?.status == 200 && piece(0, to: w.phone)?.status == 400,
+             "the last piece may be empty (you stopped between two); any other must hold sound")
+    let pieces = w.livePieces.count
+    t.expect(piece(16_000, paired: false, to: w.phone)?.status == 401 && piece(16_000, header: false, to: w.phone)?.status == 404
+             && piece(16_000, id: "../etc", to: w.phone)?.status == 400 && piece(16_000, id: "abc", to: w.phone)?.status == 400
+             && piece(16_000, rate: nil, to: w.phone)?.status == 400 && piece(16_000, rate: "96000", to: w.phone)?.status == 400
+             && piece(16_001, to: w.phone)?.status == 400 && piece(16_000, type: "audio/wav", to: w.phone)?.status == 400
+             && w.livePieces.count == pieces,
+             "an unpaired phone, another site's page, a name or a rate that isn't one, half a sample, or the wrong kind of sound: never heard")
+    w.liveAnswer = .failure(Dictation.Failure("that dictation is over"))
+    let over = piece(16_000, to: w.phone)
+    t.expect(over?.status == 503 && String(decoding: over?.body ?? Data(), as: UTF8.self).contains("that dictation is over")
+             && w.logs.contains { $0.hasPrefix("phone dictation failed ") && $0.hasSuffix("that dictation is over") },
+             "a piece the transcriber can't take says why, to the page and the log")
+    w.phone.hearLive = nil
+    t.expect(w.phone.state()["canHearLive"] as? Bool == false && piece(16_000, to: w.phone)?.status == 501
+             && said(twoSeconds, to: w.phone)?.status == 200, "a Mac that can't hear word for word still hears a whole recording")
+
     let micScript = h.phone.respond(to: get("/mic.js"))
     t.expect(micScript.status == 200 && micScript.type.hasPrefix("text/javascript") && String(decoding: micScript.body, as: UTF8.self).contains("registerProcessor"),
              "the page's microphone script is served with the page")

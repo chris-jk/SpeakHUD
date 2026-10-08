@@ -215,10 +215,10 @@ What's on the page:
   at the top is the terminal's own status line, which is where your model and context
   figure show if your status line has them.
 - **Say it instead of typing it.** A mic button by each answer box. Tap it and talk:
-  it stops by itself two seconds after you do (or tap it again), and what you said
-  lands in the box as words, after anything already there, for you to read over and
-  send. The phone only records; your Mac's own transcriber turns the recording into
-  words, so the sound goes from your phone to your Mac and no further. See
+  your words show in the box as you say them, after anything already there, and it
+  stops by itself two seconds after you do (or tap it again), leaving them for you to
+  read over and send. The phone only records; your Mac's own transcriber turns the
+  sound into words, so it goes from your phone to your Mac and no further. See
   [Dictation from the phone](#dictation-from-the-phone).
 - **What the turn made.** Pictures, video and sound a turn made or named show under it:
   a picture as a lighter copy (tap it for the real one), a video or a recording to play
@@ -290,15 +290,24 @@ tailnet carrying it.
 ### Dictation from the phone
 
 The page records through the phone's microphone as plain sound (16-bit, one channel,
-16,000 samples a second, about two megabytes a minute), and when you stop it sends the
-recording to the Mac. The Mac writes it to a temporary file of your own, has the same
-on-device transcriber Listen After Reading uses turn it into words (macOS 26; a few
-seconds of speech takes a fraction of a second), deletes the file, and answers with the
-words. Nothing is sent anywhere else, and the agent's log says how many words were
-heard and how long it took, never what they were.
+16,000 samples a second, about two megabytes a minute) and sends it to the Mac a piece
+at a time while you talk, about three pieces a second. The Mac keeps the same on-device
+transcriber Listen After Reading uses (macOS 26) open for the length of the dictation,
+feeds it each piece, and answers each with the words so far; the newest of them are
+still a guess and can change as more is heard, as they do in any dictation. The piece
+sent when you stop is answered with the words as they finally stand. Nothing is sent
+anywhere else or kept, and the agent's log says how many words were heard and how long
+it took, never what they were.
+
+If a piece doesn't get through (a bad patch of signal), the page stops sending pieces
+and sends the whole recording when you stop instead, so nothing you said is lost: the
+words then arrive all at once. That is also how it goes on a Mac whose transcriber
+can't be kept open.
 
 - It stops two seconds after you go quiet, eight seconds in if nothing was said at
   all, and at two minutes whatever happens. A tap on the mic stops it at once.
+- On a slow line the words fall behind what you're saying and catch up: each piece
+  waits for the one before, so they only get longer.
 - The words are never sent for you: they go in the box, and Send is yours to tap.
 - While it listens the phone's own reading is paused, and the other windows' mics are
   out of reach: one dictation at a time.

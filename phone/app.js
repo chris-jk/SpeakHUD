@@ -672,6 +672,7 @@
       drawQuickList();
     }
     canHear = !!state.canHear;
+    canHearLive = !!state.canHearLive;
     // Decided before anything new starts being read: a turn that has just arrived
     // comes to the top and is read there, and then the page holds still.
     const still = settled();
@@ -1164,19 +1165,22 @@
 
   // -- dictation --------------------------------------------------------------
   // The mic by an answer box: say it instead of typing it. The phone records what you
-  // say, the Mac turns the recording into words with its own transcriber (the sound goes
-  // from this phone to your Mac and no further), and the words land in the box for you
-  // to read over and send. It stops by itself when you stop talking.
+  // say and sends it to the Mac a piece at a time while you talk; the Mac's own
+  // transcriber turns it into words (the sound goes from this phone to your Mac and no
+  // further) and they show in the box as they're heard, for you to read over and send.
+  // It stops by itself when you stop talking.
   const HEARD_RATE = 16000;      // what the Mac is sent: one channel, 16-bit
   const LOUD = 0.02;             // a stretch this loud is someone talking
   const QUIET_MS = 2000;         // this long quiet once you've spoken: you're done
   const NOTHING_MS = 8000;       // this long with nothing said: stop, and let the Mac say so
   const LONGEST_MS = 120000;
+  const PIECE_MS = 350;          // how often what's been said so far goes to the Mac
   const AudioContextKind = window.AudioContext || window.webkitAudioContext;
   const canDictate = !!(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia
     && AudioContextKind && window.AudioWorkletNode);
   let canHear = false;           // the Mac can turn a recording into words
-  let hearing = null;            // the one dictation going: { key, blocks, spoke, began, last, level, ... }
+  let canHearLive = false;       // and can do it word for word, while you talk
+  let hearing = null;            // the one dictation going: { key, sound, unsent, spoke, began, last, level, ... }
 
   function micSays(key, words) {
     const w = shown.get(key);
@@ -1209,9 +1213,91 @@
     session.stream = session.context = null;
   }
 
+  // The phone's sound comes down to the Mac's rate as it arrives: each sample out is the
+  // average of the ones it stands for, and what's left over waits for the next block.
+  function down(session, block) {
+    const step = Math.max(1, session.rate / HEARD_RATE);
+    let all = block;
+    if (session.carry.length) {
+      all = new Float32Array(session.carry.length + block.length);
+      all.set(session.carry);
+      all.set(block, session.carry.length);
+    }
+    const out = new Int16Array(Math.floor(all.length / step));
+    for (let i = 0; i < out.length; i++) {
+      const start = Math.floor(i * step);
+      const end = Math.max(start + 1, Math.floor((i + 1) * step));
+      let sum = 0;
+      for (let j = start; j < end; j++) sum += all[j];
+      const s = Math.max(-1, Math.min(1, sum / (end - start)));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    session.carry = all.slice(Math.floor(out.length * step));
+    return out;
+  }
+
+  function join(pieces) {
+    let total = 0;
+    for (const piece of pieces) total += piece.length;
+    const all = new Int16Array(total);
+    let at = 0;
+    for (const piece of pieces) { all.set(piece, at); at += piece.length; }
+    return all;
+  }
+
+  // The words so far, on the end of what the box held when you began.
+  function showWords(session, text) {
+    const w = shown.get(session.key);
+    if (!w) return;
+    const box = w.el.querySelector('.win-answer textarea');
+    const now = text ? session.base + text : session.had;
+    if (box.value === now) return;
+    box.value = now;
+    box.dispatchEvent(new Event('input'));   // the box grows to fit
+  }
+
+  // What's been recorded since the last piece, to the Mac; its answer is the words so far
+  // (for the `last` piece, the words as they finally stand).
+  async function tell(session, last) {
+    const sound = join(session.unsent);
+    session.unsent = [];
+    session.told = true;
+    const res = await fetch('/api/hear?live=' + session.id + '&rate=' + HEARD_RATE + (last ? '&last=1' : ''), {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/pcm', 'X-SpeakHUD': '1' },
+      body: sound.buffer,
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* not JSON: the status says enough */ }
+    if (!res.ok) throw new Error(data.error || 'the Mac did not say why');
+    return data.text || '';
+  }
+
+  // Word for word: one piece at a time for as long as you're talking, so on a slow line
+  // the pieces just get longer. If a piece doesn't get through, the whole recording
+  // goes when you stop instead: nothing you said is lost.
+  async function keepTelling(session) {
+    while (hearing === session && !session.ending && session.wordForWord) {
+      await new Promise((resolve) => setTimeout(resolve, PIECE_MS));
+      if (hearing !== session || session.ending || !session.unsent.length) continue;
+      try {
+        const text = await tell(session, false);
+        if (hearing === session && !session.ending) showWords(session, text);
+      } catch (e) {
+        session.wordForWord = false;
+      }
+    }
+  }
+
   async function listen(key) {
-    if (hearing || !shown.has(key)) return;
-    const session = hearing = { key, blocks: [], spoke: false, level: 0, began: Date.now(), last: Date.now() };
+    const w = shown.get(key);
+    if (hearing || !w) return;
+    const box = w.el.querySelector('.win-answer textarea');
+    const session = hearing = {
+      key, sound: [], unsent: [], carry: new Float32Array(0), spoke: false, level: 0, began: Date.now(), last: Date.now(),
+      id: (Math.random().toString(36) + '0000000000').slice(2, 12), wordForWord: canHearLive, told: false,
+      had: box.value, base: box.value.trim() ? box.value.replace(/\s+$/, '') + ' ' : '',
+    };
     pause();   // the phone's own voice would be heard as you
     micSays(key, 'Getting the microphone');
     drawMics();
@@ -1225,29 +1311,34 @@
       });
       await session.context.audioWorklet.addModule('/mic.js');
       if (session.context.state !== 'running') await session.context.resume();
+      // Tapped off while the microphone was still being fetched: it isn't kept.
+      if (hearing !== session || session.ending) return letGo(session);
       session.rate = session.context.sampleRate;
       const node = new AudioWorkletNode(session.context, 'mic');
       node.port.onmessage = (e) => {
         if (hearing !== session || session.ending) return;
         const block = e.data;
-        session.blocks.push(block);
         let sum = 0;
         for (let i = 0; i < block.length; i++) sum += block[i] * block[i];
         session.level = Math.sqrt(sum / block.length);
         if (session.level > LOUD) { session.spoke = true; session.last = Date.now(); }
+        const piece = down(session, block);
+        session.sound.push(piece);
+        session.unsent.push(piece);
       };
       session.context.createMediaStreamSource(session.stream).connect(node);
       node.connect(session.context.destination);   // it plays nothing; a node that leads nowhere may not run
       session.began = session.last = Date.now();
       session.timer = setInterval(() => {
         if (hearing !== session || session.ending) return;
-        const w = shown.get(key);
-        if (!w) return finish(session);   // its terminal closed under you
-        w.el.querySelector('.win-mic').style.setProperty('--level', String(Math.min(1, session.level * 10)));
-        const now = Date.now();
-        const quiet = session.spoke ? now - session.last > QUIET_MS : now - session.began > NOTHING_MS;
-        if (quiet || now - session.began > LONGEST_MS) finish(session);
+        const now = shown.get(key);
+        if (!now) return finish(session);   // its terminal closed under you
+        now.el.querySelector('.win-mic').style.setProperty('--level', String(Math.min(1, session.level * 10)));
+        const at = Date.now();
+        const quiet = session.spoke ? at - session.last > QUIET_MS : at - session.began > NOTHING_MS;
+        if (quiet || at - session.began > LONGEST_MS) finish(session);
       }, 150);
+      session.telling = keepTelling(session);
       micSays(key, 'Listening. It stops when you do, or tap the mic.');
     } catch (e) {
       letGo(session);
@@ -1265,83 +1356,68 @@
   // the Mac can see why a phone's microphone didn't start.
   function missed(why) { call('/api/mic', { why }).catch(() => {}); }
 
-  // Everything heard, as one run of samples at the rate the Mac is sent: each sample
-  // out is the average of the ones it stands for.
-  function gather(blocks, from) {
-    let total = 0;
-    for (const block of blocks) total += block.length;
-    const all = new Float32Array(total);
-    let at = 0;
-    for (const block of blocks) { all.set(block, at); at += block.length; }
-    if (!from || from === HEARD_RATE) return all;
-    const step = from / HEARD_RATE;
-    const out = new Float32Array(Math.floor(total / step));
-    for (let i = 0; i < out.length; i++) {
-      const start = Math.floor(i * step);
-      const end = Math.max(start + 1, Math.min(total, Math.floor((i + 1) * step)));
-      let sum = 0;
-      for (let j = start; j < end; j++) sum += all[j];
-      out[i] = sum / (end - start);
-    }
-    return out;
-  }
-
   // Samples as a WAV file: the 44 bytes that say what follows, then 16-bit sound.
   function wav(samples) {
-    const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
     const tag = (at, word) => { for (let i = 0; i < 4; i++) view.setUint8(at + i, word.charCodeAt(i)); };
     tag(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); tag(8, 'WAVE');
     tag(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
     view.setUint32(24, HEARD_RATE, true); view.setUint32(28, HEARD_RATE * 2, true);
     view.setUint16(32, 2, true); view.setUint16(34, 16, true);
     tag(36, 'data'); view.setUint32(40, samples.length * 2, true);
-    for (let i = 0; i < samples.length; i++) {
-      const s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-    return view.buffer;
+    for (let i = 0; i < samples.length; i++) view.setInt16(44 + i * 2, samples[i], true);
+    return buffer;
   }
 
-  // You've said it: the microphone goes off at once, the recording goes to the Mac, and
-  // its words go on the end of whatever is in the box.
+  // Everything that was said, in one go: the way it went before word for word, and what
+  // happens still when a piece didn't get through or the Mac can't hear word for word.
+  async function tellWhole(session) {
+    const res = await fetch('/api/hear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/wav', 'X-SpeakHUD': '1' },
+      body: wav(join(session.sound)),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* not JSON: the status says enough */ }
+    if (!res.ok) throw new Error(data.error || 'the Mac did not say why');
+    return data.text || '';
+  }
+
+  // You've said it: the microphone goes off at once, the last of the sound goes to the
+  // Mac, and the words as they finally stand go on the end of whatever was in the box.
   async function finish(session) {
     if (hearing !== session || session.ending) return;
     session.ending = true;
     const key = session.key;
-    const rate = session.rate;
     letGo(session);
     drawMics();
-    const samples = gather(session.blocks, rate);
-    session.blocks = [];
-    if (samples.length < HEARD_RATE / 5) {
-      hearing = null;
-      drawMics();
-      missed('NothingRecorded');
-      return micSays(key, 'Nothing was recorded. Tap the mic and say it again.');
-    }
-    micSays(key, 'Turning it into words');
+    await session.telling;   // a piece on its way lands first: the Mac hears them in order
+    let recorded = 0;
+    for (const piece of session.sound) recorded += piece.length;
     try {
-      const res = await fetch('/api/hear', {
-        method: 'POST',
-        headers: { 'Content-Type': 'audio/wav', 'X-SpeakHUD': '1' },
-        body: wav(samples),
-      });
-      let data = {};
-      try { data = await res.json(); } catch (e) { /* not JSON: the status says enough */ }
-      const w = shown.get(key);
-      if (res.ok && data.text && w) {
-        const box = w.el.querySelector('.win-answer textarea');
-        box.value = (box.value.trim() ? box.value.replace(/\s+$/, '') + ' ' : '') + data.text;
-        box.dispatchEvent(new Event('input'));   // the box grows to fit
-        micSays(key, '');
-      } else if (res.ok) {
-        micSays(key, "Didn't catch any words. Tap the mic and say it again.");
-      } else {
-        micSays(key, 'Not heard: ' + (data.error || 'the Mac did not say why') + '.');
+      if (recorded < HEARD_RATE / 5) {
+        if (session.told) tell(session, true).catch(() => {});   // so the Mac stops waiting for more
+        missed('NothingRecorded');
+        showWords(session, '');
+        return micSays(key, 'Nothing was recorded. Tap the mic and say it again.');
       }
+      micSays(key, session.wordForWord ? '' : 'Turning it into words');
+      let text = null;
+      if (session.wordForWord) {
+        try { text = await tell(session, true); } catch (e) { /* the whole recording goes instead */ }
+      }
+      if (text === null) {
+        micSays(key, 'Turning it into words');
+        text = await tellWhole(session);
+      }
+      showWords(session, text);
+      micSays(key, text ? '' : "Didn't catch any words. Tap the mic and say it again.");
     } catch (e) {
-      micSays(key, "Not heard: can't reach the Mac.");
+      showWords(session, '');
+      micSays(key, e instanceof TypeError ? "Not heard: can't reach the Mac." : 'Not heard: ' + e.message + '.');
     } finally {
+      session.sound = session.unsent = [];
       hearing = null;
       drawMics();
     }

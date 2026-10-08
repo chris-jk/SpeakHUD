@@ -2658,6 +2658,44 @@ enum Dictation {
         init(_ why: String) { self.why = why }
     }
 
+    /// Word for word: the page sends what you're saying a piece at a time (plain 16-bit
+    /// sound, one channel, `rate` samples a second), and each piece's answer is the
+    /// words so far, the newest of them still a guess. The piece marked `last` gets the
+    /// words as they finally stand. One dictation at a time: a new `id` ends the one
+    /// before. nil where there's no transcriber. `done` is called on the main thread.
+    static var live: ((_ id: String, _ rate: Int, _ sound: Data, _ last: Bool,
+                       _ done: @escaping (Result<String, Failure>) -> Void) -> Void)? {
+        guard #available(macOS 26.0, *), SpeechTranscriber.isAvailable else { return nil }
+        return { id, rate, sound, last, done in
+            // On the main thread, like everything the page's server does.
+            let hearing: LiveDictation
+            if let now = current as? LiveDictation, now.id == id {
+                hearing = now
+            } else {
+                (current as? LiveDictation)?.end()
+                hearing = LiveDictation(id: id, rate: rate)
+                current = hearing
+            }
+            hearing.take(sound, last: last) { result in
+                if last || (try? result.get()) == nil, (current as? LiveDictation) === hearing { current = nil }
+                done(result)
+            }
+        }
+    }
+    /// The first dictation after the agent starts would wait some seconds for the
+    /// transcriber's model to load (4 to 5 s, timed 10-08). A moment of silence put
+    /// through it at start means the first one you say doesn't.
+    static func warmUp() {
+        live?("warmup", 16_000, Data(count: 9_600), true) { _ in }
+    }
+
+    /// The dictation being heard word for word, if one is. Main thread.
+    private static var current: AnyObject?
+    /// A live dictation the page has stopped sending to is let go after this long.
+    static let liveIdle: TimeInterval = 20
+    /// The most one live dictation may run: the page stops at two minutes.
+    static let liveLongest: TimeInterval = 180
+
     /// What a recording's file is called while the transcriber reads it.
     static let filePrefix = "speakhud-dictation-"
 
@@ -2706,6 +2744,139 @@ enum Dictation {
         let words = try await heard.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Date().timeIntervalSince(began) < patience else { throw MicEar.Failure("the Mac took too long to hear it") }
         return words
+    }
+}
+
+/// One dictation from the phone, heard as it's said: the transcriber is kept open, each
+/// piece of sound the page sends is fed to it, and its words so far are there to read.
+/// Everything here runs on the main thread except the transcriber's own work.
+@available(macOS 26.0, *)
+final class LiveDictation: @unchecked Sendable {
+    let id: String
+    private let rate: Int
+    private var feed: AsyncStream<AnalyzerInput>.Continuation?
+    private var analyzer: SpeechAnalyzer?
+    private var converter: AVAudioConverter?
+    private var from: AVAudioFormat?
+    private var to: AVAudioFormat?
+    private var opening: Task<Void, Never>?
+    private var results: Task<Void, Never>?
+    private var problem: String?
+    private var settled = ""      // the stretches of speech that are final
+    private var guess = ""        // the stretch being said: it changes as more is heard
+    private var samples = 0
+    private var idle: DispatchWorkItem?
+    private var ended = false
+
+    init(id: String, rate: Int) {
+        self.id = id
+        self.rate = rate
+    }
+
+    var text: String { (settled + guess).trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Feed it `sound`; `done` gets the words so far, or, for the `last` piece, the words
+    /// as they finally stand once the transcriber has heard everything.
+    func take(_ sound: Data, last: Bool, done: @escaping (Result<String, Dictation.Failure>) -> Void) {
+        guard !ended else { return done(.failure(Dictation.Failure("that dictation is over"))) }
+        idle?.cancel()
+        let quiet = DispatchWorkItem { [weak self] in self?.end() }
+        idle = quiet
+        DispatchQueue.main.asyncAfter(deadline: .now() + Dictation.liveIdle, execute: quiet)
+        if opening == nil { opening = Task { await self.open() } }
+        let ready = opening
+        Task {
+            await ready?.value   // the first piece waits for the transcriber; the rest find it open
+            await MainActor.run {
+                if let problem = self.problem { self.end(); return done(.failure(Dictation.Failure(problem))) }
+                guard !self.ended else { return done(.failure(Dictation.Failure("that dictation is over"))) }
+                self.samples += sound.count / 2
+                if Double(self.samples) / Double(self.rate) > Dictation.liveLongest {
+                    self.end()
+                    return done(.failure(Dictation.Failure("that's more than the Mac hears in one go")))
+                }
+                self.hand(sound)
+                if last { self.finish(done) } else { done(.success(self.text)) }
+            }
+        }
+    }
+
+    /// Ready the transcriber and start reading its results. Leaves `problem` set if it can't.
+    private func open() async {
+        do {
+            let transcriber = await MicEar.transcriber()
+            try await MicEar.install(transcriber)
+            guard let to = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
+                  let from = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(rate), channels: 1, interleaved: true),
+                  let converter = AVAudioConverter(from: from, to: to) else {
+                throw MicEar.Failure("the phone's sound can't be made into what the transcriber takes")
+            }
+            converter.primeMethod = .none
+            let analyzer = SpeechAnalyzer(modules: [transcriber])
+            let (stream, feed) = AsyncStream<AnalyzerInput>.makeStream()
+            try await analyzer.start(inputSequence: stream)
+            await MainActor.run {
+                (self.analyzer, self.feed, self.converter, self.from, self.to) = (analyzer, feed, converter, from, to)
+            }
+            results = Task {
+                do {
+                    for try await result in transcriber.results {
+                        let piece = String(result.text.characters), final = result.isFinal
+                        await MainActor.run {
+                            if final { self.settled += piece; self.guess = "" } else { self.guess = piece }
+                        }
+                    }
+                } catch {
+                    let why = error.localizedDescription
+                    await MainActor.run { self.problem = self.problem ?? why }
+                }
+            }
+        } catch {
+            let why = (error as? MicEar.Failure)?.why ?? error.localizedDescription
+            await MainActor.run { self.problem = why }
+        }
+    }
+
+    /// One piece of the page's sound, to the transcriber.
+    private func hand(_ sound: Data) {
+        let frames = sound.count / 2
+        guard frames > 0, let from = from, let to = to, let converter = converter,
+              let buffer = AVAudioPCMBuffer(pcmFormat: from, frameCapacity: AVAudioFrameCount(frames)),
+              let room = buffer.int16ChannelData else { return }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        sound.withUnsafeBytes { raw in
+            if let base = raw.baseAddress { memcpy(room[0], base, frames * 2) }
+        }
+        if let out = MicEar.convert(buffer, with: converter, to: to) { feed?.yield(AnalyzerInput(buffer: out)) }
+    }
+
+    /// No more sound is coming: let the transcriber finish what it has, then say the words.
+    private func finish(_ done: @escaping (Result<String, Dictation.Failure>) -> Void) {
+        ended = true
+        idle?.cancel()
+        feed?.finish()
+        let analyzer = self.analyzer, results = self.results
+        Task {
+            var failure: String?
+            do { try await analyzer?.finalizeAndFinishThroughEndOfInput() }
+            catch { failure = error.localizedDescription }
+            await results?.value
+            let trouble = failure
+            await MainActor.run {
+                if let why = trouble ?? self.problem { done(.failure(Dictation.Failure(why))) } else { done(.success(self.text)) }
+            }
+        }
+    }
+
+    /// Stop hearing it, with nothing more to say: a new dictation has begun, or the page
+    /// went quiet.
+    func end() {
+        guard !ended else { return }
+        ended = true
+        idle?.cancel()
+        feed?.finish()
+        results?.cancel()
+        if let analyzer = analyzer { Task { await analyzer.cancelAndFinishNow() } }
     }
 }
 
@@ -2986,7 +3157,7 @@ final class MicEar: Ear, @unchecked Sendable {
     }
 
     /// One mic buffer in the transcriber's format (its sample rate and layout differ).
-    private static func convert(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter,
+    static func convert(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter,
                                 to format: AVAudioFormat) -> AVAudioPCMBuffer? {
         let ratio = format.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 16
@@ -5023,6 +5194,12 @@ final class Phone {
     /// Turns a recording from the page into words, where this Mac can. Tests answer for it.
     var hear: ((Data, @escaping (Result<String, Dictation.Failure>) -> Void) -> Void)? = Dictation.transcriber
     private var hearing = false
+    /// Hears a dictation word for word, a piece of sound at a time (`Dictation.live`).
+    var hearLive: ((String, Int, Data, Bool, @escaping (Result<String, Dictation.Failure>) -> Void) -> Void)? = Dictation.live
+    /// The dictation being heard word for word: its id, when it began, how much sound so far.
+    private var live: (id: String, began: Date, seconds: Double)?
+    /// What the page sends a piece of a live dictation as: 16-bit sound and nothing else.
+    static let liveType = "audio/pcm"
     /// How long the page waits for its words. Past this the transcriber is taken to be
     /// stuck, the page is told, and the next recording is heard: one that never answers
     /// must not leave every later one turned away.
@@ -5152,6 +5329,7 @@ final class Phone {
         ["away": away,
          "quick": quick,
          "canHear": hear != nil,   // whether a recording sent here comes back as words
+         "canHearLive": hearLive != nil,   // and whether it can be heard word for word as it's said
          "turns": desk.turns.map { t -> [String: Any] in
             ["key": t.key, "name": t.name, "text": t.text,
              "at": ((t.askedAt.map { max($0, t.at) } ?? t.at).timeIntervalSince1970).rounded(),
@@ -5240,6 +5418,7 @@ final class Phone {
         guard r.method == "POST", r.path == "/api/hear" else { return false }
         guard paired(r) else { done(.json(["error": "not paired"], status: 401)); return true }
         guard r.headers["x-speakhud"] == "1" else { done(.json(["error": "not found"], status: 404)); return true }
+        if let id = r.query["live"] { hearPiece(r, of: id, done); return true }
         guard let hear = hear else {
             done(.json(["error": "this Mac can't turn speech into words (it needs macOS 26)"], status: 501))
             return true
@@ -5275,6 +5454,49 @@ final class Phone {
             finish(.failure(Dictation.Failure("the Mac took too long to hear it")))
         }
         return true
+    }
+
+    /// One piece of a dictation being heard word for word: `?live=<the page's name for
+    /// this dictation>&rate=<samples a second>`, `&last=1` on the piece that ends it, the
+    /// sound itself as the body. The answer is the words so far; the last piece's, the
+    /// words as they finally stand. Pairing and the page's header were checked by the caller.
+    private func hearPiece(_ r: HTTP.Request, of id: String, _ done: @escaping (HTTP.Response) -> Void) {
+        guard let hearLive = hearLive else {
+            return done(.json(["error": "this Mac can't turn speech into words (it needs macOS 26)"], status: 501))
+        }
+        let last = r.query["last"] == "1"
+        guard id.range(of: #"^[a-z0-9]{6,32}$"#, options: .regularExpression) != nil,
+              let rate = Int(r.query["rate"] ?? ""), (8_000...48_000).contains(rate),
+              r.headers["content-type"]?.lowercased().hasPrefix(Self.liveType) == true,
+              r.body.count % 2 == 0, last || !r.body.isEmpty else {
+            return done(.json(["error": "that isn't a piece of a dictation"], status: 400))
+        }
+        if live?.id != id { live = (id, Date(), 0) }
+        live?.seconds += Double(r.body.count / 2) / Double(rate)
+        let heard = live
+        var answered = false
+        let finish: (Result<String, Dictation.Failure>) -> Void = { [weak self] result in
+            guard !answered else { return }
+            answered = true
+            let took = String(format: "%.1f", Date().timeIntervalSince(heard?.began ?? Date()))
+            switch result {
+            case .success(let text):
+                if last {
+                    let words = text.split(whereSeparator: { $0.isWhitespace }).count
+                    self?.log("phone dictated \(words) word\(words == 1 ? "" : "s") word for word (\(String(format: "%.1f", heard?.seconds ?? 0)) s of sound, done \(took) s after it began)")
+                    if self?.live?.id == id { self?.live = nil }
+                }
+                done(.json(["text": text]))
+            case .failure(let failure):
+                self?.log("phone dictation failed \(took) s in: \(failure.why)")
+                if self?.live?.id == id { self?.live = nil }
+                done(.json(["error": failure.why], status: 503))
+            }
+        }
+        hearLive(id, rate, r.body, last, finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + hearPatience) {
+            finish(.failure(Dictation.Failure("the Mac took too long to hear it")))
+        }
     }
 
     func respond(to r: HTTP.Request) -> HTTP.Response {
@@ -5751,6 +5973,7 @@ final class Agent {
         phone.onAwayChange = { [weak self] in self?.awayChanged($0) }
         let leftBehind = Dictation.sweep()
         if leftBehind > 0 { log("phone: deleted \(leftBehind) recording\(leftBehind == 1 ? "" : "s") a past dictation left behind") }
+        Dictation.warmUp()
         do {
             let server = try PhoneServer(port: config.port) { phone.respond(to: $0) }
             server.slow = { phone.respondLater(to: $0, done: $1) }
