@@ -425,6 +425,13 @@
     read(from.key, from.what, from, 'resume');
   }
 
+  // A window has left the page, its terminal closed: nothing of it waits to be read,
+  // and a place kept in it is forgotten, or no new turn would ever be read over it.
+  function gone(key) {
+    for (let i = line.length - 1; i >= 0; i--) if (line[i][0] === key) line.splice(i, 1);
+    if (paused && paused.key === key) { paused = null; unmark(); }
+  }
+
   function showSpeed() { speedButton.textContent = 'Speed ' + speed + '\u00d7'; }
 
   // News for a window: read it now, or after what's being read. Not over a reading
@@ -708,7 +715,7 @@
     const still = settled();
     const keys = state.turns.map((t) => t.key);
     for (const [key, w] of shown) {
-      if (!keys.includes(key)) { w.el.remove(); shown.delete(key); }
+      if (!keys.includes(key)) { w.el.remove(); shown.delete(key); gone(key); }
     }
     for (const turn of state.turns) update(turn);
 

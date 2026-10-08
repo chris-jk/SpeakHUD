@@ -218,6 +218,21 @@ scenario('the speed button steps the rate, and a reading picks up at the new rat
   assert.strictEqual(readButton(w, 'a').textContent, 'Pause');
 });
 
+scenario('a paused reading whose window goes is forgotten: new turns are read and the page sorts again', async () => {
+  const w = await open([turn('a', 'Alpha one.\nAlpha two.'), turn('b', 'Bee.')], SPEAK_ON);
+  await w.tap(readButton(w, 'a'));
+  await w.advance(100);
+  await w.leave();                            // which pauses it, place kept
+  w.mac.state.turns = [turn('b', 'Bee.')];    // and meanwhile terminal a is closed on the Mac
+  await w.comeBack();
+  assert.deepStrictEqual(w.keys(), ['b']);
+  const before = w.voice.said.length;
+  w.mac.state.turns = [turn('c', 'See, the newest.'), turn('b', 'Bee has a new turn.')];
+  await w.advance(8000);
+  assert.deepStrictEqual(w.voice.texts().slice(before), ['T-c.', 'See, the newest.', 'T-b.', 'Bee has a new turn.']);
+  assert.deepStrictEqual(w.keys(), ['c', 'b']);
+});
+
 // -- one tab at a time ---------------------------------------------------------
 
 scenario('a newer tab takes over: this one stops reading and says so, and a tap takes it back', async () => {
