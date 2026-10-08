@@ -116,11 +116,11 @@ When a Claude Code turn has been read to its end, the mic opens for that turn an
   - *"put it off"*, *"put it off to the end"*, *"ask me later"*: the turn goes to the back
     of the queue (or, with nothing queued, waits for the next turn to arrive) and you're
     asked then
-  - *"no reply"*: closes the mic now
+  - *"skip"* or *"no reply"*: closes the mic now and moves on
   - *"scratch that"* (also at the end of whatever you said): forgets it and listens again
 
-  They're whole phrases you wouldn't say to Claude, on purpose: plain "later" or "again"
-  is a reply, and is sent.
+  Apart from "skip" they're whole phrases you wouldn't say to Claude, on purpose: plain
+  "later" or "again" is a reply, and is sent.
 - Nothing else is read while the mic is open, and holding Claude Code's own dictation
   key closes it (you're answering that way instead).
 

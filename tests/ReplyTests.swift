@@ -117,9 +117,11 @@ let replySuite = Suite("Reply") { t in
     t.expectEqual(SpokenCommand.parse("remind me again"), .again, "remind me again")
     t.expectEqual(SpokenCommand.parse("Put it off to the end"), .later, "put it off to the end")
     t.expectEqual(SpokenCommand.parse("No reply."), .skip, "no reply")
+    t.expectEqual(SpokenCommand.parse("Skip."), .skip, "skip: the short way to say you've nothing to say")
+    t.expectEqual(SpokenCommand.parse("skip this part"), .skip, "skip this part")
     t.expectEqual(SpokenCommand.parse("Scratch that"), .scratch, "scratch that")
     t.expectEqual(SpokenCommand.parse("run the tests, no wait, scratch that"), .scratch, "scratch that takes back what came before it")
-    for said in ["later", "again", "skip", "next", "stop", "do it again", "put it off until the tests pass", ""] {
+    for said in ["later", "again", "next", "stop", "skip the tests", "do it again", "put it off until the tests pass", ""] {
         t.expect(SpokenCommand.parse(said) == nil, "\"\(said)\" is for Claude, not a command")
     }
 
@@ -406,6 +408,12 @@ let replySuite = Suite("Reply") { t in
         t.expectEqual(r.ear.take(), [.stop], "no reply: the mic shuts at once")
         t.expectEqual(r.voice.take(), [.speak("b", from: 0, rate: Playback.rateSteps[1])], "and the next item starts")
         t.expect(r.sent.isEmpty, "nothing sent")
+
+        let k = listening("a", "b")
+        k.ear.hear("Skip.")
+        k.fire()
+        t.expectEqual(k.playback.current?.text, "b", "skip: the same, in one word")
+        t.expect(k.sent.isEmpty && k.replied.isEmpty, "and \"skip\" isn't sent to Claude")
 
         let s = listening("a"), p = s.playback!
         _ = s.ear.take()

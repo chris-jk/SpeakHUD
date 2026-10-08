@@ -701,7 +701,8 @@ enum Reply {
 ///
 /// In a reply window, whole phrases only, and ones you wouldn't say to Claude: a reply
 /// taken for a command never arrives, and nothing tells you. (Said to Claude by mistake,
-/// "say that again" just gets you an answer.) Saying nothing at all is how you don't reply.
+/// "say that again" just gets you an answer.) "Skip", or saying nothing at all, is how
+/// you don't reply.
 ///
 /// While a turn is being read nothing you say is for Claude, so the short forms count
 /// too: "skip", "later", "again", "pause". They still have to be said on their own.
@@ -722,7 +723,10 @@ enum SpokenCommand: Equatable {
                   "come back to it later", "put this off", "put that off", "put it off",
                   "put this off to the end", "put that off to the end", "put it off to the end",
                   "put off to the end", "ask me later", "remind me later"] { table[p] = .later }
-        for p in ["no reply", "no answer", "nothing to say"] { table[p] = .skip }
+        // "Skip" is the one short form that counts here too: it's the word people reach
+        // for when they've nothing to say (Chris's first two tries, 10-07).
+        for p in ["no reply", "no answer", "nothing to say", "skip", "skip it", "skip this", "skip that",
+                  "skip this part"] { table[p] = .skip }
         for p in ["scratch that", "start over"] { table[p] = .scratch }
         return table
     }()

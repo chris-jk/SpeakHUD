@@ -49,7 +49,7 @@ let commandSuite = Suite("Commands") { t in
                    "later on we should skip", ""] {
         t.expect(SpokenCommand.parse(phrase, whileReading: true) == nil, "while reading, \"\(phrase)\" is not a command")
     }
-    for phrase in ["skip", "later", "again", "stop", "pause", "go on", "stop everything"] {
+    for phrase in ["later", "again", "next", "stop", "pause", "go on", "stop everything"] {
         t.expect(SpokenCommand.parse(phrase) == nil, "in a reply window \"\(phrase)\" is still for Claude")
     }
     t.expectEqual(SpokenCommand.parse("start over"), .scratch, "and \"start over\" still takes back what you said there")
@@ -111,11 +111,11 @@ let commandSuite = Suite("Commands") { t in
         r.voice.finish()
         t.expectEqual(r.ear.take(), [.listen(2)], "the turn ends: the mic is reopened for the reply, not over the voice")
         t.expect(!p.state.listening, "commands are off while you answer")
-        r.ear.hear("skip")
+        r.ear.hear("later")
         r.fire(Playback.commandPause)
-        t.expect(r.commands.isEmpty, "\"skip\" said in the window is a reply, not a command")
+        t.expect(r.commands.isEmpty, "\"later\" said in the window is a reply, not a command")
         r.fire(Playback.replyPause); r.fire(Playback.replyGrace)
-        t.expectEqual(r.sent.map(\.text), ["skip"], "and is sent")
+        t.expectEqual(r.sent.map(\.text), ["later"], "and is sent")
         t.expectEqual(r.ear.take(), [.stop, .attend(3)], "then the mic goes back to commands for the next turn")
         t.expectEqual(p.current?.text, "b", "which is being read")
     }
