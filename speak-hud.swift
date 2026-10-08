@@ -803,6 +803,41 @@ enum Reply {
         promptText(in: screen) != nil || (boxHints + ["esc to interrupt"]).contains { screen.contains($0) }
     }
 
+    /// Claude's prompt box as a screen shows it.
+    struct Prompt: Equatable {
+        var text: String            // what it holds: nothing, a placeholder, or a message being written
+        var status: String? = nil   // the status line under it
+        var context: Int? = nil     // how full the context is, in percent, if that line says
+        var working = false         // a turn is running over it: what's sent now waits its turn
+    }
+
+    /// What a pane is showing: the one answer to what a paste or a key would do there.
+    enum Showing: Equatable {
+        case prompt(Prompt)       // Claude's prompt box: takes a paste as a message, and Enter and Esc
+        case box(TerminalBox)     // a box of choices, read whole: takes keys as answers
+        case keys(String)         // something that says it takes keys (this line of it), but not as choices this can read
+        case working              // a turn running with no prompt box in sight: Esc stops it
+        case notClaude(String)    // none of those, and why: a shell, a blank screen. Nothing is written to it
+    }
+
+    /// What `screen` (a pane's visible text) is showing. `title`, the pane's, says a turn
+    /// is running when Claude Code is spinning its glyph there; a title alone never makes
+    /// a screen Claude's.
+    static func showing(_ screen: String, title: String? = nil) -> Showing {
+        if let text = promptText(in: screen) {
+            let under = status(in: screen)
+            return .prompt(Prompt(text: text, status: under?.line, context: under?.context,
+                                  working: working(title: title ?? "", screen: screen)))
+        }
+        if let box = TerminalBox.read(screen) { return .box(box) }
+        // The last thing on the screen says which keys answer it: a box of Claude's all
+        // the same. Said further up, it's something Claude left behind, or was talking about.
+        let foot = screen.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
+        if let foot = foot, boxHints.contains(where: { foot.contains($0) }) { return .keys(foot) }
+        if screen.contains("esc to interrupt") { return .working }
+        return .notClaude(foot == nil ? "its screen is blank" : "nothing at the foot of its screen is Claude's prompt or a box of its")
+    }
+
     enum Outcome: Equatable, CustomStringConvertible {
         case sent
         case notAtPrompt   // nothing pasted: a question or permission box is up, or no prompt in sight
@@ -4523,6 +4558,16 @@ struct TerminalBox: Equatable {
         return ask == drawn.ask && names(tabs) == names(drawn.tabs) && rows.map { $0.label } == drawn.rows
     }
 
+    /// Whether this is the box for a question the hook read out as `asked`, and its
+    /// choice numbered `number` the one the hook worded `option` ("Navy. Like the
+    /// factory" for the row "Navy"). The page draws the hook's words until the screen
+    /// has been read, and the numbers beside them are keys.
+    func isChoice(_ number: Int, worded option: String, asked: String) -> Bool {
+        func squash(_ s: String) -> String { String(s.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }) }
+        guard !ask.isEmpty, squash(asked).contains(squash(ask)), let row = rows.first(where: { $0.number == number }) else { return false }
+        return squash(option).hasPrefix(squash(row.label))
+    }
+
     /// The keys that pick row `index` as the box stands: its digit, or the arrows from
     /// where the cursor is and Enter. Nil if there's no such row.
     func keys(toPick index: Int) -> [String]? {
@@ -5699,12 +5744,42 @@ final class Phone {
             guard let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
-            // At Claude's prompt a key isn't an answer: it lands in the message being
-            // typed, and the next answer is pasted after it. Enter and Esc still mean
-            // something there (send what's typed; stop the turn).
-            if !["enter", "esc"].contains(name), let screen = look(origin), Reply.promptText(in: screen) != nil {
-                return .json(["sent": false, "outcome": "its terminal is at Claude's prompt, where that key would only type into your message"])
+            // A key goes only where Claude is showing something that takes it, and only
+            // if that is what the page had drawn when it was tapped: a box, or a hook's
+            // question with the choice this number was beside.
+            let drawn = TerminalBox.Drawn(json: body["box"])
+            let option = (body["option"] as? String).flatMap { words in (body["asked"] as? String).map { (asked: $0, words: words) } }
+            guard let screen = look(origin) else {
+                return .json(["sent": false, "outcome": Reply.Outcome.gone.description])
             }
+            var refused: String?
+            switch Reply.showing(screen) {
+            case .box(let box):
+                // Its box, as drawn: any other one would be answered blind.
+                guard drawn.map(box.isBox) ?? option.map({ box.isChoice(Int(name) ?? 0, worded: $0.words, asked: $0.asked) }) ?? false else {
+                    desk.saw(key, screen)
+                    return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
+                }
+            case _ where drawn != nil || option != nil:
+                // The box it was tapped for has gone: Enter would now send whatever is typed.
+                desk.saw(key, screen)
+                return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
+            case .keys:
+                break
+            case .prompt:
+                // At Claude's prompt a key isn't an answer: it lands in the message being
+                // typed, and the next answer is pasted after it. Enter and Esc still mean
+                // something there (send what's typed; stop the turn).
+                if !["enter", "esc"].contains(name) {
+                    refused = "its terminal is at Claude's prompt, where that key would only type into your message"
+                }
+            case .working:
+                if name != "esc" { refused = "its terminal is in the middle of a turn with no box up, where only Esc (which stops it) is pressed" }
+            case .notClaude(let why):
+                // A pane that has dropped to its shell: Up and Enter there run its last command again.
+                refused = "its terminal isn't showing Claude Code (\(why)), so no key is pressed there"
+            }
+            if let why = refused { return .json(["sent": false, "outcome": why]) }
             let outcome = press(name, origin)
             log("phone key \(name) to \(turn.name): \(outcome)")
             return .json(["sent": outcome == .sent, "outcome": outcome.description])

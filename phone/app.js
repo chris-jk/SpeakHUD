@@ -1001,6 +1001,7 @@
           const button = document.createElement('button');
           button.type = 'button';
           button.dataset.press = m[1];
+          button.dataset.option = m[2];   // the choice this number was drawn beside
           const number = document.createElement('b');
           number.textContent = m[1];
           const label = document.createElement('span');
@@ -1010,6 +1011,8 @@
         }
         el.querySelector('.win-question').textContent = said.join('\n');
       }
+      // The hook's question as drawn, for a number tapped beside it to say what it answers.
+      w.said = box ? '' : el.querySelector('.win-question').textContent;
       // Read a question once, whole: the hook's comes in two pieces a few seconds apart,
       // and a box's ticks changing isn't a new question.
       const what = box ? box.ask : (turn.question || '');
@@ -1157,7 +1160,13 @@
     if (!w || !name) return;
     button.disabled = true;
     try {
-      const { data } = await call('/api/key', { key, press: name });
+      // What the key was tapped on: the box drawn here, or a number beside the hook's
+      // words for a question. The Mac presses nothing if its terminal shows another
+      // box by now, and nothing at all in a terminal that isn't showing Claude Code.
+      const body = { key, press: name };
+      if (w.box) body.box = w.box;
+      else if (button.dataset.option) { body.asked = w.said; body.option = button.dataset.option; }
+      const { data } = await call('/api/key', body);
       note(w.el, data.sent ? '' : 'Key not pressed: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');
       // Give the terminal a moment to redraw before reading it back.
       setTimeout(() => look(key), 700);

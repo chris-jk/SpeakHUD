@@ -378,6 +378,60 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(k.phone.respond(to: post("/api/pick", ["key": "a", "row": 0, "label": "Speech"])).status == 400 && k.pressed.count == 4,
              "a tap that doesn't say which box it was drawn in presses nothing")
 
+    // -- a key goes only where Claude is showing something that takes it ---------
+    let q = Bench()
+    q.phone.took(turn("a", "Shall I?"))
+    /// A key under a's screen, with whatever the page says it had drawn.
+    func key(_ name: String, _ drawn: [String: Any] = [:]) -> [String: Any] {
+        json(q.phone.respond(to: post("/api/key", ["key": "a", "press": name].merging(drawn) { $1 })))
+    }
+    func went(_ answer: [String: Any]) -> Bool { answer["sent"] as? Bool == true }
+    // A box: the one the page has drawn, and no other.
+    q.screen = toTouch
+    let touching = ["box": looked(q)]
+    t.expect(went(key("1", touching)) && q.pressed == ["1"], "a key goes to the box the page has drawn")
+    q.screen = toRemove
+    let tooLate = key("1", touching)
+    t.expect(!went(tooLate) && (tooLate["outcome"] as? String)?.contains("changed") == true && tooLate["state"] != nil,
+             "the same key again, with a different box now up, is not sent, and the page is given what's there")
+    t.expect(!went(key("enter")) && !went(key("esc")) && !went(key("down")),
+             "nor is a key from a page that had drawn no box: Enter would take whichever choice the cursor is on")
+    t.expectEqual(q.pressed, ["1"], "none of those pressed anything")
+    // The hook's words stand in until the screen is read: the numbers beside them are keys too.
+    q.screen = screenshot("ask-single")
+    let navy = ["asked": "Which colour for the bar?", "option": "Navy. Like the factory"]
+    t.expect(went(key("2", navy)) && q.pressed == ["1", "2"], "a number tapped beside a question's words is pressed when the box up is that question and that its choice")
+    t.expect(!went(key("1", navy)) && !went(key("2", ["asked": "Which route do you want?", "option": "Navy. Like the factory"])),
+             "not when that number is another choice's, or the question another one")
+    q.screen = toTouch
+    t.expect(!went(key("1", ["asked": "Shall I go ahead?", "option": "Yes. Go ahead"])) && q.pressed == ["1", "2"],
+             "and never in a permission box that came up since, though its first choice is Yes too")
+    // Claude's prompt: Enter and Esc, and only from a page that knows the box has gone.
+    q.screen = atPrompt
+    t.expect(!went(key("enter", touching)) && !went(key("esc", touching)) && !went(key("enter", navy)) && q.pressed == ["1", "2"],
+             "a key tapped for a box that has since gone is not pressed at the prompt: Enter there would send whatever is typed")
+    t.expect(went(key("esc")) && went(key("enter")) && !went(key("down")) && !went(key("3")) && q.pressed == ["1", "2", "esc", "enter"],
+             "with no box drawn, Esc and Enter are pressed at the prompt and nothing else is")
+    // A turn running with no prompt in sight: Esc stops it. Nothing else means anything.
+    q.screen = "⏺ Reading the files.\n\n✻ Working… (esc to interrupt)"
+    t.expect(went(key("esc")) && !went(key("enter")) && !went(key("1")) && q.pressed.count == 5, "mid-turn with no prompt in sight, only Esc is pressed")
+    // Something else of Claude's that says it takes keys: yours to press, by what its screen shows.
+    q.screen = "Paste the code from your browser:\n\n > \n\n Enter to confirm · Esc to cancel"
+    t.expect(went(key("enter")) && !went(key("enter", touching)) && q.pressed.count == 6,
+             "a box that says it takes keys, though not as choices this can read, takes them")
+    // Not Claude at all: nothing is pressed. Up and Enter in a shell run its last command again.
+    for (shell, what) in [("chris@mac ~ % ", "a shell"), (shellPrompt, "a shell with ❯ for its prompt"),
+                          ("how to answer: Enter to select · Esc to cancel\n" + toTouch + "\nchris@mac project % ", "a shell under what Claude left on the screen"),
+                          ("", "a blank screen")] {
+        q.screen = shell
+        let answers = ["up", "enter", "esc", "1"].map { key($0) }
+        t.expect(answers.allSatisfy { !went($0) } && q.pressed.count == 6, "\(what) is not Claude Code: no key is pressed there")
+        t.expect((answers[0]["outcome"] as? String)?.contains("Claude") == true, "and the page is told so (\(what))")
+    }
+    let pageScript = String(decoding: fm.contents(atPath: "phone/app.js") ?? Data(), as: UTF8.self)
+    t.expect(pageScript.contains("box: w.box") && pageScript.contains("body.box = w.box") && pageScript.contains("body.option = "),
+             "the page's taps and keys say what they were drawn in")
+
     // -- its status line: the folder, the model, how full the context is -------
     let mine = "⏺ Done.\n\n────────────────\n❯ \n────────────────\n  speakhud (main*)  |  Opus 5.5  ctx:51% used         ✔ Update installed · Restart to update\n  ⏵⏵ auto mode on · ← 1 agent"
     t.expect(Reply.status(in: mine)?.line == "speakhud (main*) | Opus 5.5 ctx:51% used" && Reply.status(in: mine)?.context == 51,
@@ -653,7 +707,7 @@ let phoneSuite = Suite("Phone") { t in
              && turns(asking["state"] as? [String: Any] ?? [:]).first?["question"] as? String == "Which route?\n\n- 1. Try Claude's first.\n- 2. Build our own.",
              "its screen can be read, and the question stays up while the box does")
     t.expectEqual(b.phone.respond(to: post("/api/key", ["key": "a", "press": "rm -rf"])).status, 400, "only the named keys can be pressed")
-    let keyed = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "2"])))
+    let keyed = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "2", "box": drew(asking["state"] as? [String: Any] ?? [:], "a")])))
     t.expect(keyed["sent"] as? Bool == true && b.pressed == ["2"] && b.logs.contains("phone key 2 to Grow guide replies: sent"), "a key goes to its pane")
     b.screen = "working…\n────────────────\n❯ \n────────────────\n  status"
     let stray = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "1"])))
