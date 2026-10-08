@@ -115,6 +115,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - [ ] Move the question pause into `Playback` (one spool item with the options and a pause): another session's turn can land in the 2s gap today, and Stop/skip would act on the whole question natively (review 10-01)
 - [ ] Split panes in one iTerm2 window (the tile-terminals skill's layout): the ring goes around the whole window. Ring the pane instead; its frame is the Accessibility frame of the focused text area's scroll area (the text area itself is as tall as the scrollback)
 - [ ] Have `ClaudeHook` (--setup-claude) install read-question.py and both its hook entries, and bundle it in build.sh, so it stops being a hand install
+  - Branch `fix/hook`, 10-08: a test runs read-question.py from where it is installed (`~/.claude/hooks`, read-summary.py one folder up, a throwaway home); every other test ran the repo's copy. Checked 10-08: it passes, and fails alone when the installed-location lookup is pointed elsewhere (15 python tests). Nothing in the app changed yet
 - [ ] Terminal.app path is untested live (no Terminal windows open), including its copy of the 10-05 by-id fix; iTerm2 verified
 - [ ] The reveal script brings the terminal app forward even when the pane is gone (it activates before it searches)
 
