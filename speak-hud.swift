@@ -1145,12 +1145,20 @@ final class MicWatch {
     }
 
     /// What to call a recorder in the log. macOS dictation and Siri have no process of
-    /// their own on the mic: both show up as the system's historicalaudiod.
+    /// their own on the mic: both show up as the system's historicalaudiod. Claude Code's
+    /// program file is named for its version (…/claude/versions/2.1.293).
     private static func name(of pid: Int32?) -> String {
         guard let pid = pid else { return "an unknown process" }
-        var buf = [CChar](repeating: 0, count: 256)
-        let named = proc_name(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
-        return named == "historicalaudiod" ? "macOS dictation or Siri (historicalaudiod)" : named
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return "pid \(pid)" }
+        return name(ofProgram: String(cString: buf))
+    }
+
+    static func name(ofProgram path: String) -> String {
+        let file = (path as NSString).lastPathComponent
+        if file == "historicalaudiod" { return "macOS dictation or Siri (historicalaudiod)" }
+        if path.contains("/claude/versions/") { return "Claude Code \(file)" }
+        return file
     }
 }
 

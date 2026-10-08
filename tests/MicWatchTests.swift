@@ -38,4 +38,11 @@ let micWatchSuite = Suite("MicWatch") { t in
     spin(2) { seen.count == 2 }
     t.expectEqual(seen, ["held for dictation", "released"], "a recorder that stops with no nudge is noticed: the hold can't stick")
     t.expect(!watch.busy, "and the watch says the mic is free")
+
+    t.expectEqual(MicWatch.name(ofProgram: "/usr/libexec/historicalaudiod"), "macOS dictation or Siri (historicalaudiod)",
+                  "the system daemon is named for what you were doing")
+    t.expectEqual(MicWatch.name(ofProgram: "/Users/x/.local/share/claude/versions/2.1.293"), "Claude Code 2.1.293",
+                  "Claude Code's program file is its version number: say whose")
+    t.expectEqual(MicWatch.name(ofProgram: "/Applications/zoom.us.app/Contents/MacOS/zoom.us"), "zoom.us",
+                  "anything else goes by its program's name")
 }
