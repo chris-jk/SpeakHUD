@@ -205,9 +205,11 @@ What's on the page:
 - **Whatever it's asking, as buttons.** A question, a permission prompt, the
   folder-trust check: the box is read off the terminal's own screen, so its choices show
   as they stand, ticks and all, and a tap picks one (its number, or arrows and Enter
-  for a choice without one). The choice that takes your own words is a field. The Mac
-  reads the box again before it presses anything, so a box that has moved on is never
-  answered blind.
+  for a choice without one). The choice that takes your own words is a field. A tap
+  says which box it was drawn in, and the Mac reads the box again before it presses
+  anything: if a different box is up by then, even one with the same choices (every
+  permission box starts with Yes), nothing is pressed and the page shows the one that's
+  there. A box that has moved on is never answered blind.
 - **Working, asking, or waiting on you.** A window in full colour is waiting on you; one
   that has stepped back to a stripe says "working", and its Send becomes Queue; one
   with a box up says "asking". A working window also runs a bar down by its answer

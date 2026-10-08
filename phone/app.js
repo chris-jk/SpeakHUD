@@ -981,6 +981,10 @@
     const drawn = box ? JSON.stringify(box) : (turn.question || '');
     if (w.question !== drawn) {
       w.question = drawn;
+      // What every tap on these buttons says it was drawn in: the Mac presses nothing
+      // unless its terminal still shows this box. What it asks and its choices, not the
+      // cursor or the ticks, which move while it's the same box.
+      w.box = box ? { ask: box.ask, tabs: box.tabs, rows: box.rows.map((row) => row.label) } : null;
       const options = el.querySelector('.win-options');
       options.replaceChildren();
       const tabs = el.querySelector('.win-tabs');
@@ -1101,14 +1105,15 @@
     return button;
   }
 
-  // Tap a choice. The Mac reads the box again before pressing anything, so a box that
-  // has moved on is never answered blind; then the screen is read back.
+  // Tap a choice. The tap says which box it was drawn in, and the Mac reads the box again
+  // before pressing anything, so a box that has moved on is never answered blind; then
+  // the screen is read back.
   async function pick(key, row, label, button, text) {
     const w = shown.get(key);
     if (!w) return;
     button.disabled = true;
     try {
-      const body = { key, row, label };
+      const body = { key, row, label, box: w.box };
       if (text !== undefined) body.text = text;
       const { data } = await call('/api/pick', body);
       note(w.el, data.sent ? '' : 'Not chosen: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');

@@ -4494,6 +4494,35 @@ struct TerminalBox: Equatable {
         return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
     }
 
+    /// What a page drew of a box, sent back with every tap on it: what it asks, its strip
+    /// of questions, and each choice's label from the top. Where the cursor is, what's
+    /// ticked and the hint line are left out: they move while it is still the same box.
+    struct Drawn: Equatable {
+        var ask: String
+        var tabs: String? = nil
+        var rows: [String]
+
+        init(ask: String, tabs: String? = nil, rows: [String]) { (self.ask, self.tabs, self.rows) = (ask, tabs, rows) }
+
+        /// As the page sends it. Nil for anything else.
+        init?(json: Any?) {
+            guard let o = json as? [String: Any], let ask = o["ask"] as? String, let rows = o["rows"] as? [String] else { return nil }
+            self.init(ask: ask, tabs: o["tabs"] as? String, rows: rows)
+        }
+    }
+
+    /// Whether this is the box that was `drawn`: it asks the same thing of the same
+    /// choices. A row and its label don't say that (every permission box has "Yes"
+    /// first). The strip counts by its questions' names: the mark beside one changes
+    /// once it has an answer.
+    func isBox(_ drawn: Drawn) -> Bool {
+        func names(_ tabs: String?) -> [String] {
+            (tabs ?? "").components(separatedBy: .whitespaces)
+                .filter { $0.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) }
+        }
+        return ask == drawn.ask && names(tabs) == names(drawn.tabs) && rows.map { $0.label } == drawn.rows
+    }
+
     /// The keys that pick row `index` as the box stands: its digit, or the arrows from
     /// where the cursor is and Enter. Nil if there's no such row.
     func keys(toPick index: Int) -> [String]? {
@@ -5624,17 +5653,19 @@ final class Phone {
             if outcome == .sent { desk.closed(key) }
             return .json(["sent": outcome == .sent, "outcome": outcome.description, "state": state()])
         case "/api/pick":
-            // A choice in the box its terminal is showing. The box is read again here, so
-            // the keys are worked out from where its cursor is now, and a box that has
+            // A choice in the box its terminal is showing. The page says which box it had
+            // drawn, and the box is read again here: the keys go only if that box is the
+            // one up now, and are worked out from where its cursor is now. A box that has
             // moved on since the page drew it is never answered blind.
-            guard let key = body["key"] as? String, let row = body["row"] as? Int, let label = body["label"] as? String else {
+            guard let key = body["key"] as? String, let row = body["row"] as? Int, let label = body["label"] as? String,
+                  let drawn = TerminalBox.Drawn(json: body["box"]) else {
                 return .json(["error": "which choice?"], status: 400)
             }
             guard let turn = desk.turn(key), let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
-            guard let screen = look(origin), let box = TerminalBox.read(screen),
-                  box.rows.indices.contains(row), box.rows[row].label == label, var keys = box.keys(toPick: row) else {
+            guard drawn.rows.indices.contains(row), drawn.rows[row] == label,
+                  let screen = look(origin), let box = TerminalBox.read(screen), box.isBox(drawn), var keys = box.keys(toPick: row) else {
                 if let screen = look(origin) { desk.saw(key, screen) }
                 return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
             }

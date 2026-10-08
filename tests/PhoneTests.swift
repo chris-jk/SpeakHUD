@@ -34,6 +34,14 @@ private func json(_ r: HTTP.Response) -> [String: Any] {
 
 private func turns(_ state: [String: Any]) -> [[String: Any]] { state["turns"] as? [[String: Any]] ?? [] }
 
+/// What the page sends back with a tap: the box it has drawn for `key`, as app.js builds
+/// it from the state the Mac gave it (what it asks, its strip, each choice's label).
+private func drew(_ state: [String: Any], _ key: String) -> [String: Any] {
+    guard let box = turns(state).first(where: { $0["key"] as? String == key })?["box"] as? [String: Any] else { return [:] }
+    return ["ask": box["ask"] ?? NSNull(), "tabs": box["tabs"] ?? NSNull(),
+            "rows": (box["rows"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "" }]
+}
+
 /// A real Claude Code screen, captured from a scratch session (tests/fixtures/screens).
 private func screenshot(_ name: String) -> String {
     String(decoding: fm.contents(atPath: "tests/fixtures/screens/\(name).txt") ?? Data(), as: UTF8.self)
@@ -307,20 +315,22 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(drawn?["ask"] as? String == "Which colour for the bar?" && drawnRows.count == 4 && drawnRows[1]["label"] as? String == "Navy"
              && drawnRows[1]["number"] as? Int == 2 && drawnRows[2]["types"] as? Bool == true, "the page is given the box as its terminal shows it")
     o.screen = screenshot("ask-single")
-    let picked = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Navy"])))
+    let colours = drew(o.phone.state(), boxKey)   // a tap says which box the page had drawn
+    let picked = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Navy", "box": colours])))
     t.expect(picked["sent"] as? Bool == true && o.pressed == ["2"] && o.logs.contains("phone pick 2 of 4 in Grow guide replies: sent"), "a tap on a choice presses its digit")
-    let stale = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Forest"])))
+    let stale = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Forest", "box": colours])))
     t.expect(stale["sent"] as? Bool == false && o.pressed == ["2"] && (stale["outcome"] as? String)?.contains("changed") == true,
              "a choice that isn't where the page drew it presses nothing")
-    let own = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 2, "label": "Type something.", "text": " teal,\nplease "])))
+    let own = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 2, "label": "Type something.", "text": " teal,\nplease ", "box": colours])))
     t.expect(own["sent"] as? Bool == true && o.pressed == ["2", "3", "enter"] && o.typed == ["teal, please"],
              "your own answer: its row's digit, the words typed on one line, Enter")
-    t.expectEqual(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest", "text": "x"])).status, 400, "a choice that takes no words refuses them")
+    t.expectEqual(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest", "text": "x", "box": colours])).status, 400, "a choice that takes no words refuses them")
     o.screen = screenshot("trust")
-    _ = o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Yes, I trust this folder"]))
+    let trusting = drew(json(o.phone.respond(to: get("/api/screen", query: ["key": boxKey])))["state"] as? [String: Any] ?? [:], boxKey)
+    _ = o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Yes, I trust this folder", "box": trusting]))
     t.expectEqual(o.pressed, ["2", "3", "enter", "down", "enter"], "a choice with no number is reached with arrows and Enter")
     o.screen = atPrompt
-    let gone = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest"])))
+    let gone = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "No, exit", "box": trusting])))
     t.expect(gone["sent"] as? Bool == false && turns(gone["state"] as? [String: Any] ?? [:]).first?["box"] is NSNull, "a box that has gone is said to have, and leaves the page")
 
     // A message being written in the prompt: nothing to push as asking, nothing a tap can send.
@@ -329,9 +339,44 @@ let phoneSuite = Suite("Phone") { t in
     writing.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)]
     writing.phone.scan()
     writing.screen = draft
-    let onDraft = json(writing.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "speakhud (main*) | Opus 5.5 ctx:51% used"])))
+    let statusLine = "speakhud (main*) | Opus 5.5 ctx:51% used"
+    let onDraft = json(writing.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": statusLine,
+                                                                    "box": ["ask": "", "tabs": NSNull(), "rows": ["fix the header", statusLine]]])))
     t.expect(writing.pushes.isEmpty, "away, a message being written that starts \"1. \" is not pushed as a question")
     t.expect(onDraft["sent"] as? Bool == false && writing.pressed.isEmpty, "and no tap presses Down and Enter on it, which would send it")
+
+    // -- a tap answers the box the page drew, and no other ----------------------
+    // Every permission box has Yes first: a row and its label can't tell two of them apart.
+    let k = Bench()
+    k.phone.took(turn("a", "Shall I?"))
+    /// The page looks at a's screen: what it has drawn after that.
+    func looked(_ bench: Bench) -> [String: Any] {
+        drew(json(bench.phone.respond(to: get("/api/screen", query: ["key": "a"])))["state"] as? [String: Any] ?? [:], "a")
+    }
+    let toTouch = screenshot("permission"), toRemove = toTouch.replacingOccurrences(of: "touch made-by-test.txt", with: "rm -rf build")
+    k.screen = toTouch
+    let yes: [String: Any] = ["key": "a", "row": 0, "label": "Yes", "box": looked(k)]
+    t.expect(json(k.phone.respond(to: post("/api/pick", yes)))["sent"] as? Bool == true && k.pressed == ["1"], "Yes, tapped on the box the page drew, is pressed")
+    k.screen = toRemove
+    let doubled = json(k.phone.respond(to: post("/api/pick", yes)))
+    t.expect(doubled["sent"] as? Bool == false && (doubled["outcome"] as? String)?.contains("changed") == true,
+             "the same tap again, with a different permission box now up, is not sent")
+    t.expectEqual(k.pressed, ["1"], "and presses nothing: that box's Yes is not the Yes the page showed")
+    t.expect(((turns(doubled["state"] as? [String: Any] ?? [:]).first?["box"] as? [String: Any])?["ask"] as? String)?.contains("rm -rf build") == true,
+             "the page is given the box that is up now instead")
+    // The same box, moved on: its cursor elsewhere, a tick made in it. It is still the box that was drawn.
+    k.screen = screenshot("trust")
+    let trusted = looked(k)
+    k.screen = screenshot("trust").replacingOccurrences(of: " ❯ No, exit", with: "   No, exit").replacingOccurrences(of: "   Yes, I trust", with: " ❯ Yes, I trust")
+    _ = k.phone.respond(to: post("/api/pick", ["key": "a", "row": 0, "label": "No, exit", "box": trusted]))
+    t.expectEqual(k.pressed, ["1", "up", "enter"], "a box whose cursor has moved since it was drawn is still that box, and the arrows are counted from where the cursor is now")
+    k.screen = screenshot("ask-multi")
+    let extras = looked(k)
+    k.screen = screenshot("ask-multi-checked")
+    _ = k.phone.respond(to: post("/api/pick", ["key": "a", "row": 1, "label": "Keys", "box": extras]))
+    t.expectEqual(k.pressed, ["1", "up", "enter", "2"], "and so is one with a tick made in it, which also marks its question as answered in the strip")
+    t.expect(k.phone.respond(to: post("/api/pick", ["key": "a", "row": 0, "label": "Speech"])).status == 400 && k.pressed.count == 4,
+             "a tap that doesn't say which box it was drawn in presses nothing")
 
     // -- its status line: the folder, the model, how full the context is -------
     let mine = "⏺ Done.\n\n────────────────\n❯ \n────────────────\n  speakhud (main*)  |  Opus 5.5  ctx:51% used         ✔ Update installed · Restart to update\n  ⏵⏵ auto mode on · ← 1 agent"
