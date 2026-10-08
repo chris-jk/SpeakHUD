@@ -906,7 +906,8 @@ enum SpokenCommand: Equatable {
     /// Said at the end of anything, these throw away all of it: the mic heard something
     /// it wasn't meant to (the room, a video, a thought you've dropped). It then listens
     /// again for a little while, in case you want to say it properly.
-    private static let takeBacks = ["scratch that", "clear that", "cancel that", "don't send that"]
+    private static let takeBacks = ["scratch that", "clear that", "cancel that", "don't send that",
+                                    "never mind", "nevermind"]
 
     private static let phrases: [String: SpokenCommand] = {
         var table: [String: SpokenCommand] = [:]
@@ -920,7 +921,7 @@ enum SpokenCommand: Equatable {
         // for when they've nothing to say (Chris's first two tries, 10-07).
         for p in ["no reply", "no answer", "nothing to say", "skip", "skip it", "skip this", "skip that",
                   "skip this part"] { table[p] = .skip }
-        for p in takeBacks + ["start over", "clear", "clear it", "never mind", "nevermind", "don't send"] {
+        for p in takeBacks + ["start over", "clear", "clear it", "don't send"] {
             table[words(p)] = .scratch
         }
         return table

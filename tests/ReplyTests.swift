@@ -128,6 +128,8 @@ let replySuite = Suite("Reply") { t in
     }
     t.expectEqual(SpokenCommand.parse("Scratch that"), .scratch, "scratch that")
     t.expectEqual(SpokenCommand.parse("run the tests, no wait, scratch that"), .scratch, "scratch that takes back what came before it")
+    t.expectEqual(SpokenCommand.parse("ship it, never mind"), .scratch, "so does \"never mind\" at the end, as the README says")
+    t.expectEqual(SpokenCommand.parse("Ship it. Nevermind."), .scratch, "however the transcriber spells it")
     for said in ["later", "again", "next", "stop", "skip the tests", "do it again", "put it off until the tests pass", ""] {
         t.expect(SpokenCommand.parse(said) == nil, "\"\(said)\" is for Claude, not a command")
     }
@@ -446,6 +448,14 @@ let replySuite = Suite("Reply") { t in
         s.ear.hear("keep it")
         s.fire(); s.fire()
         t.expectEqual(s.sent.map(\.text), ["keep it"], "only what came after is sent")
+
+        let n = listening("a")
+        _ = n.ear.take()
+        n.ear.hear("ship it, never mind")
+        n.fire()
+        t.expectEqual(n.ear.take(), [.listen(2)], "\"…, never mind\" at the end of a reply takes it back the same way: a fresh window")
+        n.fire()   // and nothing more is said
+        t.expect(n.sent.isEmpty && n.replied.isEmpty, "so nothing is sent to Claude")
     }
 
     // -- when it doesn't open ----------------------------------------------
