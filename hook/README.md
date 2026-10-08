@@ -131,6 +131,10 @@ hasn't ended: it waits on the answer.
   (`READQ_CHIME`, Glass; `none` for silence), queues the question (with any text Claude
   wrote before asking) under `<session>:question`, waits for the agent to let it go,
   pauses (`READQ_PAUSE`, 2s), then queues the options.
+  Another `PreToolUse` hook can turn the question down first (an ask gate): where
+  `~/.claude/state/ask-gate/` exists, the hook waits up to 3s (`READQ_GATE_WAIT`) for
+  `<tool_use_id>.block` or `.allow` there, and reads nothing for a blocked call. No
+  verdict in time reads as allowed.
 - `PostToolUse` with `--answered` (sync, timeout 5) drops that question's marker in
   `~/.local/state/speakhud/questions/`, so its options aren't read once it's answered.
 

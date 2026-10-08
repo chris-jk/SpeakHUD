@@ -45,6 +45,12 @@ MARKERS = os.path.join(os.path.dirname(rs.QUEUE_DIR), "questions")
 # apart ("stop: discarded …", written by Playback.stop()).
 AGENT_LOG = os.path.expanduser(os.environ.get("READQ_AGENT_LOG") or "~/Library/Logs/speakhud-agent.log")
 STOP_LINE = re.compile(r"^\[([^\]]+)\] stop: ", re.M)
+# Another PreToolUse hook can turn a question down before you see it (an "ask gate").
+# Hooks on one event start together, so it leaves a verdict named after the call,
+# `<tool_use_id>.block` or `.allow`, and this hook waits a moment for it. No such
+# folder means no gate: nothing waits.
+GATE_DIR = os.path.expanduser(os.environ.get("READQ_GATE_DIR") or "~/.claude/state/ask-gate")
+GATE_WAIT = float(os.environ.get("READQ_GATE_WAIT") or 3.0)
 
 
 def segments(questions):
@@ -121,6 +127,20 @@ def answered(data):
     for n in names:
         if n.startswith(t + ".") and (not u or n.endswith("." + u)):
             Marker.drop(n)
+
+
+def turned_down(tool_id):
+    """A gate hook blocked this call, so the question never opens: read nothing.
+    No verdict in time reads as allowed; a gate that broke must not mute questions."""
+    if not tool_id or not os.path.isdir(GATE_DIR):
+        return False
+    end = time.time() + GATE_WAIT
+    while True:
+        if os.path.exists(os.path.join(GATE_DIR, tool_id + ".block")):
+            return True
+        if os.path.exists(os.path.join(GATE_DIR, tool_id + ".allow")) or time.time() >= end:
+            return False
+        time.sleep(0.05)
 
 
 def done(stem):
@@ -209,7 +229,7 @@ def main():
         answered(data)
         return
     questions = (data.get("tool_input") or {}).get("questions") or []
-    if not questions:
+    if not questions or turned_down(uid(data)):
         return
 
     # Claim the session's voice first, so an older question still waiting stands down.

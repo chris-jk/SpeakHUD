@@ -239,6 +239,37 @@ class ReadQuestion(unittest.TestCase):
         self.drain()
         self.assertEqual(self.texts(), ["Held.", "New?", "1. C.\n2. D."])
 
+    def gate(self, verdict=None, tool_id="tu1"):
+        d = os.path.join(self.tmp, ".claude", "state", "ask-gate")
+        os.makedirs(d, exist_ok=True)
+        if verdict:
+            open(os.path.join(d, f"{tool_id}.{verdict}"), "w").close()
+
+    def test_a_question_a_gate_turned_down_is_never_read(self):
+        self.gate("block")
+        self.ask(question("Obvious?", ("Yes", ""), ("No", "")))
+        self.assertEqual((self.texts(), self.chime_times()), ([], []), "it never opened: no chime, no words")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "state", "questions")), "and no claim on the voice")
+
+    def test_a_question_the_gate_let_through_reads_at_once(self):
+        self.gate("allow")
+        began = time.time()
+        self.ask(question("Release it?", ("Yes", ""), ("No", "")))
+        self.assertEqual(self.texts()[0], "Release it?")
+        self.assertLess(self.chime_times()[0] - began, 2.0, "an allow verdict ends the wait")
+
+    def test_a_gate_that_never_answers_doesnt_mute_the_question(self):
+        self.gate()
+        self.env["READQ_GATE_WAIT"] = "0.4"
+        self.ask(question("Still read?", ("Yes", ""), ("No", "")))
+        self.assertEqual(self.texts()[0], "Still read?")
+
+    def test_another_calls_verdict_doesnt_count(self):
+        self.gate("block", tool_id="other")
+        self.env["READQ_GATE_WAIT"] = "0.4"
+        self.ask(question("Mine?", ("Yes", ""), ("No", "")))
+        self.assertEqual(self.texts()[0], "Mine?")
+
     def test_no_session_id_still_reads(self):
         self.ask(question("Ship it?", ("Yes", ""), ("No", "")), session=None)
         self.assertEqual(self.texts(), ["Ship it?", "1. Yes.\n2. No."],
