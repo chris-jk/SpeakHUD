@@ -224,10 +224,11 @@ What's on the page:
   **Close this terminal** is under there too, and takes two taps: Claude is asked to
   exit if it's at its prompt, then the pane is closed.
 - **Read aloud.** A **Read** button on each window has the phone read that turn in its
-  own voice, marking the paragraph and the word it's on and keeping them in view. While
-  it reads the button is **Pause**; **Resume** carries on from the word it had reached
-  (leaving the page pauses it too), and **Start again from the top** is offered beside
-  it. Only the newest open tab of the page speaks: each push you tap opens another. With the **Read aloud** switch on, turns are read as they arrive while the
+  own voice. The paragraph being read is tinted, a block glides from word to word
+  behind the text, and the page eases along to keep that word a little above the middle
+  of the screen. While it reads the button is **Pause**; **Resume** carries on from the
+  word it had reached (leaving the page pauses it too), with **Start over** and
+  **Stop** beside it. Only the newest open tab of the page speaks: each push you tap opens another. With the **Read aloud** switch on, turns are read as they arrive while the
   page is open; the switch is remembered, and after reopening the page one tap anywhere
   lets it speak again (phones only let a page talk after a tap). **Speed** steps through
   1×, 1.25×, 1.5×, 1.75×, 2× and 0.75×, and is remembered too. A locked phone or a

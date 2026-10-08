@@ -291,16 +291,35 @@ main { margin-top: 14px; }
   overflow: hidden;
 }
 
-/* Being read aloud: the paragraph is tinted, and the word the voice is on is marked. */
+/* Being read aloud: the paragraph is tinted, and a block the colour of the bar sits
+   behind the word the voice is on, gliding from one word to the next. */
 .win-text .is-speaking {
-  background: color-mix(in srgb, var(--frame) 22%, transparent);
+  background: color-mix(in srgb, var(--frame) 14%, transparent);
   border-radius: 4px;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
-::highlight(spoken) {
-  background: var(--frame);
-  color: var(--on-frame);
+.win-body { position: relative; }
+.win-text { position: relative; z-index: 1; }
+.win-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--frame) 55%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.16s cubic-bezier(0.3, 0.7, 0.3, 1), width 0.16s cubic-bezier(0.3, 0.7, 0.3, 1), opacity 0.2s;
+  will-change: transform, width;
+}
+.win-cursor.is-on { opacity: 1; }
+
+/* While a reading is paused: Resume is on the bar, these are the other two ways out. */
+.win-paused {
+  display: flex;
+  gap: 22px;
 }
 
 .win-more {

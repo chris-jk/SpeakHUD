@@ -33,9 +33,9 @@
   }
   const typing = () => !!document.activeElement && document.activeElement.tagName === 'TEXTAREA';
   const settled = () => !typing() && !reading && Date.now() - touched > SETTLE_MS;
-  // Word-by-word marking uses the browser's highlights, which draw over the text without
-  // rebuilding it. Without them the paragraph being read is still marked.
-  const canMark = typeof window.Highlight === 'function' && !!(window.CSS && CSS.highlights);
+  // The word being read is marked by a soft block that sits behind the text and glides
+  // from word to word, which the browser's own text highlights can't do: those jump.
+  const canMark = true;
   let busy = false;
   let loaded = false;        // the first draw is what was already there, not news
   let wentTo = null;         // the #key already scrolled to
@@ -108,10 +108,36 @@
   }
 
   let marked = null;         // the paragraph span being read
+  let cursor = null;         // the block behind the word being read, in that window
+  let cursorLine = null;     // the line it's on, to tell a glide along a line from a new line
   function unmark() {
     if (marked) marked.classList.remove('is-speaking');
     marked = null;
-    if (canMark) CSS.highlights.delete('spoken');
+    if (cursor) cursor.classList.remove('is-on');
+    cursor = null;
+    cursorLine = null;
+    aim = null;
+  }
+
+  // Put the block behind `range` (a word). Along a line it glides; onto a new line it
+  // moves at once, since a block flying diagonally across the text is worse than a jump.
+  function glideTo(para, range) {
+    const body = para.span.closest('.win-body');
+    const block = body && body.querySelector('.win-cursor');
+    const rects = range.getClientRects();
+    const rect = rects.length ? rects[0] : range.getBoundingClientRect();
+    if (!block || (!rect.width && !rect.height)) return rect;
+    const frame = body.getBoundingClientRect();
+    const sameLine = cursor === block && cursorLine !== null && Math.abs(cursorLine - (rect.top - frame.top)) < 4;
+    if (cursor && cursor !== block) cursor.classList.remove('is-on');
+    cursor = block;
+    cursorLine = rect.top - frame.top;
+    block.style.transitionDuration = sameLine ? '' : '0ms';
+    block.style.width = (rect.width + 6) + 'px';
+    block.style.height = (rect.height + 2) + 'px';
+    block.style.transform = 'translate(' + (rect.left - frame.left - 3) + 'px,' + (rect.top - frame.top - 1) + 'px)';
+    block.classList.add('is-on');
+    return rect;
   }
 
   // What the phone's voice did during a reading, in numbers and a few fixed words, for
@@ -128,17 +154,28 @@
     call('/api/heard', report).catch(() => {});
   }
 
-  // Keep the place being read in the upper part of the screen, the way a teleprompter
-  // does: when it drops below the band it's brought back up to a third of the way down,
-  // in one move. It follows the word itself, so a paragraph taller than the screen
-  // can't scroll its own beginning away. Never while you're moving the page yourself.
+  // Keep the place being read a little above the middle of the screen, the way a
+  // teleprompter does: the page eases toward it a little every frame, so it moves in one
+  // continuous motion a line at a time and never in jumps. It follows the word itself,
+  // so a paragraph taller than the screen can't scroll its own beginning away. Never
+  // while you're moving the page yourself.
+  const ANCHOR = 0.38;
+  let aim = null;            // where the page's scroll is easing to
+  let easing = false;
+  function ease() {
+    const gap = aim === null ? 0 : aim - window.scrollY;
+    if (aim === null || Math.abs(gap) < 0.6 || Date.now() - touched < SETTLE_MS) { aim = null; easing = false; return; }
+    window.scrollTo(0, window.scrollY + gap * 0.12);
+    requestAnimationFrame(ease);
+  }
   function keepInView(rect) {
     if (!rect || (!rect.height && !rect.width) || Date.now() - touched < SETTLE_MS) return;
-    const tall = window.innerHeight;
-    if (rect.top < 70 || rect.bottom > tall * 0.62) {
-      window.scrollBy({ top: rect.top - tall * 0.3, behavior: 'smooth' });
-      if (heard) heard.scrolls++;
-    }
+    const most = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const want = Math.max(0, Math.min(most, window.scrollY + rect.top - window.innerHeight * ANCHOR));
+    if (Math.abs(want - window.scrollY) < 8) return;
+    if (heard && (aim === null || Math.abs(want - aim) > window.innerHeight / 4)) heard.scrolls++;
+    aim = want;
+    if (!easing) { easing = true; requestAnimationFrame(ease); }
   }
 
   function spot(para, index, size) {
@@ -175,9 +212,7 @@
     if (now) now.word = index;
     if (!part.para) return;
     const size = length || (part.para.say.slice(index).match(/^\S+/) || [''])[0].length;
-    const range = spot(part.para, index, size);
-    if (canMark) CSS.highlights.set('spoken', new window.Highlight(range));
-    keepInView(range.getBoundingClientRect());
+    keepInView(glideTo(part.para, spot(part.para, index, size)));
   }
 
   // A window's button: Read, Pause while it's being read, Resume where it was paused.
@@ -187,7 +222,7 @@
       const held = !!paused && paused.key === key;
       button.classList.toggle('is-reading', key === reading);
       button.textContent = key === reading ? 'Pause' : held ? 'Resume' : 'Read';
-      w.el.querySelector('.win-over').hidden = !held;
+      w.el.querySelector('.win-paused').hidden = !held;
     }
     speakSays.hidden = !speakOn;
     speakSays.textContent = unlocked
@@ -491,6 +526,7 @@
       unmark();
       read(turn.key, 'all', null, 'tap');
     });
+    el.querySelector('.win-stop').addEventListener('click', () => hush('stopped'));
 
     screen.addEventListener('toggle', () => { if (screen.open) look(turn.key); });
     el.querySelector('.win-keys').addEventListener('click', (e) => {

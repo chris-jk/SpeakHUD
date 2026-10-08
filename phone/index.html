@@ -62,9 +62,13 @@
     </header>
     <div class="win-body">
       <p class="win-status" hidden></p>
+      <span class="win-cursor" aria-hidden="true"></span>
       <p class="win-text"></p>
       <button type="button" class="win-more" hidden>Show all of it</button>
-      <button type="button" class="win-more win-over" hidden>Start again from the top</button>
+      <div class="win-paused" hidden>
+        <button type="button" class="win-more win-over">Start over</button>
+        <button type="button" class="win-more win-stop">Stop</button>
+      </div>
 
       <section class="win-asks" hidden>
         <p class="win-tabs" hidden></p>
