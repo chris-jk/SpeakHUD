@@ -391,6 +391,45 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
         t.expect(build.contains("\ncp hook/\(s) \"$STAGE/Contents/Resources/\(s)\""), "build.sh bundles \(s)")
     }
 
+    // After a rebuild build.sh asks `--claude-status` and picks what to do by matching the
+    // first words of the answer: a full install when it's installed or stale, a refresh of
+    // the files alone when it's not installed. The words are the status's raw values, with
+    // ": " and the reasons after them. This holds the two files to each other: build.sh's
+    // patterns, as written there, are run in bash against what each state really reports.
+    // (The line itself is put together in Main, which is compiled out of tests, so that
+    // one expression is repeated here rather than run.)
+    let arms = [(pattern: "installed|stale*", does: "setup"), (pattern: "\"not installed\"*", does: "files")]
+    for arm in arms { t.expect(build.contains("\n  \(arm.pattern))\n"), "build.sh matches \(arm.pattern)") }
+    func buildDoes(_ answer: String) -> String {
+        let p = Process(), out = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", "case \"$1\" in " + arms.map { "\($0.pattern)) echo \($0.does);; " }.joined()
+                             + "*) echo neither;; esac", "bash", answer]
+        p.standardOutput = out
+        guard (try? p.run()) != nil else { return "bash didn't run" }
+        let said = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        p.waitUntilExit()
+        return said.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    sandbox { _, script, question, binary in
+        func answer() -> String {
+            let c = ClaudeHook.check(script: script, question: question, binary: binary)
+            return c.problems.isEmpty ? c.status.rawValue : c.status.rawValue + ": " + c.problems.joined(separator: "; ")
+        }
+        t.expectEqual(answer(), "not installed", "nothing there")
+        t.expectEqual(buildDoes(answer()), "files", "not installed: only existing copies are refreshed")
+        _ = ClaudeHook.install(script: script, question: question, binary: binary)
+        t.expectEqual(answer(), "installed", "all there")
+        t.expectEqual(buildDoes(answer()), "setup", "installed: the install is run again")
+        try? fm.removeItem(atPath: ClaudeHook.questionPath)
+        t.expectEqual(answer(), "stale: question script missing", "one piece gone")
+        t.expectEqual(buildDoes(answer()), "setup", "stale, with its reason: the install is run again")
+        try? "{ not json".write(toFile: ClaudeHook.settingsPath, atomically: true, encoding: .utf8)
+        t.expect(answer().hasPrefix("not installed: "), "settings that won't parse, got \(answer())")
+        t.expectEqual(buildDoes(answer()), "files", "not installed, with its reason: still only the copies")
+        t.expectEqual(buildDoes("error: something else"), "neither", "anything else is left alone")
+    }
+
     // Outside a test dir the command keeps its portable ~ form.
     unsetenv("SPEAKHUD_CLAUDE_DIR")
     t.expectEqual(ClaudeHook.hookCommand, "python3 ~/.claude/read-summary.py", "default command")
