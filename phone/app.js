@@ -48,7 +48,9 @@
   let reading = null;        // the key being read
   let readId = 0;            // so a cancelled reading's end can't end the next one
   const line = [];           // [key, what] waiting their turn to be read
-  let now = null;            // what's being read: { key, what, parts, at }
+  let now = null;            // what's being read: { key, what, parts, at, word }
+  let paused = null;         // a reading stopped with its place kept, same shape
+  let active = true;         // false once another tab of this page has taken over
   // Each tap on the speed button is the next of these; the phone's voice takes a rate.
   const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.75];
   const speedButton = document.getElementById('speed');
@@ -112,13 +114,15 @@
     if (canMark) CSS.highlights.delete('spoken');
   }
 
-  // What the phone's voice did during a reading, in numbers only, for the Mac's log:
-  // voices differ in whether and how they report the word they're on, and a reading
-  // that jumps about can only be explained from the phone that did it.
+  // What the phone's voice did during a reading, in numbers and a few fixed words, for
+  // the Mac's log: voices differ in whether and how they report the word they're on, and
+  // a reading that jumps about or cuts off can only be explained from the phone that did
+  // it. `why` is what started it, `end` what ended it, `page` which open copy of this page.
+  const pageId = Math.random().toString(16).slice(2, 6).padEnd(4, '0');
   let heard = null;
-  function tally() {
+  function tally(end) {
     if (!heard || !heard.parts) { heard = null; return; }
-    const report = Object.assign({}, heard, { seconds: Math.round((Date.now() - heard.began) / 1000) });
+    const report = Object.assign({}, heard, { seconds: Math.round((Date.now() - heard.began) / 1000), end, page: pageId });
     delete report.began; delete report.last; delete report.lastAt;
     heard = null;
     call('/api/heard', report).catch(() => {});
@@ -155,30 +159,35 @@
     keepInView(spot(part.para, 0, 1).getBoundingClientRect());
   }
 
-  // The voice has reached the word at `index` of what it was given. A word behind the
+  // The voice has reached the word at `index` of what the part says. A word behind the
   // last one is a late report: the mark only ever moves forward.
   function point(part, index, length) {
     if (heard) {
-      const now = Date.now();
+      const at = Date.now();
       heard.words++;
       if (length) heard.sized++;
       if (index < heard.last) heard.backwards++;
-      if (heard.lastAt) heard.gap = Math.max(heard.gap, now - heard.lastAt);
-      heard.lastAt = now;
+      if (heard.lastAt) heard.gap = Math.max(heard.gap, at - heard.lastAt);
+      heard.lastAt = at;
     }
-    if (!part.para || (heard && index < heard.last)) return;
+    if (heard && index < heard.last) return;
     if (heard) heard.last = index;
+    if (now) now.word = index;
+    if (!part.para) return;
     const size = length || (part.para.say.slice(index).match(/^\S+/) || [''])[0].length;
     const range = spot(part.para, index, size);
     if (canMark) CSS.highlights.set('spoken', new window.Highlight(range));
     keepInView(range.getBoundingClientRect());
   }
 
+  // A window's button: Read, Pause while it's being read, Resume where it was paused.
   function mark() {
     for (const [key, w] of shown) {
       const button = w.el.querySelector('.win-read');
+      const held = !!paused && paused.key === key;
       button.classList.toggle('is-reading', key === reading);
-      button.textContent = key === reading ? 'Stop' : 'Read';
+      button.textContent = key === reading ? 'Pause' : held ? 'Resume' : 'Read';
+      w.el.querySelector('.win-over').hidden = !held;
     }
     speakSays.hidden = !speakOn;
     speakSays.textContent = unlocked
@@ -193,35 +202,46 @@
     return said;
   }
 
-  // Read a window. `from` picks a reading back up where it was (a change of speed:
-  // a voice can't change rate mid-sentence, so the sentence starts again).
-  function read(key, what, from) {
+  // Stop whatever the voice is saying. Only when it is saying something: a phone's
+  // voice asked to cancel while idle can swallow the start of what it's given next.
+  function quiet() {
+    if (canSpeak && (voice.speaking || voice.pending)) voice.cancel();
+  }
+
+  // Read a window. `from` picks a reading up where it was, at the word it had reached:
+  // after a pause, or a change of speed (a voice can't change rate mid-sentence).
+  // `why` is what asked for it, for the log.
+  function read(key, what, from, why) {
     const w = shown.get(key);
     if (!canSpeak || !w || !w.turn) return next();
-    voice.cancel();
+    quiet();
     const mine = ++readId;
     const parts = from ? from.parts : partsFor(w, what);
     const start = from ? from.at : 0;
+    const word = from ? Math.min(from.word || 0, (parts[start] || { say: '' }).say.length) : 0;
     if (start >= parts.length) { reading = null; now = null; unmark(); return next(); }
     reading = key;
+    paused = null;
     unlocked = true;
-    now = { key, what, parts, at: start };
-    if (!from) {
-      tally();
+    now = { key, what, parts, at: start, word };
+    if (!heard) {
       heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, scrolls: 0, last: -1, lastAt: 0,
-                speed, marks: canMark, voices: voice.getVoices ? voice.getVoices().length : 0, lang: navigator.language || '' };
+                speed, marks: canMark, voices: voice.getVoices ? voice.getVoices().length : 0, lang: navigator.language || '',
+                why: why || 'tap' };
     }
     // The whole turn is opened, so the words being read are there to see.
     w.el.querySelector('.win-text').classList.remove('is-clamped');
     w.el.querySelector('.win-more').hidden = true;
     parts.slice(start).forEach((part, i) => {
-      const said = utter(part.say);
-      said.onstart = () => { if (mine === readId) { now.at = start + i; follow(part); } };
+      const skip = i === 0 ? word : 0;   // picked up mid-sentence: the rest of it
+      const said = utter(part.say.slice(skip));
+      said.onstart = () => { if (mine === readId) { now.at = start + i; now.word = skip; follow(part); if (heard) heard.last = skip - 1; } };
       said.onboundary = (e) => {
-        if (mine === readId && (!e.name || e.name === 'word')) point(part, e.charIndex || 0, e.charLength || 0);
+        if (mine === readId && (!e.name || e.name === 'word')) point(part, skip + (e.charIndex || 0), e.charLength || 0);
       };
       if (start + i === parts.length - 1) {
-        said.onend = said.onerror = () => { if (mine === readId) { reading = null; now = null; unmark(); tally(); next(); } };
+        said.onend = () => { if (mine === readId) { reading = null; now = null; unmark(); tally('finished'); next(); } };
+        said.onerror = () => { if (mine === readId) { reading = null; now = null; unmark(); tally('error'); next(); } };
       }
       voice.speak(said);
     });
@@ -230,26 +250,48 @@
 
   function next() {
     const waiting = line.shift();
-    if (waiting) read(waiting[0], waiting[1]); else mark();
+    if (waiting) read(waiting[0], waiting[1], null, waiting[2]); else mark();
   }
 
-  function hush() {
+  // Stop reading and forget where it was. `end` says why, for the log.
+  function hush(end) {
     readId++;
-    if (canSpeak) voice.cancel();
+    quiet();
     reading = null;
     now = null;
+    paused = null;
     unmark();
-    tally();
+    tally(end || 'stopped');
     mark();
+  }
+
+  // Stop reading but keep the place, and its marks on the page: Resume goes on from
+  // the word it had reached.
+  function pause(end) {
+    if (!reading || !now) return;
+    paused = { key: now.key, what: now.what, parts: now.parts, at: now.at, word: now.word || 0 };
+    readId++;
+    quiet();
+    reading = null;
+    now = null;
+    tally(end || 'paused');
+    mark();
+  }
+
+  function carryOn() {
+    if (!paused) return;
+    const from = paused;
+    read(from.key, from.what, from, 'resume');
   }
 
   function showSpeed() { speedButton.textContent = 'Speed ' + speed + '\u00d7'; }
 
-  // News for a window: read it now, or after what's being read.
-  function announce(key, what) {
-    if (!speakOn || !unlocked || document.hidden) return;
+  // News for a window: read it now, or after what's being read. Not over a reading
+  // you've paused, and not from a copy of the page that another tab has taken over from.
+  function announce(key, what, why) {
+    if (!speakOn || !unlocked || document.hidden || !active || paused) return;
     if (line.some((l) => l[0] === key && l[1] === what)) return;
-    if (reading) line.push([key, what]); else read(key, what);
+    if (reading) line.push([key, what, why]); else read(key, what, null, why);
   }
 
   function accent(name) {
@@ -291,7 +333,7 @@
   }
 
   async function refresh() {
-    if (busy) return;
+    if (busy || !active) return;
     busy = true;
     try {
       const { ok, status, data } = await call('/api/state');
@@ -435,10 +477,19 @@
     const readButton = el.querySelector('.win-read');
     readButton.hidden = !canSpeak;
     readButton.addEventListener('click', () => {
-      if (reading === turn.key) return hush();
-      line.length = 0;
       touched = 0;   // this tap is a request to be shown the reading, not a hand on the page
-      read(turn.key, 'all');
+      if (reading === turn.key) return pause();
+      if (paused && paused.key === turn.key) return carryOn();
+      line.length = 0;
+      if (reading) hush('replaced'); else { paused = null; unmark(); }
+      read(turn.key, 'all', null, 'tap');
+    });
+
+    el.querySelector('.win-over').addEventListener('click', () => {
+      touched = 0;
+      paused = null;
+      unmark();
+      read(turn.key, 'all', null, 'tap');
     });
 
     screen.addEventListener('toggle', () => { if (screen.open) look(turn.key); });
@@ -489,7 +540,8 @@
     if (w.text !== turn.text) {
       w.text = turn.text;
       w.note = '';
-      if (reading === turn.key) hush();   // the words being read are about to be replaced
+      // The words being read, or paused on, are about to be replaced.
+      if (reading === turn.key || (paused && paused.key === turn.key)) hush('changed');
       w.paras = layText(text, turn.text);
       text.hidden = !turn.text;
       text.classList.add('is-clamped');
@@ -498,7 +550,7 @@
         el.classList.remove('is-new');
         void el.offsetWidth;   // restart the arrival flash
         el.classList.add('is-new');
-        if (turn.text) announce(turn.key, 'turn');
+        if (turn.text) announce(turn.key, 'turn', 'arrival');
       }
     }
 
@@ -541,7 +593,7 @@
       if (what !== w.asked) {
         w.asked = what;
         clearTimeout(asked.get(turn.key));
-        if (what && loaded) asked.set(turn.key, setTimeout(() => announce(turn.key, 'question'), box ? 400 : 3500));
+        if (what && loaded) asked.set(turn.key, setTimeout(() => announce(turn.key, 'question', 'question'), box ? 400 : 3500));
       }
     }
     asks.hidden = !asking;
@@ -707,7 +759,7 @@
       speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
       try { localStorage.setItem('speed', String(speed)); } catch (e) { /* private mode */ }
       showSpeed();
-      if (reading && now) read(now.key, now.what, now);   // hear the new speed at once
+      if (reading && now) read(now.key, now.what, now, 'speed');   // hear the new speed at once, from the same word
     });
     document.getElementById('speak-switch').hidden = false;
     speakOn = remembered();
@@ -721,7 +773,7 @@
         voice.speak(utter('Reading aloud.'));
       } else {
         line.length = 0;
-        hush();
+        hush('off');
       }
       mark();
     });
@@ -734,7 +786,7 @@
       const quiet = new window.SpeechSynthesisUtterance(' ');
       quiet.volume = 0;
       voice.speak(quiet);
-      if (wentTo && shown.has(wentTo)) announce(wentTo, 'all');
+      if (wentTo && shown.has(wentTo)) announce(wentTo, 'all', 'visit');
       mark();
     }, true);
   }
@@ -802,7 +854,7 @@
           const go = document.createElement('button');
           go.type = 'button';
           go.textContent = 'Resume';
-          go.addEventListener('click', () => resume(session, go));
+          go.addEventListener('click', () => reopen(session, go));
           row.append(go);
         }
         return row;
@@ -813,7 +865,7 @@
     }
   }
 
-  async function resume(session, button) {
+  async function reopen(session, button) {
     button.disabled = true;
     button.textContent = 'Opening';
     try {
@@ -843,8 +895,35 @@
     }
   });
 
+  // One copy of the page at a time. Every push you tap opens another tab, and two of
+  // them reading aloud at once is no use: the newest takes over, the others go quiet
+  // and say so, and a tap on one of those takes it back.
+  const tabs = 'BroadcastChannel' in window ? new BroadcastChannel('speakhud-page') : null;
+  if (tabs) {
+    tabs.onmessage = (e) => {
+      if (!e.data || e.data.from === pageId || !active) return;
+      active = false;
+      line.length = 0;
+      if (reading) hush('other-tab');
+      trouble.textContent = 'This page is open in a newer tab. Tap here to use this one instead.';
+      trouble.hidden = false;
+    };
+    tabs.postMessage({ from: pageId });
+  }
+  trouble.addEventListener('click', () => {
+    if (active) return;
+    active = true;
+    say('');
+    if (tabs) tabs.postMessage({ from: pageId });
+    refresh();
+  });
+
   window.addEventListener('hashchange', () => { wentTo = null; goToHash(); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  // Leaving the page (another app, the lock button) stops a phone's voice anyway: keep
+  // the place, so Resume carries on from there when you're back.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { line.length = 0; pause('hidden'); } else refresh();
+  });
   setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
   refresh();
 })();

@@ -4858,6 +4858,12 @@ final class Phone {
             if let lang = body["lang"] as? String, lang.range(of: #"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"#, options: .regularExpression) != nil {
                 said.append("lang \(lang)")
             }
+            // What started it, what ended it, and which open copy of the page it was.
+            for name in ["why", "end", "page"] {
+                if let word = body[name] as? String, word.range(of: #"^[a-z0-9-]{1,12}$"#, options: .regularExpression) != nil {
+                    said.append("\(name) \(word)")
+                }
+            }
             log("phone reading: " + said.joined(separator: ", "))
             return .json(["ok": true])
         case "/api/quick":
