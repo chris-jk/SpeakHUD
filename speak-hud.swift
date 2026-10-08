@@ -1047,16 +1047,30 @@ enum Selection {
 /// is one device for mic and speaker, so that flips the moment we start talking.
 /// But the per-process flag never notifies, so the device flag, the process list, and
 /// the default-input choice are just triggers to go and look again.
+/// And they miss some recorders: macOS dictation records through a system daemon
+/// (historicalaudiod) on a mic that isn't the default input, so nothing fired when it
+/// stopped and the hold stuck until some other app touched the mic. So it also looks
+/// on a timer, nudged or not.
 @available(macOS 14.0, *)
 final class MicWatch {
+    /// How often it looks without being nudged.
+    static let pollEvery: TimeInterval = 0.5
+
     private(set) var busy = false
-    private let onChange: (Bool) -> Void
+    private let recorders: () -> [String]?
+    private let onChange: (Bool, String?) -> Void
+    private var poll: Timer?
     private var inputDevice = AudioObjectID(kAudioObjectUnknown)
     private var trigger: AudioObjectPropertyListenerBlock!
     private var deviceChanged: AudioObjectPropertyListenerBlock!
     private let system = AudioObjectID(kAudioObjectSystemObject)
 
-    init(onChange: @escaping (Bool) -> Void) {
+    /// `recorders` names who else is recording right now (nil: couldn't tell); tests
+    /// stand in for CoreAudio there. `onChange` gets the first name with a hold.
+    init(recorders: @escaping () -> [String]? = MicWatch.otherRecorders,
+         every: TimeInterval = MicWatch.pollEvery,
+         onChange: @escaping (Bool, String?) -> Void) {
+        self.recorders = recorders
         self.onChange = onChange
         trigger = { [weak self] _, _ in self?.recheck() }
         deviceChanged = { [weak self] _, _ in self?.followDefaultInput() }
@@ -1065,7 +1079,13 @@ final class MicWatch {
         var def = Self.address(kAudioHardwarePropertyDefaultInputDevice)
         AudioObjectAddPropertyListenerBlock(system, &def, .main, deviceChanged)
         followDefaultInput()
+        let timer = Timer(timeInterval: every, repeats: true) { [weak self] _ in self?.look() }
+        timer.tolerance = every / 5
+        RunLoop.main.add(timer, forMode: .common)
+        poll = timer
     }
+
+    deinit { poll?.invalidate() }
 
     private static func address(_ sel: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal,
@@ -1100,20 +1120,37 @@ final class MicWatch {
     }
 
     private func look() {
-        var addr = Self.address(kAudioHardwarePropertyProcessObjectList)
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr else { return }
-        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return }
-        let me = getpid()
-        let now = ids.contains { id in
-            let pid: Int32? = Self.read(id, kAudioProcessPropertyPID)
-            let running: UInt32? = Self.read(id, kAudioProcessPropertyIsRunningInput)
-            return pid != me && (running ?? 0) != 0
-        }
+        guard let others = recorders() else { return }   // couldn't tell: what we knew stands
+        let now = !others.isEmpty
         guard now != busy else { return }
         busy = now
-        onChange(now)
+        onChange(now, others.first)
+    }
+
+    /// Every other process whose input is running, by name. Ours doesn't count.
+    static func otherRecorders() -> [String]? {
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        var addr = address(kAudioHardwarePropertyProcessObjectList)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr else { return nil }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return nil }
+        let me = getpid()
+        return ids.compactMap { id in
+            let running: UInt32? = read(id, kAudioProcessPropertyIsRunningInput)
+            guard (running ?? 0) != 0 else { return nil }
+            let pid: Int32? = read(id, kAudioProcessPropertyPID)
+            return pid == me ? nil : name(of: pid)
+        }
+    }
+
+    /// What to call a recorder in the log. macOS dictation and Siri have no process of
+    /// their own on the mic: both show up as the system's historicalaudiod.
+    private static func name(of pid: Int32?) -> String {
+        guard let pid = pid else { return "an unknown process" }
+        var buf = [CChar](repeating: 0, count: 256)
+        let named = proc_name(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : "pid \(pid)"
+        return named == "historicalaudiod" ? "macOS dictation or Siri (historicalaudiod)" : named
     }
 }
 
@@ -2878,11 +2915,15 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// Start listening for other apps recording. Silently a no-op before macOS 14.
     func watchMic() {
         guard micWatch == nil, #available(macOS 14.0, *) else { return }
-        micWatch = MicWatch { [weak self] busy in self?.micChanged(busy) }
+        micWatch = MicWatch { [weak self] busy, who in self?.micChanged(busy, by: who) }
     }
 
-    /// The setting and the release debounce live in MicHold.
-    private func micChanged(_ busy: Bool) { micHold.recordingChanged(busy) }
+    /// The setting and the release debounce live in MicHold. Who took the mic goes in
+    /// the log, so a hold that looks wrong can be traced to an app.
+    private func micChanged(_ busy: Bool, by who: String?) {
+        if busy { log("mic taken by \(who ?? "an unknown process")") }
+        micHold.recordingChanged(busy)
+    }
 
     // -- rendering ---------------------------------------------------------
 
