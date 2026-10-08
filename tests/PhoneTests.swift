@@ -309,6 +309,14 @@ let phoneSuite = Suite("Phone") { t in
     o.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: screenshot("ask-single"))]
     o.phone.scan(now: Date().addingTimeInterval(5 * Phone.scanEvery + 5))
 
+    // -- what a reading did on the phone ---------------------------------------
+    _ = o.phone.respond(to: post("/api/heard", ["parts": 5, "words": 140, "sized": 0, "backwards": 12, "gap": 900, "scrolls": 4, "seconds": 41,
+                                              "speed": 1.25, "voices": 60, "marks": true, "lang": "en-US", "text": "what was read", "extra": "x\ny"]))
+    t.expect(o.logs.contains("phone reading: parts 5, words 140, sized 0, backwards 12, gap 900, scrolls 4, seconds 41, speed 1.25, voices 60, marks yes, lang en-US"),
+             "a reading's numbers go in the log, and nothing else the page sends with them does")
+    _ = o.phone.respond(to: post("/api/heard", ["lang": "en\nforged line", "words": "many"]))
+    t.expect(o.logs.last == "phone reading: ", "a report that isn't numbers adds no words of its own to the log")
+
     // -- quick answers ---------------------------------------------------------
     t.expectEqual(o.phone.state()["quick"] as? [String] ?? [], Phone.quickDefault, "quick answers start as a few everyone sends")
     let kept2 = json(o.phone.respond(to: post("/api/quick", ["list": ["Wrap up", " commit it\nand push ", "Wrap up", "/exit", "  "]])))

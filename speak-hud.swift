@@ -4848,6 +4848,18 @@ final class Phone {
             guard let on = body["on"] as? Bool else { return .json(["error": "on must be true or false"], status: 400) }
             setAway(on)
             return .json(state())
+        case "/api/heard":
+            // How a reading went on the phone, for the log: numbers only, and no more
+            // than these names. It is what a page's own voice did, which nothing on the
+            // Mac can see.
+            let names = ["parts", "words", "sized", "backwards", "gap", "scrolls", "seconds", "speed", "voices"]
+            var said = names.compactMap { name in (body[name] as? NSNumber).map { "\(name) \($0.doubleValue == $0.doubleValue.rounded() ? String($0.intValue) : String($0.doubleValue))" } }
+            if let marks = body["marks"] as? Bool { said.append("marks \(marks ? "yes" : "no")") }
+            if let lang = body["lang"] as? String, lang.range(of: #"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"#, options: .regularExpression) != nil {
+                said.append("lang \(lang)")
+            }
+            log("phone reading: " + said.joined(separator: ", "))
+            return .json(["ok": true])
         case "/api/quick":
             guard let list = body["list"] as? [String] else { return .json(["error": "list must be a list of answers"], status: 400) }
             setQuick(list)

@@ -112,30 +112,66 @@
     if (canMark) CSS.highlights.delete('spoken');
   }
 
-  // The voice has started `part`: mark its paragraph, and keep it on screen unless
-  // you're scrolling the page yourself.
-  function follow(part) {
-    unmark();
-    if (!part.para) return;
-    marked = part.para.span;
-    marked.classList.add('is-speaking');
-    const box = marked.getBoundingClientRect();
-    if (Date.now() - touched > SETTLE_MS && (box.top < 60 || box.bottom > window.innerHeight - 40)) {
-      marked.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  // What the phone's voice did during a reading, in numbers only, for the Mac's log:
+  // voices differ in whether and how they report the word they're on, and a reading
+  // that jumps about can only be explained from the phone that did it.
+  let heard = null;
+  function tally() {
+    if (!heard || !heard.parts) { heard = null; return; }
+    const report = Object.assign({}, heard, { seconds: Math.round((Date.now() - heard.began) / 1000) });
+    delete report.began; delete report.last; delete report.lastAt;
+    heard = null;
+    call('/api/heard', report).catch(() => {});
+  }
+
+  // Keep the place being read in the upper part of the screen, the way a teleprompter
+  // does: when it drops below the band it's brought back up to a third of the way down,
+  // in one move. It follows the word itself, so a paragraph taller than the screen
+  // can't scroll its own beginning away. Never while you're moving the page yourself.
+  function keepInView(rect) {
+    if (!rect || (!rect.height && !rect.width) || Date.now() - touched < SETTLE_MS) return;
+    const tall = window.innerHeight;
+    if (rect.top < 70 || rect.bottom > tall * 0.62) {
+      window.scrollBy({ top: rect.top - tall * 0.3, behavior: 'smooth' });
+      if (heard) heard.scrolls++;
     }
   }
 
-  // The voice has reached the word at `index` of what it was given.
-  function point(part, index, length) {
-    if (!canMark || !part.para) return;
-    const { node, lead, say } = part.para;
-    const rest = say.slice(index);
-    const size = length || (rest.match(/^\S+/) || [''])[0].length;
-    const start = Math.min(node.length, lead + index);
+  function spot(para, index, size) {
+    const start = Math.min(para.node.length, para.lead + index);
     const range = new Range();
-    range.setStart(node, start);
-    range.setEnd(node, Math.min(node.length, start + size));
-    CSS.highlights.set('spoken', new window.Highlight(range));
+    range.setStart(para.node, start);
+    range.setEnd(para.node, Math.min(para.node.length, start + Math.max(size, 1)));
+    return range;
+  }
+
+  // The voice has started `part`: mark its paragraph and bring its first words into view.
+  function follow(part) {
+    unmark();
+    if (heard) { heard.parts++; heard.last = -1; }
+    if (!part.para) return;
+    marked = part.para.span;
+    marked.classList.add('is-speaking');
+    keepInView(spot(part.para, 0, 1).getBoundingClientRect());
+  }
+
+  // The voice has reached the word at `index` of what it was given. A word behind the
+  // last one is a late report: the mark only ever moves forward.
+  function point(part, index, length) {
+    if (heard) {
+      const now = Date.now();
+      heard.words++;
+      if (length) heard.sized++;
+      if (index < heard.last) heard.backwards++;
+      if (heard.lastAt) heard.gap = Math.max(heard.gap, now - heard.lastAt);
+      heard.lastAt = now;
+    }
+    if (!part.para || (heard && index < heard.last)) return;
+    if (heard) heard.last = index;
+    const size = length || (part.para.say.slice(index).match(/^\S+/) || [''])[0].length;
+    const range = spot(part.para, index, size);
+    if (canMark) CSS.highlights.set('spoken', new window.Highlight(range));
+    keepInView(range.getBoundingClientRect());
   }
 
   function mark() {
@@ -170,6 +206,11 @@
     reading = key;
     unlocked = true;
     now = { key, what, parts, at: start };
+    if (!from) {
+      tally();
+      heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, scrolls: 0, last: -1, lastAt: 0,
+                speed, marks: canMark, voices: voice.getVoices ? voice.getVoices().length : 0, lang: navigator.language || '' };
+    }
     // The whole turn is opened, so the words being read are there to see.
     w.el.querySelector('.win-text').classList.remove('is-clamped');
     w.el.querySelector('.win-more').hidden = true;
@@ -180,7 +221,7 @@
         if (mine === readId && (!e.name || e.name === 'word')) point(part, e.charIndex || 0, e.charLength || 0);
       };
       if (start + i === parts.length - 1) {
-        said.onend = said.onerror = () => { if (mine === readId) { reading = null; now = null; unmark(); next(); } };
+        said.onend = said.onerror = () => { if (mine === readId) { reading = null; now = null; unmark(); tally(); next(); } };
       }
       voice.speak(said);
     });
@@ -198,6 +239,7 @@
     reading = null;
     now = null;
     unmark();
+    tally();
     mark();
   }
 
@@ -395,8 +437,8 @@
     readButton.addEventListener('click', () => {
       if (reading === turn.key) return hush();
       line.length = 0;
+      touched = 0;   // this tap is a request to be shown the reading, not a hand on the page
       read(turn.key, 'all');
-      el.scrollIntoView({ block: 'start', behavior: 'smooth' });   // its window, held at the top
     });
 
     screen.addEventListener('toggle', () => { if (screen.open) look(turn.key); });
