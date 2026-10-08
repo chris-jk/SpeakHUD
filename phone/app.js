@@ -392,9 +392,11 @@
         if (++tries > STALL_TRIES) return over('stalled');
         quiet();
         // Past its last word, go on to the next part. Otherwise pick this one up from
-        // the word it had reached.
+        // the word it had reached: the word as it stands now, since by the time the
+        // moment is up the reading may have been stopped and its place gone.
         beat();
-        setTimeout(() => (reachedEnd ? say(index + 1, 0) : say(index, now.word || 0)), 120);
+        const from = now.word || 0;
+        setTimeout(() => (reachedEnd ? say(index + 1, 0) : say(index, from)), 120);
       });
     };
     say(start, word);

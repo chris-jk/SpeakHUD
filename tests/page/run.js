@@ -206,6 +206,19 @@ scenario('a voice that goes quiet mid-paragraph is picked up from the word it ha
   assert.deepStrictEqual(heard(w).map((h) => [h.stalls, h.end]), [[1, 'finished']]);
 });
 
+scenario('Stop in the moment a stalled voice is being picked up again stops it, and nothing trips', async () => {
+  const w = await open([turn('a', 'one two three four five.')], { manner: hangs({ words: 1 }) });
+  await w.tap(readButton(w, 'a'));
+  for (let i = 0; i < 400 && !w.voice.cancels; i++) await w.advance(50);   // until the stall is noticed
+  assert.strictEqual(w.voice.cancels, 1);
+  const handed = w.voice.said.length;
+  await w.tap(w.win('a').querySelector('.win-stop'));                       // inside the 120 ms before it's picked up
+  await w.advance(500);
+  assert.deepStrictEqual(w.errors.map(String), []);
+  assert.strictEqual(w.voice.said.length, handed);
+  assert.strictEqual(readButton(w, 'a').textContent, 'Read');
+});
+
 scenario('a voice that never starts gives up, and the Mac\'s log is told', async () => {
   const w = await open([turn('a', 'Alpha one.\nAlpha two.')], { manner: mute() });
   await w.tap(readButton(w, 'a'));
