@@ -222,6 +222,25 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(TerminalBox.read("❯ what I typed earlier\n  and its second line\n\n⏺ Claude's answer, at length.\n  More of it.\n\n✻ Working… (esc to interrupt)") == nil,
              "a ❯ in the conversation is not a cursor: nothing is invented from a turn in progress")
 
+    // A box is read only where Claude says it has one up. "It isn't the prompt" is not
+    // that: a message being written and a shell were both read as lists of choices.
+    let longRule = String(repeating: "─", count: 60)
+    let draft = ["done", longRule, "❯ 1. fix the header", longRule, "  speakhud (main*) | Opus 5.5 ctx:51% used"].joined(separator: "\n")
+    let shellPrompt = "  build ok\n  2 warnings\n❯ rm -rf build"
+    t.expect(TerminalBox.read(draft) == nil, "a message being written that starts \"1. \" is not a box, and its status line is not a choice")
+    t.expect(TerminalBox.read(shellPrompt) == nil, "a shell whose prompt is ❯, under indented output, is not a box")
+    t.expect(TerminalBox.read("  1. first\n  2. second\n❯ git status") == nil, "nor is one under a numbered list it printed")
+    t.expect(TerminalBox.read(["done", longRule, "❯ 1. Yes", "  2. No", longRule, "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent"].joined(separator: "\n")) == nil,
+             "numbered lines between the prompt's rules, with nothing that says keys answer them, are not a box either")
+    t.expect(TerminalBox.read("  one\n❯ two\n  three\nmain · 3 files changed") == nil, "a line with a dot in the middle of it is not a box saying how to answer")
+    let unsaid = screenshot("permission").components(separatedBy: "\n").filter { !$0.contains("Esc to cancel") }.joined(separator: "\n")
+    t.expect(unsaid != screenshot("permission") && TerminalBox.read(unsaid) == nil, "a list of choices with nothing under it that says how to answer is not read as one")
+    t.expect(TerminalBox.read(screenshot("permission") + "\nchris@mac project % ") == nil, "nor is a box left on the screen of a pane that has dropped to its shell")
+    var draftDesk = PhoneDesk()
+    let draftAsked = draftDesk.met([Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)], now: t0)
+    t.expect(draftAsked.isEmpty && draftDesk.turns.count == 1 && draftDesk.turns[0].box == nil && draftDesk.turns[0].context == 51,
+             "so a terminal with such a message in its prompt is not asking anything, and its status line is read as one")
+
     // -- every open terminal, and none that has closed ----------------------
     let other = "0A1B2C3D-0000-4000-8000-00000000000B", shell = "0A1B2C3D-0000-4000-8000-00000000000C"
     t.expectEqual(Reply.paneName("✳ Grow guide replies — ~/GitHub/grow-guide"), "Grow guide replies", "a pane's title, down to the name its turns go by")
@@ -303,6 +322,16 @@ let phoneSuite = Suite("Phone") { t in
     o.screen = atPrompt
     let gone = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest"])))
     t.expect(gone["sent"] as? Bool == false && turns(gone["state"] as? [String: Any] ?? [:]).first?["box"] is NSNull, "a box that has gone is said to have, and leaves the page")
+
+    // A message being written in the prompt: nothing to push as asking, nothing a tap can send.
+    let writing = Bench()
+    writing.phone.setAway(true)
+    writing.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)]
+    writing.phone.scan()
+    writing.screen = draft
+    let onDraft = json(writing.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "speakhud (main*) | Opus 5.5 ctx:51% used"])))
+    t.expect(writing.pushes.isEmpty, "away, a message being written that starts \"1. \" is not pushed as a question")
+    t.expect(onDraft["sent"] as? Bool == false && writing.pressed.isEmpty, "and no tap presses Down and Enter on it, which would send it")
 
     // -- its status line: the folder, the model, how full the context is -------
     let mine = "⏺ Done.\n\n────────────────\n❯ \n────────────────\n  speakhud (main*)  |  Opus 5.5  ctx:51% used         ✔ Update installed · Restart to update\n  ⏵⏵ auto mode on · ← 1 agent"

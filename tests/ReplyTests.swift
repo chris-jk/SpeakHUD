@@ -151,6 +151,13 @@ let replySuite = Suite("Reply") { t in
     t.expect(Reply.promptText(in: screen(rule, "❯ quoted earlier", rule, "a", "b", "c", "d", "e", "f")) == nil,
              "a rule with more than a status line or two under it isn't the prompt box")
     t.expect(Reply.promptText(in: "") == nil, "no screen, no prompt")
+    // A message you're writing may start with a number. Read as "not a prompt", it was
+    // taken for a list of choices, and a tap on the phone sent it.
+    t.expectEqual(Reply.promptText(in: screen("done", rule, "❯ 1. fix the header", rule, "  speakhud (main*) | Opus 5.5 ctx:51% used")),
+                  "1. fix the header", "a message that starts \"1. \" is still a message in the prompt box")
+    t.expectEqual(Reply.promptText(in: atPrompt("❯ 2. then the footer, which", "  wraps onto a second line")),
+                  "2. then the footer, which wraps onto a second line", "wrapped too")
+    t.expectEqual(Reply.promptText(in: atPrompt("❯ 10. Yes")), "10. Yes", "one numbered line is not a list of options")
 
     t.expect(Reply.shows("blue please", inPrompt: "blue please"), "the paste shows")
     t.expect(Reply.shows("word0 word1 word2 word3", inPrompt: "word0 word1 wo rd2 word3"), "however it wrapped")

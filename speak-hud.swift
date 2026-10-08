@@ -566,11 +566,12 @@ enum Reply {
         guard top >= 1, lines[top].hasPrefix("❯"), isRule(lines[top - 1]) else { return nil }
         var parts = [String(lines[top].dropFirst())]
         parts += lines[(top + 1)..<bottom]
-        let text = parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            .joined(separator: " ")
-        // "1. Yes": an option list that happens to sit between rules is still not a prompt.
-        if text.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil { return nil }
-        return text
+        let held = parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // "1. Yes" over "2. No": an option list that happens to sit between rules is still
+        // not a prompt. One numbered line is a message you're writing ("1. fix the header").
+        let numbered = held.filter { $0.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil }
+        if numbered.count >= 2, held.first == numbered.first { return nil }
+        return held.joined(separator: " ")
     }
 
     /// Whether the prompt box now holds what was pasted and nothing ahead of it: it
@@ -4441,7 +4442,7 @@ struct TerminalBox: Equatable {
         let under = (bottom + 1..<lines.count).filter { !blank($0) }.map { lines[$0].trimmingCharacters(in: .whitespaces) }
         guard under.count <= 1 else { return nil }
         let hints = under.first
-        if let h = hints, !(h.contains("Esc") || h.contains("Enter") || h.contains(" · ")) { return nil }
+        if let h = hints, !Reply.boxHints.contains(where: { h.contains($0) }) { return nil }
 
         var rows: [Row] = []
         var labelCol = c + 2
@@ -4483,6 +4484,13 @@ struct TerminalBox: Equatable {
                 said.append(text)
             }
         }
+        // A box says it is one, and nothing else is read as one: not being the prompt
+        // isn't enough (a shell isn't the prompt either). Under its choices it says which
+        // keys answer it. The one box that doesn't, the last step of several questions,
+        // opens under a rule with the strip of those questions, and numbers every choice.
+        let opened = open > 0 && isRule(lines[open - 1]) && !lines[open - 1].contains("╌")
+        let counted = rows.enumerated().allSatisfy { $0.element.number == $0.offset + 1 }
+        guard hints != nil || (opened && tabs != nil && counted) else { return nil }
         return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
     }
 
