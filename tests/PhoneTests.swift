@@ -565,6 +565,49 @@ let phoneSuite = Suite("Phone") { t in
         t.expect(answers.allSatisfy { !went($0) } && q.pressed.count == 6, "\(what) is not Claude Code: no key is pressed there")
         t.expect((answers[0]["outcome"] as? String)?.contains("Claude") == true, "and the page is told so (\(what))")
     }
+    // A question in a pane too narrow for its line of keys, which wraps onto two: no box
+    // is read there, and that is not the question having gone. The hook's own words are
+    // then what says whose list is at the foot of the screen.
+    let narrow = String(repeating: "─", count: 62)
+    let wrapped = [narrow, " ☐ Colour", "", "Which colour for the bar?", "", "❯ 1. Forest", "     Like Grow Guide", "  2. Navy", "     Like the factory",
+                   "  3. Type something.", narrow, "  4. Chat about this", "", "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim ·", "Esc to cancel"].joined(separator: "\n")
+    q.screen = wrapped
+    var had = q.pressed.count   // each check counts from what had been pressed before it
+    t.expect(boxOn(wrapped) == nil && went(key("2", navy)) && q.pressed.count == had + 1 && q.pressed.last == "2",
+             "a number beside a question's words is pressed where the box can't be read whole, when the list at the foot of its screen is that question with that choice at that number")
+    had = q.pressed.count
+    let otherChoice = key("1", navy), otherQuestion = key("2", ["asked": "Which route do you want?", "option": "Navy. Like the factory"])
+    t.expect(!went(otherChoice) && !went(otherQuestion) && !went(key("enter", navy)) && q.pressed.count == had,
+             "not when that number is another choice's or the question another one, and never any key but the number")
+    t.expect((otherChoice["outcome"] as? String)?.contains("no list of choices on its screen reads as that question") == true
+             && (otherQuestion["outcome"] as? String)?.contains("changed") == false,
+             "and the page is told what is wrong, not that a box has changed")
+    q.screen = screenshot("ask-single").replacingOccurrences(of: "Enter to select · ↑/↓ to navigate · Esc to cancel", with: "Return to choose · arrows to move")
+    t.expect(boxOn(q.screen ?? "") == nil && went(key("2", navy)) && q.pressed.count == had + 1,
+             "nor does it hang on the words of that line: the captured box with other words there takes the number the same way")
+    had = q.pressed.count
+    q.screen = screenshot("ask-single") + "\nchris@mac project % "
+    let overShell = key("2", navy)
+    t.expect(!went(overShell) && q.pressed.count == had && (overShell["outcome"] as? String)?.contains("isn't showing Claude Code") == true,
+             "a question's box left on the screen over a shell's prompt takes no number: more is under its choices than one line, however wrapped")
+    had = q.pressed.count
+    q.screen = wrapped.replacingOccurrences(of: narrow, with: String(repeating: "─", count: 110))
+    t.expect(!went(key("2", navy)) && q.pressed.count == had,
+             "two lines under its choices in a pane wide enough for both on one are not one line that wrapped")
+    had = q.pressed.count
+    q.screen = wrapped.components(separatedBy: "\n").dropFirst().joined(separator: "\n")
+    t.expect(!went(key("2", navy)) && q.pressed.count == had,
+             "nor are they where no rule over the question says how wide the pane is")
+    had = q.pressed.count
+    q.screen = "❯ Which colour for the bar?\n  1. Forest\n  2. Navy\n\n⏺ Asking you now.\n\n✻ Working… (esc to interrupt)"
+    let midTurn = key("2", navy)
+    t.expect(!went(midTurn) && q.pressed.count == had && (midTurn["outcome"] as? String)?.contains("no list of choices on its screen reads as that question") == true,
+             "nor do the question's words further up a screen whose turn is running: they are not a list with what it asks over it")
+    had = q.pressed.count
+    q.screen = atPrompt
+    let answered = key("2", navy)
+    t.expect(!went(answered) && q.pressed.count == had && (answered["outcome"] as? String)?.contains("changed") == true && answered["state"] != nil,
+             "back at Claude's prompt the question has gone: that is a box that has changed, and the page is given what's there")
     let pageScript = String(decoding: fm.contents(atPath: "phone/app.js") ?? Data(), as: UTF8.self)
     t.expect(pageScript.contains("box: w.box") && pageScript.contains("body.box = w.box") && pageScript.contains("body.option = "),
              "the page's taps and keys say what they were drawn in")
