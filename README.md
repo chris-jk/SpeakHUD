@@ -252,7 +252,8 @@ What's on the page:
   of the screen. While it reads the button is **Pause**; **Resume** carries on from the
   word it had reached (leaving the page pauses it too). Start over (↻) and stop (■) sit
   beside it in the bar, and the bar stays at the top of the screen while its turn
-  scrolls under it. Only the newest open tab of the page speaks: each push you tap opens
+  scrolls under it. Stop also lets go of any turns that were waiting to be read, and
+  a reading stops by itself if its terminal is closed. Only the newest open tab of the page speaks: each push you tap opens
   another, and an older one fades and says so, and neither speaks nor sends anything
   until a tap on its notice takes the page back. With the **Read aloud** switch on, turns are read as they arrive while the
   page is open; the switch is remembered, and after reopening the page one tap anywhere
