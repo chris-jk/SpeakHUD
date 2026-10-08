@@ -1581,7 +1581,16 @@ final class Playback {
     private var sound = Sound.silent
     private var utterance = 0      // id of the last utterance handed to the voice
     private var resumeAt = 0       // start of the word being spoken: where a restart picks up
-    private var userPaused = false // yours; the mic never clears it
+    private var userPaused = false {   // yours; the mic never clears it
+        didSet {
+            // A pause that's over, however it ended, takes its "asked for by voice"
+            // with it, and the wait for "go on".
+            guard !userPaused else { return }
+            pausedByVoice = false
+            cancelPausedListen?()
+            cancelPausedListen = nil
+        }
+    }
     private var micBusy = false
     private var lastItem: SpeechItem?   // what Replay replays once the queue has run dry
     private var stopped = false    // the HUD was emptied by Stop, not by running dry
@@ -1873,7 +1882,7 @@ final class Playback {
     /// says it's open (`earOpened`); one that never says is given up on.
     private func hearReply() {
         guard let w = window else { return }
-        arm(Self.replyWait + Self.micOpenLimit) { [weak self] in
+        arm(Self.micOpenLimit) { [weak self] in
             self?.closeWindow("the mic never opened")
             self?.moveOn()
         }

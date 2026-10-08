@@ -287,7 +287,7 @@ let replySuite = Suite("Reply") { t in
         t.expectEqual(r.ear.take(), [.listen(1)], "the mic is asked for")
         t.expectEqual(p.state.status, "🎙 Opening the mic…", "the HUD says it's opening")
         t.expectEqual(r.listened, [], "no \"your turn\" yet")
-        t.expectEqual(r.armed?.seconds, Playback.replyWait + Playback.micOpenLimit, "only a limit on how long it may take")
+        t.expectEqual(r.armed?.seconds, Playback.micOpenLimit, "only a limit on how long it may take: \(Int(Playback.micOpenLimit))s")
         r.ear.open()
         t.expectEqual(r.listened, ["a"], "open: now it's your turn")
         t.expectEqual(p.state.status, "🎙 Listening: answer A, or say nothing", "and the HUD says so")

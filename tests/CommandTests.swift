@@ -216,6 +216,16 @@ let commandSuite = Suite("Commands") { t in
         t.expectEqual(s.ear.take(), [.stop], "paused again by key: the mic shuts, voice pause or not")
     }
 
+    do {  // a voice pause that ends some other way leaves nothing behind
+        for (ending, how) in [("pause skip", "skip"), ("pause later", "later"), ("pause go on", "go on")] {
+            let r = reading("a", "b", "c")
+            say(r, "pause")
+            say(r, ending)
+            let waiting = r.timers.filter { $0.seconds == Playback.pausedListen && !$0.cancelled && !$0.fired }
+            t.expect(waiting.isEmpty, "after \"pause\" then \"\(how)\", the minute's wait for \"go on\" is called off")
+        }
+    }
+
     do {  // again while paused is asking for sound
         let r = reading("one two three")
         say(r, "wait")
