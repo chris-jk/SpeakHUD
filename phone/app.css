@@ -324,9 +324,10 @@ main { margin-top: 14px; }
 
 .win-body { padding: 12px 14px 14px; }
 
-/* Its own status line: the folder, the model, how full the context is. */
+/* Its own status line, under the answer box where you look while chatting: the model,
+   how full the context is, the folder. */
 .win-status {
-  margin: 0 0 8px;
+  margin: 8px 0 0;
   color: var(--quiet);
   font-size: 0.8125rem;
   overflow-wrap: anywhere;

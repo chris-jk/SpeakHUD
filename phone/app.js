@@ -907,6 +907,22 @@
     line.classList.toggle('is-plain', !!plain);
   }
 
+  // A terminal's status line as it reads under the answer box: the model and how full
+  // its context is first, since that's what you look for mid-chat, then the rest of it.
+  // "speakhud (main*) | Opus 5.5 ctx:51% used" reads "Opus 5.5 · context 51% · speakhud (main*)".
+  // The line is yours to set on the Mac, so one with no context figure is shown as it is.
+  const CONTEXT_IN_LINE = /\b(?:ctx|context)\D{0,3}\d{1,3}\s?%(?:\s*used)?|\d{1,3}\s?%\s*(?:ctx|context)\b/i;
+  function statusLine(turn) {
+    const line = turn.status || '';
+    if (typeof turn.context !== 'number') return line;
+    const pieces = line.split(/\s*\|\s*/);
+    const at = pieces.findIndex((piece) => CONTEXT_IN_LINE.test(piece));
+    if (at < 0) return line;
+    const model = pieces[at].replace(CONTEXT_IN_LINE, '').trim();
+    const rest = pieces.filter((piece, i) => i !== at && piece);
+    return [model, 'context ' + turn.context + '%'].concat(rest).filter(Boolean).join(' · ');
+  }
+
   function update(turn) {
     const w = shown.get(turn.key) || build(turn);
     const el = w.el;
@@ -918,7 +934,7 @@
     el.querySelector('.win-when').textContent = ago(turn.at);
 
     const status = el.querySelector('.win-status');
-    status.textContent = turn.status || '';
+    status.textContent = statusLine(turn);
     status.hidden = !turn.status;
     status.classList.toggle('is-full', (turn.context || 0) >= 80);
 
