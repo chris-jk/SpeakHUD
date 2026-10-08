@@ -577,9 +577,18 @@ enum Reply {
     /// starts with the first stretch of it (wrapping aside), or, for a long paste, with
     /// the marker Claude Code folds one into. Text you had already typed there fails
     /// this, and Return is left to you.
+    ///
+    /// A picture's path doesn't stay in the words: Claude Code takes it out and puts
+    /// "[Image #1]" at the front of the box instead (seen in 2.1.294: a paste of
+    /// "Look at this picture from my phone: /…/a.jpg" shows as "[Image #1]Look at this
+    /// picture from my phone:"). So those markers at the front aren't something typed
+    /// ahead, and the paths aren't looked for.
     static func shows(_ text: String, inPrompt box: String) -> Bool {
         func squash(_ s: String) -> String { String(s.unicodeScalars.filter { !CharacterSet.whitespaces.contains($0) }) }
-        let want = squash(text), have = squash(box)
+        let words = text.replacingOccurrences(of: #"\s?/\S+\.(?:jpe?g|png|gif|webp|heic)(?=\s|$)"#, with: "",
+                                              options: [.regularExpression, .caseInsensitive])
+        let held = box.replacingOccurrences(of: #"^(\s*\[Image #\d+\])+"#, with: "", options: .regularExpression)
+        let want = squash(words), have = squash(held)
         guard !want.isEmpty else { return false }
         return have.hasPrefix(String(want.prefix(40))) || have.hasPrefix("[Pastedtext#")
     }

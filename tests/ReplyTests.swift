@@ -156,6 +156,16 @@ let replySuite = Suite("Reply") { t in
     t.expect(Reply.shows("word0 word1 word2 word3", inPrompt: "word0 word1 wo rd2 word3"), "however it wrapped")
     t.expect(Reply.shows(String(repeating: "word ", count: 400), inPrompt: "[Pasted text #1]"), "a long paste shows as Claude's marker")
     t.expect(!Reply.shows("blue please", inPrompt: "half a thought blue please"), "text you'd typed ahead of it: not confirmed")
+    // As Claude Code 2.1.294 really showed these two pastes (captured from a scratch session).
+    t.expect(Reply.shows("Look at this picture from my phone: /Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg",
+                         inPrompt: "[Image #1]Look at this picture from my phone:"),
+             "a pasted picture's path becomes a marker at the front of the box: the words after it are the paste showing")
+    t.expect(Reply.shows("which is it The pictures from my phone: /Users/you/a/one.jpg /Users/you/a/two.png",
+                         inPrompt: "[Image #2] [Image #3]which is it The pictures from my phone:"), "and so with two")
+    t.expect(!Reply.shows("which is it The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1]half a thought which is it The picture from my phone:")
+             && !Reply.shows("blue please", inPrompt: "half a thought [Image #1]blue please"),
+             "words typed ahead of the paste still aren't confirmed, picture or no picture")
+    t.expect(Reply.shows("open /tmp/notes.txt and fix it", inPrompt: "open /tmp/notes.txt and fix it"), "a path that isn't a picture's stays in the words")
     t.expect(!Reply.shows("blue please", inPrompt: ""), "an empty box hasn't taken it")
     t.expect(!Reply.shows("blue please", inPrompt: "Try \"edit <filepath> to...\""), "nor has one still showing its placeholder")
 
