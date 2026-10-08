@@ -429,8 +429,9 @@ Chrome and some terminals — a synthesized `⌘C` with your clipboard restored 
 ```
 
 Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications` when it isn't
-writable). If the Claude Code hook is installed (even partly), it then runs the new
-app's `--setup-claude` to refresh `~/.claude/read-summary.py` and `~/.claude/bin/speak-hud`,
+writable). If the Claude Code hooks are installed (even partly), it then runs the new
+app's `--setup-claude` to refresh `~/.claude/read-summary.py`,
+`~/.claude/hooks/read-question.py` and `~/.claude/bin/speak-hud`,
 so a rebuild never leaves a stale copy behind. Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
 
 Tests: `./tests/run.sh`. It compiles `speak-hud.swift` with `-D TESTING` (the entry
@@ -459,8 +460,10 @@ The background agent shows a small **speaker icon** in the menu bar:
 
 - **Read Clipboard Aloud**
 - **Read Claude Code Responses Aloud** — a checkbox that installs/removes the Claude
-  Code `Stop` hook for you (see below). If the hook is registered but its script or
-  binary is missing or out of date, it shows a dash and "— Repair"; clicking reinstalls.
+  Code hooks for you: the `Stop` hook that reads each response, and with it the one that
+  reads a question box and its options (see below). Unticked, neither is read. If they
+  are only partly there (an entry, a script or the binary missing or out of date), it
+  shows a dash and "— Repair"; clicking reinstalls.
 - **Pause While Recording** — on by default: speech holds while another app uses the
   mic. Turning it off releases a hold at once. Shared with the standalone reader.
 - **Listen After Reading** — off by default: answer a Claude Code turn out loud
@@ -486,20 +489,26 @@ the easy way from the menu bar (**Read Claude Code Responses Aloud**), or from t
 ```
 
 Setup is a safe, idempotent merge into `~/.claude/settings.json`: it copies
-`read-summary.py` and the reader binary into `~/.claude`, then adds a `Stop` hook that
-grabs the latest assistant response, strips code blocks/markdown, and hands it to the
-agent's queue. Your other settings and hooks are preserved; removing it deletes only the
-SpeakHUD entry, keeping any other hooks in the same group. If `settings.json` isn't valid
-JSON, setup and removal leave it untouched and say so. Each step that fails is named in
-the output, and `--setup-claude` exits non-zero.
+`read-summary.py` and the reader binary into `~/.claude` and `read-question.py` into
+`~/.claude/hooks`, then adds three entries. A `Stop` hook grabs the latest assistant
+response, strips code blocks/markdown, and hands it to the agent's queue. A `PreToolUse`
+and a `PostToolUse` hook on `AskUserQuestion` read a question and its options, which the
+`Stop` hook can't: the turn hasn't ended while it waits on the answer. An entry that is
+already there, one put in by hand included, is left as it is and not added twice. Your
+other settings and hooks are preserved; removing it deletes only those three entries,
+keeping any other hooks in the same group, and leaves the copied files. If `settings.json`
+isn't valid JSON, or its `hooks` aren't in the shape Claude Code writes, setup and removal
+leave it untouched and say so. Each step that fails is named in the output, and
+`--setup-claude` exits non-zero.
 
-`--claude-status` prints one of `installed`, `stale: <what's wrong>` (the hook is
-registered but the script or binary is missing or differs from this build — run
-`--setup-claude` to repair), or `not installed` (with the reason if `settings.json` won't
-parse). Run it from the app bundle: that's where the reference copy of `read-summary.py`
-lives. See `hook/` for the reference script.
+`--claude-status` prints one of `installed`, `stale: <what's wrong>` (some of it is
+there, but an entry, a script or the binary is missing or differs from this build — run
+`--setup-claude` to repair), or `not installed` (none of the three entries; with the
+reason if `settings.json` won't parse). Run it from the app bundle: that's where the
+reference copies of the two scripts live. See `hook/` for the scripts.
 
-`build.sh` refreshes the hook through the app: `--setup-claude` when it's registered, and
+`build.sh` refreshes the hooks through the app: `--setup-claude` when they're registered
+(so an install from before the question hook was part of it gains that too), and
 otherwise `--refresh-claude-files`, which updates any existing script or binary copy in
 `~/.claude` (say, for a hook registered in `settings.local.json`) without registering
 anything. A symlinked copy is written through, not replaced.
@@ -518,6 +527,8 @@ instead. You lose the queue in that mode, so simultaneous turns can talk over ea
   spool watcher, menu bar), and `--set-hotkey`.
 - `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn, or
   speaks it directly when the agent isn't running.
+- `hook/read-question.py` — the `AskUserQuestion` hook; reads a question, then its
+  options. Installed and removed with the `Stop` hook.
 - `phone/` — the phone page (`index.html`, `app.css`, `app.js`, and `mic.js`, its microphone), copied into the app's
   resources by `build.sh` and served by `Phone` in `speak-hud.swift`.
 - `make-icon.swift` — build-time tool that renders `AppIcon.icns`; not part of the app.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build SpeakHUD.app from source, sign it, and install it.
 #  - Installs the .app to /Applications (falls back to ~/Applications).
-#  - If the Claude Code hook is installed, refreshes it via the new app's --setup-claude.
+#  - If the Claude Code hooks are installed, refreshes them via the new app's --setup-claude.
 # Stock-macOS tools only: swiftc, codesign, sips, iconutil.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -30,6 +30,7 @@ if [ ! -f AppIcon.icns ]; then
 fi
 cp AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
 cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the in-app Claude Code setup
+cp hook/read-question.py "$STAGE/Contents/Resources/read-question.py" # same: the AskUserQuestion hook
 mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in speak-hud.swift)
 cp phone/index.html phone/app.css phone/app.js phone/mic.js "$STAGE/Contents/Resources/phone/"
 
@@ -163,8 +164,10 @@ echo "== Refresh Claude Code hook =="
 # After the agent is up: the new hook trusts only the new agent's heartbeat, so
 # refreshing it first would send every turn around a live old agent in the gap.
 # The app owns installation (ClaudeHook in speak-hud.swift); build.sh only asks it to
-# refresh an existing install, so the script, the binary and settings.json all go
+# refresh an existing install, so both hook scripts, the binary and settings.json all go
 # through one code path. A stale script silently keeps old behaviour, so this matters.
+# An install from before the app knew the question hook reports "stale" and gains it here.
+# The words matched below are pinned by tests/ClaudeHookTests.swift.
 APPBIN="$DEST/Contents/MacOS/$EXEC"
 HOOK_STATUS="$("$APPBIN" --claude-status 2>&1 || true)"
 case "$HOOK_STATUS" in

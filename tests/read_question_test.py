@@ -244,6 +244,26 @@ class ReadQuestion(unittest.TestCase):
         self.assertEqual(self.texts(), ["Ship it?", "1. Yes.\n2. No."],
                          "the transcript path stands in for the key, slashes and all")
 
+    def test_installed_copy_finds_the_stop_hook_in_dot_claude(self):
+        """Where the app puts them: read-question.py alone in ~/.claude/hooks and
+        read-summary.py in ~/.claude. Every other test runs the repo's copy, which has
+        read-summary.py beside it."""
+        global HOOK
+        claude = os.path.join(self.tmp, ".claude")
+        os.makedirs(os.path.join(claude, "hooks"))
+        installed = shutil.copy(HOOK, os.path.join(claude, "hooks", "read-question.py"))
+        shutil.copy(os.path.join(os.path.dirname(HOOK), "read-summary.py"), claude)
+        self.assertEqual(os.listdir(os.path.join(claude, "hooks")), ["read-question.py"],
+                         "nothing beside it to import")
+        repo_copy = HOOK
+        try:
+            HOOK = installed
+            self.ask(question("Ship it?", ("Yes", ""), ("No", "")))
+            self.answer()
+        finally:
+            HOOK = repo_copy
+        self.assertEqual(self.texts(), ["Ship it?", "1. Yes.\n2. No."])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
