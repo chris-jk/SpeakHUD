@@ -44,6 +44,8 @@ private final class Bench {
     var logs: [String] = []
     var awayChanges: [Bool] = []
     var outcome = Reply.Outcome.sent
+    var open: [(session: String, name: String)]? = nil   // what iTerm2 says is open; nil: it isn't saying
+    var saves = 0
     var screen: String? = "some output\n────────────────\n❯ \n────────────────\n  status"
 
     init(url: String? = "https://my-mac.example.ts.net", ntfy: String? = "https://push.example.com/terminals") {
@@ -56,6 +58,8 @@ private final class Bench {
         phone.deliver = { [unowned self] text, origin in self.delivered.append((text, origin.session)); return self.outcome }
         phone.press = { [unowned self] key, _ in self.pressed.append(key); return self.outcome }
         phone.look = { [unowned self] _ in self.screen }
+        phone.panes = { [unowned self] in self.open }
+        phone.save = { [unowned self] _ in self.saves += 1 }
         phone.transport = { [unowned self] request, done in self.pushes.append(request); done(nil) }
         phone.asset = { fm.contents(atPath: "phone/" + $0) }
         phone.log = { [unowned self] in self.logs.append($0) }
@@ -147,6 +151,51 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(desk.turn("b")?.sent == nil && desk.turn("b")?.question == nil, "until its terminal's next turn")
     for i in 0..<(PhoneDesk.keep + 5) { desk.took(turn("k\(i)", "x"), now: t0.addingTimeInterval(300 + Double(i))) }
     t.expectEqual(desk.turns.count, PhoneDesk.keep, "the list stops at \(PhoneDesk.keep)")
+
+    // -- every open terminal, and none that has closed ----------------------
+    let other = "0A1B2C3D-0000-4000-8000-00000000000B", shell = "0A1B2C3D-0000-4000-8000-00000000000C"
+    t.expectEqual(Reply.paneName("✳ Grow guide replies — ~/GitHub/grow-guide"), "Grow guide replies", "a pane's title, down to the name its turns go by")
+    t.expectEqual(Reply.paneName("◐ Before — and after — ~/x"), "Before — and after", "only the folder on the end is cut")
+    t.expectEqual(Reply.paneName("zsh"), "zsh", "a plain title is left alone")
+    let listed = Reply.panes(ask: { _ in Reply.Answer(reply: "ok\n\(other)\t✳ Review desk — ~\nnot-an-id\tx\nno tab here") })
+    t.expect(listed?.count == 1 && listed?[0].session == other && listed?[0].name == "✳ Review desk — ~", "iTerm2's panes are read by id and title; a line that isn't one is skipped")
+    t.expect(Reply.panes(ask: { _ in Reply.Answer(reply: "missing") }) == nil, "iTerm2 not running: nothing known, which isn't nothing open")
+    let atPrompt = "done\n────────────────\n❯ \n────────────────\n  status"
+    t.expect(Reply.showsClaude(atPrompt) && Reply.showsClaude("Thinking… (esc to interrupt)") && Reply.showsClaude("❯ 1. Yes\nEnter to select · Esc to cancel")
+             && !Reply.showsClaude("chris@mac ~ % ls\nnotes.txt"), "Claude Code's screen is told from a shell's")
+
+    var openDesk = PhoneDesk()
+    openDesk.took(turn("a", "done"), now: t0)
+    openDesk.met([(pane.session!, "✳ Grow guide replies — ~"), (other, "◐ Review desk — ~/x"), (shell, "zsh")],
+                 claude: { $0 != shell }, now: t0.addingTimeInterval(5))
+    t.expectEqual(openDesk.turns.map { $0.key }, ["a", PhoneDesk.paneKey + other], "an open Claude terminal with no turn yet gets a window; a shell doesn't; one with a turn keeps it")
+    t.expect(openDesk.turns[1].name == "Review desk" && openDesk.turns[1].text.isEmpty && Reply.canReach(openDesk.turns[1].origin), "named as its turns will be, empty, and answerable")
+    openDesk.took(turn("b", "hello", name: "Review desk", origin: Origin(term: "iTerm.app", session: other)), now: t0.addingTimeInterval(9))
+    t.expectEqual(openDesk.turns.map { $0.key }, ["b", "a"], "its first real turn takes the empty window's place")
+    let kept = PhoneDesk(snapshot: openDesk.snapshot(), now: t0.addingTimeInterval(60))
+    t.expect(kept.turns == openDesk.turns, "the list comes back the same after a restart")
+    t.expect(PhoneDesk(snapshot: openDesk.snapshot(), now: t0.addingTimeInterval(PhoneDesk.maxAge + 60)).turns.isEmpty
+             && PhoneDesk(snapshot: Data("junk".utf8)).turns.isEmpty && PhoneDesk(snapshot: nil).turns.isEmpty,
+             "but not turns a week old, and not from a file that isn't one")
+    openDesk.met([(other, "✳ Review desk — ~/x")], claude: { _ in true }, now: t0.addingTimeInterval(20))
+    t.expectEqual(openDesk.turns.map { $0.key }, ["b"], "a terminal that has closed leaves the list")
+
+    let o = Bench()
+    o.open = [(pane.session!, "✳ Grow guide replies — ~"), (other, "◐ Review desk — ~/x")]
+    let seen = turns(json(o.phone.respond(to: get("/api/state"))))
+    t.expect(seen.map { $0["name"] as? String ?? "" } == ["Grow guide replies", "Review desk"] && seen.allSatisfy { $0["canReply"] as? Bool == true && $0["text"] as? String == "" },
+             "the page is shown every open Claude terminal, even before any has finished a turn")
+    t.expectEqual(o.saves, 1, "and the list is kept as it changes")
+    o.open = []
+    t.expectEqual(turns(json(o.phone.respond(to: get("/api/state")))).count, 2, "iTerm2 is asked at most every \(Int(Phone.scanEvery)) s, however often the page polls")
+    o.open = nil
+    o.phone.scan(now: Date().addingTimeInterval(Phone.scanEvery + 1))
+    t.expectEqual(o.phone.desk.turns.count, 2, "iTerm2 not saying leaves the list alone")
+    o.open = []
+    o.phone.scan(now: Date().addingTimeInterval(2 * Phone.scanEvery + 2))
+    t.expect(o.phone.desk.turns.isEmpty, "every pane closed empties it")
+    let restarted = Phone(config: PhoneConfig(token: token), defaults: o.defaults, saved: openDesk.snapshot())
+    t.expectEqual(restarted.desk.turns.map { $0.key }, ["b"], "a restarted agent starts from what the last one kept")
 
     // -- reading a request --------------------------------------------------
     func parsed(_ s: String) -> HTTP.Parsed { HTTP.parse(Data(s.utf8)) }

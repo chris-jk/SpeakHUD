@@ -197,7 +197,9 @@ network and nothing leaves your own devices.
 What's on the page:
 
 - **A window per terminal**, newest first, with a bar in that terminal's own frame
-  colour, its last finished turn, and a box to answer in. An answer is pasted into that
+  colour, its last finished turn, and a box to answer in. Every iTerm2 pane running
+  Claude Code gets one, whether or not it has finished a turn yet, and a closed
+  terminal's window goes. An answer is pasted into that
   terminal's prompt and sent, by the same guarded paste as a spoken reply: only into
   Claude Code's prompt box, never into a question or permission box.
 - **Question boxes as buttons.** When Claude asks a multiple-choice question, its
@@ -244,8 +246,9 @@ Limits:
 - A sleeping Mac answers nothing. Away holds off idle sleep, but a closed lid still
   sleeps.
 - Only iTerm2 panes can be answered, as with a spoken reply.
-- Turns are listed from when the agent started; a restart empties the list until each
-  terminal finishes another turn.
+- A terminal that hasn't finished a turn since SpeakHUD first saw it shows an empty
+  window (its screen and the answer box still work), in a colour picked from its name
+  rather than its frame's.
 - A question's free-text "Other" choice can't be typed from the page yet.
 
 ## How it picks what to read

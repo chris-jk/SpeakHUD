@@ -220,6 +220,17 @@ struct Origin: Equatable {
         guard let data = jsonString.data(using: .utf8) else { return nil }
         self.init(json: try? JSONSerialization.jsonObject(with: data))
     }
+
+    /// As `init(json:)` reads it back.
+    var json: [String: Any] {
+        var o: [String: Any] = [:]
+        if let term = term { o["term"] = term }
+        if let session = session { o["session"] = session }
+        if let tty = tty { o["tty"] = tty }
+        if let appPID = appPID { o["app_pid"] = Int(appPID) }
+        if let color = color { o["color"] = color }
+        return o
+    }
 }
 
 // Clicking the source pill: bring the terminal that's talking to the front, on
@@ -522,6 +533,9 @@ enum Reply {
         return line.isEmpty ? nil : String(line.prefix(maxLength))
     }
 
+    /// What a box that takes keys as answers says about itself.
+    static let boxHints = ["Esc to cancel", "Enter to select", "Enter to confirm", "(esc)"]
+
     private static func isRule(_ line: String) -> Bool {
         let t = line.trimmingCharacters(in: .whitespaces)
         return t.hasPrefix("─") && t.hasSuffix("─") && t.filter({ $0 == "─" }).count >= 10
@@ -538,9 +552,8 @@ enum Reply {
             .map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
         guard let bottom = lines.lastIndex(where: isRule) else { return nil }
         // A box that takes keys as answers says so under itself.
-        let hints = ["Esc to cancel", "Enter to select", "Enter to confirm", "(esc)"]
         let under = lines[(bottom + 1)...].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        if under.contains(where: { l in hints.contains { l.contains($0) } }) { return nil }
+        if under.contains(where: { l in boxHints.contains { l.contains($0) } }) { return nil }
         // The prompt box sits at the foot of the screen, over a status line or two. A
         // rule with more than that under it belongs to something else.
         guard under.count <= 5 else { return nil }
@@ -650,6 +663,51 @@ enum Reply {
         var end = all.count
         while end > 0, all[end - 1].trimmingCharacters(in: .whitespaces).isEmpty { end -= 1 }
         return all[max(0, end - lines)..<end].joined(separator: "\n").trimmingCharacters(in: .newlines)
+    }
+
+    /// Every pane iTerm2 has open, by id and title.
+    static let panesScript = """
+        tell application id "\(Reveal.iTerm)"
+            set out to "ok"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        set out to out & linefeed & (id of s) & tab & (name of s)
+                    end repeat
+                end repeat
+            end repeat
+            return out
+        end tell
+        """
+
+    /// The open panes, or nil when iTerm2 isn't running or won't say (then nothing is
+    /// known, which is not the same as nothing being open).
+    static func panes(ask: (String) -> Answer = Reply.ask) -> [(session: String, name: String)]? {
+        guard let reply = ask(panesScript).reply, reply.hasPrefix("ok") else { return nil }
+        return reply.components(separatedBy: .newlines).dropFirst().compactMap { line in
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, Origin(json: ["session": String(parts[0])]) != nil else { return nil }
+            return (String(parts[0]), String(parts[1]))
+        }
+    }
+
+    /// A pane's title as Claude Code sets it ("✳ Grow guide replies — ~/some/dir"), down
+    /// to the name a turn from it goes by.
+    static func paneName(_ title: String) -> String {
+        var name = title
+        if let dir = name.range(of: " — ", options: .backwards) { name = String(name[..<dir.lowerBound]) }
+        if let first = name.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first),
+           let space = name.firstIndex(of: " ") {
+            name = String(name[name.index(after: space)...])
+        }
+        name = name.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? title : name
+    }
+
+    /// Whether `screen` is Claude Code's: at its prompt, working, or showing a box that
+    /// takes keys. A pane sitting in a shell isn't one to answer.
+    static func showsClaude(_ screen: String) -> Bool {
+        promptText(in: screen) != nil || (boxHints + ["esc to interrupt"]).contains { screen.contains($0) }
     }
 
     enum Outcome: Equatable, CustomStringConvertible {
@@ -3910,9 +3968,64 @@ struct PhoneDesk {
         var note: String? = nil      // why a send didn't go
     }
 
+    /// A terminal seen open that hasn't finished a turn since it was first seen: its key
+    /// is this and its pane's id, until a turn of its own replaces it.
+    static let paneKey = "pane:"
+    /// A saved turn older than this isn't brought back.
+    static let maxAge: TimeInterval = 7 * 86_400
+
     private(set) var turns: [Turn] = []
 
+    init() {}
+
     func turn(_ key: String) -> Turn? { turns.first { $0.key == key } }
+
+    /// Bring the list in line with the panes iTerm2 has `open`: a closed terminal's turn
+    /// goes, and an open one running Claude Code (`claude` says, by pane id) that has no
+    /// turn here yet gets an empty window, so every terminal can be answered and looked at.
+    mutating func met(_ open: [(session: String, name: String)], claude: (String) -> Bool, now: Date = Date()) {
+        let ids = Set(open.map { $0.session })
+        turns.removeAll { $0.origin?.session.map { !ids.contains($0) } ?? false }
+        for pane in open {
+            if let i = turns.firstIndex(where: { $0.origin?.session == pane.session }) {
+                if turns[i].key.hasPrefix(Self.paneKey) { turns[i].name = Reply.paneName(pane.name) }
+            } else if claude(pane.session), turns.count < Self.keep {
+                turns.append(Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
+                                  origin: Origin(term: "iTerm.app", session: pane.session)))
+            }
+        }
+    }
+
+    /// The list as it's kept between runs of the agent.
+    func snapshot() -> Data {
+        let rows = turns.map { t -> [String: Any] in
+            var o: [String: Any] = ["key": t.key, "name": t.name, "text": t.text, "at": t.at.timeIntervalSince1970]
+            if let origin = t.origin { o["origin"] = origin.json }
+            if let q = t.question { o["question"] = q }
+            if let a = t.askedAt { o["asked_at"] = a.timeIntervalSince1970 }
+            if let sent = t.sent { o["sent"] = sent }
+            if let note = t.note { o["note"] = note }
+            return o
+        }
+        return (try? JSONSerialization.data(withJSONObject: ["v": 1, "turns": rows])) ?? Data()
+    }
+
+    /// From `snapshot()`. Anything unreadable or too old is left behind.
+    init(snapshot: Data?, now: Date = Date()) {
+        guard let data = snapshot, let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = o["turns"] as? [[String: Any]] else { return }
+        for row in rows.prefix(Self.keep) {
+            guard let key = row["key"] as? String, let name = row["name"] as? String, let text = row["text"] as? String,
+                  let at = (row["at"] as? NSNumber)?.doubleValue, now.timeIntervalSince1970 - at < Self.maxAge,
+                  !turns.contains(where: { $0.key == key }) else { continue }
+            var t = Turn(key: key, name: name, text: text, at: Date(timeIntervalSince1970: at), origin: Origin(json: row["origin"]))
+            t.question = row["question"] as? String
+            t.askedAt = (row["asked_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+            t.sent = row["sent"] as? String
+            t.note = row["note"] as? String
+            turns.append(t)
+        }
+    }
 
     /// Whether `item` is a turn's first word: a finished turn, or the first piece of a
     /// question. (Its options follow by themselves and shouldn't ping twice.)
@@ -3936,7 +4049,9 @@ struct PhoneDesk {
         } else {
             t = Turn(key: key, name: item.source, text: item.text, at: now, origin: item.origin)
         }
-        turns.removeAll { $0.key == key }
+        // Its own turn takes the place of the empty window its pane had.
+        turns.removeAll { $0.key == key || ($0.key.hasPrefix(Self.paneKey) && $0.origin?.session != nil
+                                            && $0.origin?.session == item.origin?.session) }
         turns.insert(t, at: 0)
         if turns.count > Self.keep { turns.removeLast(turns.count - Self.keep) }
         return first
@@ -4122,9 +4237,13 @@ final class Phone {
                          "/app.css": ("app.css", "text/css; charset=utf-8"),
                          "/app.js": ("app.js", "text/javascript; charset=utf-8")]
 
+    /// How often, at most, iTerm2 is asked which panes are open (only while a page is asking).
+    static let scanEvery: TimeInterval = 20
+
     let config: PhoneConfig
-    private(set) var desk = PhoneDesk()
+    private(set) var desk: PhoneDesk { didSet { if desk.turns != oldValue.turns { save(desk.snapshot()) } } }
     private let defaults: UserDefaults
+    private var scanned = Date.distantPast
     /// Puts the words in a terminal. Tests answer for iTerm2.
     var deliver: (String, Origin) -> Reply.Outcome = { Reply.send($0, to: $1) }
     /// Presses a key in a terminal, and reads the foot of its screen.
@@ -4136,12 +4255,28 @@ final class Phone {
     var asset: (String) -> Data? = { name in
         Bundle.main.resourcePath.flatMap { FileManager.default.contents(atPath: $0 + "/phone/" + name) }
     }
+    /// The panes iTerm2 has open. Tests answer for it.
+    var panes: () -> [(session: String, name: String)]? = { Reply.panes() }
+    /// Keeps the list for the next run of the agent. `saved` is what the last one kept.
+    var save: (Data) -> Void = { _ in }
     var log: (String) -> Void = { _ in }
     var onAwayChange: (Bool) -> Void = { _ in }
 
-    init(config: PhoneConfig, defaults: UserDefaults = prefs) {
+    init(config: PhoneConfig, defaults: UserDefaults = prefs, saved: Data? = nil) {
         self.config = config
         self.defaults = defaults
+        desk = PhoneDesk(snapshot: saved)
+    }
+
+    /// Ask iTerm2 what's open, so the page lists every Claude Code terminal and none
+    /// that has closed. Cheap to call: it asks at most every `scanEvery`.
+    func scan(now: Date = Date()) {
+        guard now.timeIntervalSince(scanned) >= Self.scanEvery else { return }
+        scanned = now
+        guard let open = panes() else { return }   // iTerm2 not running, or not saying: nothing learned
+        desk.met(open, claude: { [look] session in
+            look(Origin(term: "iTerm.app", session: session)).map(Reply.showsClaude) ?? false
+        }, now: now)
     }
 
     // -- away --------------------------------------------------------------
@@ -4257,7 +4392,10 @@ final class Phone {
             guard let data = asset(name) else { return .text("The page's files are missing from the app.", status: 404) }
             return HTTP.Response(type: type, body: data)
         }
-        if r.method == "GET", r.path == "/api/state" { return .json(state()) }
+        if r.method == "GET", r.path == "/api/state" {
+            scan()
+            return .json(state())
+        }
         if r.method == "GET", r.path == "/api/screen" {
             guard let turn = desk.turn(r.query["key"] ?? ""), let origin = turn.origin,
                   let screen = look(origin) else {
@@ -4574,7 +4712,12 @@ final class Agent {
     /// The page and the pushes, if phone.json sets them up. Without it nothing listens.
     private func startPhone() {
         guard let config = PhoneConfig.load() else { return }
-        let phone = Phone(config: config)
+        // The list of turns outlives a restart, next to the spool it came through.
+        let kept = (Spool.dir as NSString).deletingLastPathComponent + "/phone-desk.json"
+        let phone = Phone(config: config, saved: FileManager.default.contents(atPath: kept))
+        phone.save = { data in
+            FileManager.default.createFile(atPath: kept, contents: data, attributes: [.posixPermissions: 0o600])
+        }
         phone.log = { [weak self] in self?.log($0) }
         phone.onAwayChange = { [weak self] in self?.awayChanged($0) }
         do {

@@ -330,8 +330,11 @@
     const working = !!turn.sent && !turn.question;
     el.classList.toggle('is-working', working);
     const sent = el.querySelector('.win-sent');
-    sent.textContent = turn.sent ? 'You sent: ' + turn.sent : '';
-    sent.hidden = !turn.sent;
+    // A terminal that's open but hasn't finished a turn since it was first seen.
+    const idle = !turn.text && !turn.question && !turn.sent;
+    sent.textContent = turn.sent ? 'You sent: ' + turn.sent
+      : idle ? 'No finished turn from this terminal yet. Its screen shows where it is.' : '';
+    sent.hidden = !turn.sent && !idle;
 
     const form = el.querySelector('.win-answer');
     const words = turn.note ? 'Not sent: ' + turn.note + '.' : w.note;
