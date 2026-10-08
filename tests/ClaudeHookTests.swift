@@ -345,13 +345,22 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
 
     // Not registered here, but copies exist: refresh them without registering.
     sandbox { _, script, question, binary in
-        t.expectEqual(ClaudeHook.refreshFiles(script: script, binary: binary), "nothing to refresh", "no copies")
+        t.expectEqual(ClaudeHook.refreshFiles(script: script, question: question, binary: binary), "nothing to refresh", "no copies")
         try? fm.createDirectory(atPath: ClaudeHook.binDir, withIntermediateDirectories: true)
         try? "print('old')\n".write(toFile: ClaudeHook.scriptPath, atomically: true, encoding: .utf8)
-        t.expectEqual(ClaudeHook.refreshFiles(script: script, binary: binary), "refreshed script", "only what exists")
+        t.expectEqual(ClaudeHook.refreshFiles(script: script, question: question, binary: binary), "refreshed script", "only what exists")
         t.expect(fm.contentsEqual(atPath: ClaudeHook.scriptPath, andPath: script.path), "script refreshed")
+        t.expect(!fm.fileExists(atPath: ClaudeHook.questionPath), "question script not created")
         t.expect(!fm.fileExists(atPath: ClaudeHook.binPath), "binary not created")
         t.expect(!fm.fileExists(atPath: ClaudeHook.settingsPath), "nothing registered")
+        // A copy of the question script is refreshed the same way: an old one would go on
+        // importing the new read-summary.py beside the new agent.
+        try? fm.createDirectory(atPath: ClaudeHook.hooksDir, withIntermediateDirectories: true)
+        try? "print('old')\n".write(toFile: ClaudeHook.questionPath, atomically: true, encoding: .utf8)
+        t.expectEqual(ClaudeHook.refreshFiles(script: script, question: question, binary: binary),
+                      "refreshed script, question script", "the question script too")
+        t.expect(fm.contentsEqual(atPath: ClaudeHook.questionPath, andPath: question.path), "question script refreshed")
+        t.expect(!fm.fileExists(atPath: ClaudeHook.settingsPath), "still nothing registered")
         try? "{ not json".write(toFile: ClaudeHook.settingsPath, atomically: true, encoding: .utf8)
         let c = ClaudeHook.check(script: script, question: question, binary: binary)
         t.expectEqual(c.status, .notInstalled, "unparseable settings")

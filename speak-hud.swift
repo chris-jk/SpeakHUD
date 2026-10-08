@@ -4179,16 +4179,18 @@ enum ClaudeHook {
         check(script: script, question: question, binary: binary).status
     }
 
-    /// Refresh the script and binary where copies already exist, without touching
+    /// Refresh the two scripts and the binary where copies already exist, without touching
     /// settings.json. For a hook registered somewhere we don't read (settings.local.json,
     /// a project's settings) or a settings.json we can't parse: a rebuild still shouldn't
     /// leave those copies running old code. Returns what it did, or "error: …".
-    static func refreshFiles(script: URL? = bundledScript, binary: URL? = runningExecutable) -> String {
+    static func refreshFiles(script: URL? = bundledScript, question: URL? = bundledQuestionScript,
+                             binary: URL? = runningExecutable) -> String {
         let fm = FileManager.default
         var done: [String] = [], problems: [String] = []
-        if let s = script, fm.fileExists(atPath: scriptPath) {
-            if let e = placeFile(from: s.path, to: scriptPath, mode: 0o644) { problems.append("script: \(e)") }
-            else { done.append("script") }
+        for (what, source, path) in [("script", script, scriptPath), ("question script", question, questionPath)] {
+            guard let s = source, fm.fileExists(atPath: path) else { continue }
+            if let e = placeFile(from: s.path, to: path, mode: 0o644) { problems.append("\(what): \(e)") }
+            else { done.append(what) }
         }
         if let b = binary, fm.fileExists(atPath: binPath) {
             if let e = placeFile(from: b.path, to: binPath, mode: 0o755) { problems.append("binary: \(e)") }
