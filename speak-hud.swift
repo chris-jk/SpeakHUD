@@ -537,33 +537,113 @@ enum Reply {
         return line.isEmpty ? nil : String(line.prefix(maxLength))
     }
 
-    /// What a box that takes keys as answers says about itself.
-    static let boxHints = ["Esc to cancel", "Enter to select", "Enter to confirm", "(esc)"]
+    // -- what a pane is showing ----------------------------------------------
+    //
+    // Everything that writes to a pane asks this first, and it is asked one way:
+    // `showing`. What a prompt, a box and a rule look like is known here and nowhere else.
 
-    private static func isRule(_ line: String) -> Bool {
-        let t = line.trimmingCharacters(in: .whitespaces)
-        return t.hasPrefix("─") && t.hasSuffix("─") && t.filter({ $0 == "─" }).count >= 10
+    /// Claude's prompt box as a screen shows it.
+    struct Prompt: Equatable {
+        var text: String            // what it holds: nothing, a placeholder, or a message being written
+        var status: String? = nil   // the status line under it (yours to set: a folder, the model, the context)
+        var context: Int? = nil     // how full the context is, in percent, if that line says
+        var working = false         // a turn is running over it: what's sent now waits its turn
     }
 
-    /// What Claude Code's prompt box holds, if `screen` (a pane's visible text) shows one
-    /// that would take a paste as a message: a line starting "❯" with a rule right above
-    /// it and a rule below, after any wrapped lines. Nil for anything else, and then
-    /// nothing is pasted: a question or permission box (their options sit under the
-    /// question, not under a rule, and say how to answer underneath), shell mode ("!"),
-    /// a pane that isn't running Claude at all.
-    static func promptText(in screen: String) -> String? {
-        let lines = screen.components(separatedBy: .newlines)
-            .map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
-        guard let bottom = lines.lastIndex(where: isRule) else { return nil }
+    /// What a pane is showing: the one answer to what a paste or a key would do there.
+    enum Showing: Equatable {
+        /// Claude's prompt box: takes a paste as a message, and Enter and Esc.
+        case prompt(Prompt)
+        /// A box of choices, read whole: a question, a permission prompt, the folder-trust check. Takes keys as answers.
+        case box(TerminalBox)
+        /// Something that says it takes keys (this line of it), but not as choices this can read.
+        case keys(String)
+        /// A turn running with no prompt box in sight, where Esc stops it. The screen says
+        /// so itself, or (`onScreen` false) only the glyph spinning on the pane's title does.
+        case working(onScreen: Bool)
+        /// None of those, and why: a shell, a blank screen. Nothing is written to it.
+        case notClaude(String)
+
+        var prompt: Prompt? { if case .prompt(let prompt) = self { return prompt }; return nil }
+        var box: TerminalBox? { if case .box(let box) = self { return box }; return nil }
+
+        /// In the middle of a turn. A box that's up is waiting on you, whatever runs behind it.
+        var busy: Bool {
+            switch self {
+            case .prompt(let prompt): return prompt.working
+            case .working: return true
+            case .box, .keys, .notClaude: return false
+            }
+        }
+
+        /// Whether the screen itself is Claude Code's. A glyph on the title isn't that:
+        /// a shell's title can start with one too.
+        var isClaude: Bool {
+            switch self {
+            case .prompt, .box, .keys, .working(onScreen: true): return true
+            case .working, .notClaude: return false
+            }
+        }
+    }
+
+    /// What `screen` (a pane's visible text) is showing. `title` is the pane's: Claude Code
+    /// spins a glyph at the front of it while it works and leaves ✳ there when it's
+    /// waiting for you.
+    static func showing(_ screen: String, title: String? = nil) -> Showing {
+        let lines = screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
+        let onScreen = screen.contains("esc to interrupt")
+        if var prompt = prompt(in: lines) {
+            prompt.working = onScreen || spins(title)
+            return .prompt(prompt)
+        }
+        if let box = box(in: lines) { return .box(box) }
+        // The last thing on the screen says which keys answer it: a box of Claude's all
+        // the same. Said further up, it's something Claude left behind, or was talking about.
+        let foot = lines.map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
+        if let foot = foot, saysKeys(foot) { return .keys(foot) }
+        if onScreen || spins(title) { return .working(onScreen: onScreen) }
+        return .notClaude(foot == nil ? "its screen is blank" : "nothing at the foot of its screen is Claude's prompt or a box of its")
+    }
+
+    /// What a box that takes keys as answers says about itself.
+    private static let boxHints = ["Esc to cancel", "Enter to select", "Enter to confirm", "(esc)"]
+    private static func saysKeys(_ line: String) -> Bool { boxHints.contains { line.contains($0) } }
+
+    private static func spins(_ title: String?) -> Bool {
+        guard let name = title?.replacingOccurrences(of: "\u{00A0}", with: " "),
+              let first = name.unicodeScalars.first, name.dropFirst().hasPrefix(" ") else { return false }
+        return first != "✳" && !CharacterSet.alphanumerics.contains(first)
+    }
+
+    /// A line ruled across the pane, and how: solid from end to end, solid with something
+    /// set in it, or dashed. The prompt box sits between rules that aren't dashed; a box
+    /// of choices opens under a solid one, and solid or dashed ones may cross it.
+    private enum Rule { case solid, lettered, dashed }
+    private static func rule(_ line: String) -> Rule? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.count >= 10 else { return nil }
+        if t.allSatisfy({ $0 == "─" }) { return .solid }
+        if t.allSatisfy({ $0 == "─" || $0 == "╌" }) { return .dashed }
+        return t.hasPrefix("─") && t.hasSuffix("─") && t.filter({ $0 == "─" }).count >= 10 ? .lettered : nil
+    }
+
+    /// Claude Code's prompt box, if the foot of the screen shows one that would take a
+    /// paste as a message: a line starting "❯" with a rule right above it and a rule
+    /// below, after any wrapped lines. Nil for anything else: a question or permission
+    /// box (their options sit under the question, not under a rule, and say how to
+    /// answer underneath), shell mode ("!"), a pane that isn't running Claude at all.
+    private static func prompt(in lines: [String]) -> Prompt? {
+        func ruled(_ line: String) -> Bool { rule(line).map { $0 != .dashed } ?? false }
+        guard let bottom = lines.lastIndex(where: ruled) else { return nil }
         // A box that takes keys as answers says so under itself.
-        let under = lines[(bottom + 1)...].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        if under.contains(where: { l in boxHints.contains { l.contains($0) } }) { return nil }
+        let under = lines[(bottom + 1)...].map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if under.contains(where: saysKeys) { return nil }
         // The prompt box sits at the foot of the screen, over a status line or two. A
         // rule with more than that under it belongs to something else.
         guard under.count <= 5 else { return nil }
         var top = bottom - 1
-        while top >= 0, !lines[top].hasPrefix("❯"), !isRule(lines[top]) { top -= 1 }
-        guard top >= 1, lines[top].hasPrefix("❯"), isRule(lines[top - 1]) else { return nil }
+        while top >= 0, !lines[top].hasPrefix("❯"), !ruled(lines[top]) { top -= 1 }
+        guard top >= 1, lines[top].hasPrefix("❯"), ruled(lines[top - 1]) else { return nil }
         var parts = [String(lines[top].dropFirst())]
         parts += lines[(top + 1)..<bottom]
         let held = parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -571,7 +651,99 @@ enum Reply {
         // not a prompt. One numbered line is a message you're writing ("1. fix the header").
         let numbered = held.filter { $0.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil }
         if numbered.count >= 2, held.first == numbered.first { return nil }
-        return held.joined(separator: " ")
+        var prompt = Prompt(text: held.joined(separator: " "))
+        // Its status line is the first thing under it. Whatever sits far to the right of
+        // that, a notice with a gap before it, is left off.
+        let left = under.first?.components(separatedBy: "   ").first ?? ""
+        let line = left.components(separatedBy: " ").filter { !$0.isEmpty }.joined(separator: " ")
+        guard !line.isEmpty else { return prompt }
+        prompt.status = line
+        if let m = line.range(of: #"(?i)(ctx|context)\D{0,3}(\d{1,3})\s?%|(\d{1,3})\s?%\s*(ctx|context)"#, options: .regularExpression),
+           let n = Int(line[m].filter { $0.isNumber }), (0...100).contains(n) {
+            prompt.context = n
+        }
+        return prompt
+    }
+
+    /// The box of choices at the foot of the screen, or nil: nothing there reads as a
+    /// list of choices with a cursor on one, or nothing says keys answer it.
+    private static func box(in screen: [String]) -> TerminalBox? {
+        var lines = screen
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        func col(_ line: String) -> Int? {
+            line.firstIndex { $0 != " " }.map { line.distance(from: line.startIndex, to: $0) }
+        }
+        func blank(_ i: Int) -> Bool { lines[i].trimmingCharacters(in: .whitespaces).isEmpty }
+        func ruled(_ i: Int) -> Bool { rule(lines[i]).map { $0 != .lettered } ?? false }
+        // The cursor: the last line that starts with ❯ and something after it.
+        guard let at = lines.lastIndex(where: { l in col(l).map { l.dropFirst($0).hasPrefix("❯ ") } ?? false }),
+              let c = col(lines[at]) else { return nil }
+        // Its list runs up and down from there: rows start two columns in from the
+        // cursor, what's under a row is indented further, and a rule may cross it.
+        func inList(_ i: Int) -> Bool {
+            if blank(i) { return false }
+            if ruled(i) { return true }
+            return i == at || (col(lines[i]) ?? 0) >= c + 2
+        }
+        var top = at, bottom = at
+        while top > 0, inList(top - 1) { top -= 1 }
+        while bottom < lines.count - 1, inList(bottom + 1) { bottom += 1 }
+        while top < at, ruled(top) { top += 1 }
+        // Under the list there's nothing but its hint line: anything more and that ❯ was
+        // a line of the conversation, not a cursor.
+        let under = (bottom + 1..<lines.count).filter { !blank($0) }.map { lines[$0].trimmingCharacters(in: .whitespaces) }
+        guard under.count <= 1 else { return nil }
+        let hints = under.first
+        if let h = hints, !saysKeys(h) { return nil }
+
+        var rows: [TerminalBox.Row] = []
+        var labelCol = c + 2
+        for i in top...bottom where !ruled(i) {
+            let k = i == at ? c + 2 : (col(lines[i]) ?? 0)
+            var text = String(lines[i].dropFirst(min(k, lines[i].count))).trimmingCharacters(in: .whitespaces)
+            if i == at { text = String(lines[i].dropFirst(c + 1)).trimmingCharacters(in: .whitespaces) }
+            let numbered = text.range(of: #"^\d{1,2}\.\s+"#, options: .regularExpression)
+            if k == c + 2, let n = numbered {
+                var row = TerminalBox.Row(label: String(text[n.upperBound...]), number: Int(text.prefix { $0.isNumber }), cursor: i == at)
+                labelCol = k + text.distance(from: text.startIndex, to: n.upperBound)
+                if let box = row.label.range(of: #"^\[(.)\]\s+"#, options: .regularExpression) {
+                    row.checked = !row.label[box].hasPrefix("[ ]")
+                    labelCol += row.label.distance(from: row.label.startIndex, to: box.upperBound)
+                    row.label = String(row.label[box.upperBound...])
+                }
+                rows.append(row)
+            } else if k == c + 2 || (k < labelCol && rows.last?.checked != nil) || rows.isEmpty {
+                // A row with no number: the trust box's choices, or Submit under a list of ticks.
+                rows.append(TerminalBox.Row(label: text, cursor: i == at))
+            } else {
+                // Under a row: its description, or the rest of a label that wrapped.
+                rows[rows.count - 1].detail = [rows[rows.count - 1].detail, text].compactMap { $0 }.joined(separator: " ")
+            }
+        }
+        guard rows.count >= 2, rows.contains(where: { $0.cursor }) else { return nil }
+
+        // What it says: from the rule that opens the box down to the list.
+        var open = top
+        while open > 0, rule(lines[open - 1]) != .solid, top - open < 40 { open -= 1 }
+        var said: [String] = []
+        var tabs: String?
+        for i in open..<top where !blank(i) && !ruled(i) {
+            let text = lines[i].trimmingCharacters(in: .whitespaces)
+            if text.hasPrefix("←") || (said.isEmpty && (text.hasPrefix("☐ ") || text.hasPrefix("☒ "))) {
+                // The strip of questions (several), or the one question's own heading.
+                tabs = text.trimmingCharacters(in: CharacterSet(charactersIn: "←→ ")).replacingOccurrences(of: "  ", with: " ")
+            } else {
+                said.append(text)
+            }
+        }
+        // A box says it is one, and nothing else is read as one: not being the prompt
+        // isn't enough (a shell isn't the prompt either). Under its choices it says which
+        // keys answer it. The one box that doesn't, the last step of several questions,
+        // opens under a rule with the strip of those questions, and numbers every choice.
+        let opened = open > 0 && rule(lines[open - 1]) == .solid
+        let counted = rows.enumerated().allSatisfy { $0.element.number == $0.offset + 1 }
+        guard hints != nil || (opened && tabs != nil && counted) else { return nil }
+        return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
     }
 
     /// Whether the prompt box now holds what was pasted and nothing ahead of it: it
@@ -686,6 +858,8 @@ enum Reply {
         var session: String
         var name: String
         var screen: String
+
+        var showing: Showing { Reply.showing(screen, title: name) }
     }
 
     /// Every pane, in one ask. The separators are control characters spelled as
@@ -724,41 +898,12 @@ enum Reply {
         return all[max(0, end - lines)..<end].joined(separator: "\n").trimmingCharacters(in: .newlines)
     }
 
-    /// Whether a pane is in the middle of a turn. Claude Code spins a glyph at the front
-    /// of the title while it works and leaves ✳ there when it's waiting for you.
-    static func working(title: String, screen: String) -> Bool {
-        if screen.contains("esc to interrupt") { return true }
-        let name = title.replacingOccurrences(of: "\u{00A0}", with: " ")
-        guard let first = name.unicodeScalars.first, name.dropFirst().hasPrefix(" ") else { return false }
-        return first != "✳" && !CharacterSet.alphanumerics.contains(first)
-    }
-
-    /// What Claude Code's status line says under its prompt box (yours to set: a folder,
-    /// the model, how full the context is), and the context figure if it gives one.
-    /// Nil when the prompt box isn't showing. Whatever sits far to the right of it, a
-    /// notice with a gap before it, is left off.
-    static func status(in screen: String) -> (line: String, context: Int?)? {
-        guard promptText(in: screen) != nil else { return nil }
-        let lines = screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
-        guard let rule = lines.lastIndex(where: isRule),
-              let raw = lines[(rule + 1)...].first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return nil }
-        let left = raw.trimmingCharacters(in: .whitespaces).components(separatedBy: "   ").first ?? ""
-        let line = left.components(separatedBy: " ").filter { !$0.isEmpty }.joined(separator: " ")
-        guard !line.isEmpty else { return nil }
-        var context: Int?
-        if let m = line.range(of: #"(?i)(ctx|context)\D{0,3}(\d{1,3})\s?%|(\d{1,3})\s?%\s*(ctx|context)"#, options: .regularExpression),
-           let n = Int(line[m].filter { $0.isNumber }), (0...100).contains(n) {
-            context = n
-        }
-        return (line, context)
-    }
-
     /// Close the pane: Claude Code is asked to exit first if it's at its prompt (so the
     /// session ends cleanly and iTerm2 has no running job to ask about), then the pane goes.
     static func close(_ origin: Origin, ask: (String) -> Answer = Reply.ask,
                       wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
-        if let screen = screen(of: origin, ask: ask), let typed = promptText(in: screen), typed.isEmpty {
+        if let screen = screen(of: origin, ask: ask), case .prompt(let prompt) = showing(screen), prompt.text.isEmpty {
             _ = type("/exit", in: origin, ask: ask)
             wait(0.3)
             _ = press("enter", in: origin, ask: ask)
@@ -800,47 +945,6 @@ enum Reply {
         }
         name = name.trimmingCharacters(in: .whitespaces)
         return name.isEmpty ? title.trimmingCharacters(in: .whitespaces) : name
-    }
-
-    /// Whether `screen` is Claude Code's: at its prompt, working, or showing a box that
-    /// takes keys. A pane sitting in a shell isn't one to answer.
-    static func showsClaude(_ screen: String) -> Bool {
-        promptText(in: screen) != nil || (boxHints + ["esc to interrupt"]).contains { screen.contains($0) }
-    }
-
-    /// Claude's prompt box as a screen shows it.
-    struct Prompt: Equatable {
-        var text: String            // what it holds: nothing, a placeholder, or a message being written
-        var status: String? = nil   // the status line under it
-        var context: Int? = nil     // how full the context is, in percent, if that line says
-        var working = false         // a turn is running over it: what's sent now waits its turn
-    }
-
-    /// What a pane is showing: the one answer to what a paste or a key would do there.
-    enum Showing: Equatable {
-        case prompt(Prompt)       // Claude's prompt box: takes a paste as a message, and Enter and Esc
-        case box(TerminalBox)     // a box of choices, read whole: takes keys as answers
-        case keys(String)         // something that says it takes keys (this line of it), but not as choices this can read
-        case working              // a turn running with no prompt box in sight: Esc stops it
-        case notClaude(String)    // none of those, and why: a shell, a blank screen. Nothing is written to it
-    }
-
-    /// What `screen` (a pane's visible text) is showing. `title`, the pane's, says a turn
-    /// is running when Claude Code is spinning its glyph there; a title alone never makes
-    /// a screen Claude's.
-    static func showing(_ screen: String, title: String? = nil) -> Showing {
-        if let text = promptText(in: screen) {
-            let under = status(in: screen)
-            return .prompt(Prompt(text: text, status: under?.line, context: under?.context,
-                                  working: working(title: title ?? "", screen: screen)))
-        }
-        if let box = TerminalBox.read(screen) { return .box(box) }
-        // The last thing on the screen says which keys answer it: a box of Claude's all
-        // the same. Said further up, it's something Claude left behind, or was talking about.
-        let foot = screen.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
-        if let foot = foot, boxHints.contains(where: { foot.contains($0) }) { return .keys(foot) }
-        if screen.contains("esc to interrupt") { return .working }
-        return .notClaude(foot == nil ? "its screen is blank" : "nothing at the foot of its screen is Claude's prompt or a box of its")
     }
 
     enum Outcome: Equatable, CustomStringConvertible {
@@ -905,20 +1009,20 @@ enum Reply {
 
         let before = screen()
         if let stop = before.stop { return stop }
-        guard promptText(in: before.text ?? "") != nil else { return .notAtPrompt }
+        guard case .prompt = showing(before.text ?? "") else { return .notAtPrompt }
         if let stop = done(ask(pasteScript(session, line))) { return stop }
         for _ in 0..<looks {
             wait(lookGap)
             let now = screen()
             if let stop = now.stop { return stop }
-            if let box = promptText(in: now.text ?? ""), shows(line, inPrompt: box, pictures: pictures) {
+            if case .prompt(let box) = showing(now.text ?? ""), shows(line, inPrompt: box.text, pictures: pictures) {
                 if let stop = done(ask(returnScript(session))) { return stop }
                 // Sent means gone from the box. Still sitting there, Return didn't take.
                 for _ in 0..<looks {
                     wait(lookGap)
                     let after = screen()
                     if let stop = after.stop { return stop }
-                    guard let left = promptText(in: after.text ?? ""), shows(line, inPrompt: left, pictures: pictures) else { return .sent }
+                    guard case .prompt(let left) = showing(after.text ?? ""), shows(line, inPrompt: left.text, pictures: pictures) else { return .sent }
                 }
                 return .unconfirmed
             }
@@ -4429,10 +4533,11 @@ enum OldSessions {
     }
 }
 
-/// A box Claude Code has up instead of its prompt, read off the terminal's own screen: a
-/// question with its choices, a permission prompt, the folder-trust check. The screen is
-/// the one thing that's true for all of them, whoever put the box there and whenever the
-/// agent started, so this, not the question hook, is what the phone answers from.
+/// A box Claude Code has up instead of its prompt, read off the terminal's own screen
+/// (`Reply.showing`): a question with its choices, a permission prompt, the folder-trust
+/// check. The screen is the one thing that's true for all of them, whoever put the box
+/// there and whenever the agent started, so this, not the question hook, is what the
+/// phone answers from.
 struct TerminalBox: Equatable {
     struct Row: Equatable {
         var label: String
@@ -4448,92 +4553,6 @@ struct TerminalBox: Equatable {
     var tabs: String? = nil          // "☒ Route  ☐ Extras  ✔ Submit": several questions, and where you are
     var rows: [Row]
     var hints: String? = nil         // "Enter to select · Esc to cancel"
-
-    private static func isRule(_ line: String) -> Bool {
-        let t = line.trimmingCharacters(in: .whitespaces)
-        return t.count >= 10 && t.allSatisfy { $0 == "─" || $0 == "╌" }
-    }
-
-    /// The box at the foot of `screen`, or nil: Claude's prompt is showing, or nothing
-    /// that reads as a list of choices with a cursor on one.
-    static func read(_ screen: String) -> TerminalBox? {
-        guard Reply.promptText(in: screen) == nil else { return nil }
-        var lines = screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
-        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
-        func col(_ line: String) -> Int? {
-            line.firstIndex { $0 != " " }.map { line.distance(from: line.startIndex, to: $0) }
-        }
-        func blank(_ i: Int) -> Bool { lines[i].trimmingCharacters(in: .whitespaces).isEmpty }
-        // The cursor: the last line that starts with ❯ and something after it.
-        guard let at = lines.lastIndex(where: { l in col(l).map { l.dropFirst($0).hasPrefix("❯ ") } ?? false }),
-              let c = col(lines[at]) else { return nil }
-        // Its list runs up and down from there: rows start two columns in from the
-        // cursor, what's under a row is indented further, and a rule may cross it.
-        func inList(_ i: Int) -> Bool {
-            if blank(i) { return false }
-            if isRule(lines[i]) { return true }
-            return i == at || (col(lines[i]) ?? 0) >= c + 2
-        }
-        var top = at, bottom = at
-        while top > 0, inList(top - 1) { top -= 1 }
-        while bottom < lines.count - 1, inList(bottom + 1) { bottom += 1 }
-        while top < at, isRule(lines[top]) { top += 1 }
-        // Under the list there's nothing but its hint line: anything more and that ❯ was
-        // a line of the conversation, not a cursor.
-        let under = (bottom + 1..<lines.count).filter { !blank($0) }.map { lines[$0].trimmingCharacters(in: .whitespaces) }
-        guard under.count <= 1 else { return nil }
-        let hints = under.first
-        if let h = hints, !Reply.boxHints.contains(where: { h.contains($0) }) { return nil }
-
-        var rows: [Row] = []
-        var labelCol = c + 2
-        for i in top...bottom where !isRule(lines[i]) {
-            let k = i == at ? c + 2 : (col(lines[i]) ?? 0)
-            var text = String(lines[i].dropFirst(min(k, lines[i].count))).trimmingCharacters(in: .whitespaces)
-            if i == at { text = String(lines[i].dropFirst(c + 1)).trimmingCharacters(in: .whitespaces) }
-            let numbered = text.range(of: #"^\d{1,2}\.\s+"#, options: .regularExpression)
-            if k == c + 2, let n = numbered {
-                var row = Row(label: String(text[n.upperBound...]), number: Int(text.prefix { $0.isNumber }), cursor: i == at)
-                labelCol = k + text.distance(from: text.startIndex, to: n.upperBound)
-                if let box = row.label.range(of: #"^\[(.)\]\s+"#, options: .regularExpression) {
-                    row.checked = !row.label[box].hasPrefix("[ ]")
-                    labelCol += row.label.distance(from: row.label.startIndex, to: box.upperBound)
-                    row.label = String(row.label[box.upperBound...])
-                }
-                rows.append(row)
-            } else if k == c + 2 || (k < labelCol && rows.last?.checked != nil) || rows.isEmpty {
-                // A row with no number: the trust box's choices, or Submit under a list of ticks.
-                rows.append(Row(label: text, cursor: i == at))
-            } else {
-                // Under a row: its description, or the rest of a label that wrapped.
-                rows[rows.count - 1].detail = [rows[rows.count - 1].detail, text].compactMap { $0 }.joined(separator: " ")
-            }
-        }
-        guard rows.count >= 2, rows.contains(where: { $0.cursor }) else { return nil }
-
-        // What it says: from the rule that opens the box down to the list.
-        var open = top
-        while open > 0, !isRule(lines[open - 1]) || lines[open - 1].contains("╌"), top - open < 40 { open -= 1 }
-        var said: [String] = []
-        var tabs: String?
-        for i in open..<top where !blank(i) && !isRule(lines[i]) {
-            let text = lines[i].trimmingCharacters(in: .whitespaces)
-            if text.hasPrefix("←") || (said.isEmpty && (text.hasPrefix("☐ ") || text.hasPrefix("☒ "))) {
-                // The strip of questions (several), or the one question's own heading.
-                tabs = text.trimmingCharacters(in: CharacterSet(charactersIn: "←→ ")).replacingOccurrences(of: "  ", with: " ")
-            } else {
-                said.append(text)
-            }
-        }
-        // A box says it is one, and nothing else is read as one: not being the prompt
-        // isn't enough (a shell isn't the prompt either). Under its choices it says which
-        // keys answer it. The one box that doesn't, the last step of several questions,
-        // opens under a rule with the strip of those questions, and numbers every choice.
-        let opened = open > 0 && isRule(lines[open - 1]) && !lines[open - 1].contains("╌")
-        let counted = rows.enumerated().allSatisfy { $0.element.number == $0.offset + 1 }
-        guard hints != nil || (opened && tabs != nil && counted) else { return nil }
-        return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
-    }
 
     /// What a page drew of a box, sent back with every tap on it: what it asks, its strip
     /// of questions, and each choice's label from the top. Where the cursor is, what's
@@ -4803,18 +4822,18 @@ struct PhoneDesk {
         turns.removeAll { $0.origin?.session.map { !ids.contains($0) } ?? false }
         var asking: [String] = []
         for pane in open {
-            let box = TerminalBox.read(pane.screen)
-            let busy = box == nil && Reply.working(title: pane.name, screen: pane.screen)
+            let showing = pane.showing
+            let box = showing.box, busy = showing.busy
             if let i = turns.firstIndex(where: { $0.origin?.session == pane.session }) {
                 if turns[i].key.hasPrefix(Self.paneKey) { turns[i].name = Reply.paneName(pane.name) }
                 if let box = box, turns[i].box?.ask != box.ask { asking.append(turns[i].key) }
                 (turns[i].box, turns[i].busy) = (box, busy)
-                if let status = Reply.status(in: pane.screen) { (turns[i].status, turns[i].context) = status }
-            } else if box != nil || Reply.showsClaude(pane.screen), turns.count < Self.keep {
+                if let prompt = showing.prompt, let status = prompt.status { (turns[i].status, turns[i].context) = (status, prompt.context) }
+            } else if showing.isClaude, turns.count < Self.keep {
                 var t = Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
                              origin: Origin(term: "iTerm.app", session: pane.session))
                 (t.box, t.busy) = (box, busy)
-                if let status = Reply.status(in: pane.screen) { (t.status, t.context) = status }
+                if let prompt = showing.prompt, let status = prompt.status { (t.status, t.context) = (status, prompt.context) }
                 if box != nil { asking.append(t.key) }
                 turns.append(t)
             }
@@ -4826,10 +4845,11 @@ struct PhoneDesk {
     /// is over once the screen is back at Claude's prompt.
     mutating func saw(_ key: String, _ screen: String) {
         guard let i = turns.firstIndex(where: { $0.key == key }) else { return }
-        turns[i].box = TerminalBox.read(screen)
+        let showing = Reply.showing(screen)
+        turns[i].box = showing.box
         if turns[i].box != nil { turns[i].busy = false }
-        if let status = Reply.status(in: screen) { (turns[i].status, turns[i].context) = status }
-        if turns[i].question != nil, Reply.promptText(in: screen) != nil { (turns[i].question, turns[i].askedAt) = (nil, nil) }
+        if let prompt = showing.prompt, let status = prompt.status { (turns[i].status, turns[i].context) = (status, prompt.context) }
+        if turns[i].question != nil, showing.prompt != nil { (turns[i].question, turns[i].askedAt) = (nil, nil) }
     }
 
     /// The list as it's kept between runs of the agent.
@@ -5717,7 +5737,7 @@ final class Phone {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
             guard drawn.rows.indices.contains(row), drawn.rows[row] == label,
-                  let screen = look(origin), let box = TerminalBox.read(screen), box.isBox(drawn), var keys = box.keys(toPick: row) else {
+                  let screen = look(origin), let box = Reply.showing(screen).box, box.isBox(drawn), var keys = box.keys(toPick: row) else {
                 if let screen = look(origin) { desk.saw(key, screen) }
                 return .json(["sent": false, "outcome": "its box has changed since this was drawn", "state": state()])
             }
@@ -5781,6 +5801,7 @@ final class Phone {
                     refused = "its terminal is at Claude's prompt, where that key would only type into your message"
                 }
             case .working:
+                // Esc stops a turn, and does nothing to a shell whose title only looked like one.
                 if name != "esc" { refused = "its terminal is in the middle of a turn with no box up, where only Esc (which stops it) is pressed" }
             case .notClaude(let why):
                 // A pane that has dropped to its shell: Up and Enter there run its last command again.

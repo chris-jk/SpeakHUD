@@ -34,6 +34,9 @@ private func json(_ r: HTTP.Response) -> [String: Any] {
 
 private func turns(_ state: [String: Any]) -> [[String: Any]] { state["turns"] as? [[String: Any]] ?? [] }
 
+/// The box of choices `screen` is showing, if it is showing one.
+private func boxOn(_ screen: String) -> TerminalBox? { Reply.showing(screen).box }
+
 /// What the page sends back with a tap: the box it has drawn for `key`, as app.js builds
 /// it from the state the Mac gave it (what it asks, its strip, each choice's label).
 private func drew(_ state: [String: Any], _ key: String) -> [String: Any] {
@@ -192,8 +195,8 @@ let phoneSuite = Suite("Phone") { t in
 
     // -- a box, read off the terminal's own screen ----------------------------
     let atPrompt = "done\n────────────────\n❯ \n────────────────\n  status"
-    t.expect(TerminalBox.read(screenshot("prompt")) == nil && TerminalBox.read(atPrompt) == nil, "Claude's prompt is not a box")
-    if let box = TerminalBox.read(screenshot("ask-single")) {
+    t.expect(boxOn(screenshot("prompt")) == nil && boxOn(atPrompt) == nil, "Claude's prompt is not a box")
+    if let box = boxOn(screenshot("ask-single")) {
         t.expect(box.ask == "Which colour for the bar?" && box.tabs == "☐ Colour", "a question: what it asks, under its heading")
         t.expectEqual(box.rows.map { $0.label }, ["Forest", "Navy", "Type something.", "Chat about this"], "its choices, the one under the rule too")
         t.expect(box.rows[0].detail == "Like Grow Guide" && box.rows[0].number == 1 && box.rows[0].cursor && !box.rows[1].cursor && box.rows[2].types,
@@ -201,33 +204,33 @@ let phoneSuite = Suite("Phone") { t in
         t.expect(box.keys(toPick: 1) ?? [] == ["2"] && box.keys(toPick: 9) == nil, "a numbered choice is picked by its digit")
         t.expect(box.hints?.contains("Esc to cancel") == true, "and what the box says its keys are")
     } else { t.expect(false, "a one-question box is read") }
-    if let box = TerminalBox.read(screenshot("ask-first")) {
+    if let box = boxOn(screenshot("ask-first")) {
         t.expect(box.ask == "Which route do you want?" && box.tabs == "☐ Route ☐ Extras ✔ Submit" && box.rows.count == 4,
                  "the first of several questions, with the strip that says where you are")
     } else { t.expect(false, "a several-question box is read") }
-    if let box = TerminalBox.read(screenshot("ask-multi-checked")) {
+    if let box = boxOn(screenshot("ask-multi-checked")) {
         t.expectEqual(box.rows.map { $0.checked.map { $0 ? "x" : "o" } ?? "-" }, ["x", "o", "x", "o", "-", "-"], "pick-any-that-apply: which are ticked")
         t.expect(box.rows[0].label == "Speech" && box.rows[0].detail == "Phone reads aloud" && box.rows[4].label == "Submit" && box.rows[4].number == nil,
                  "labels without their tick boxes, and Submit as a row of its own")
         t.expect(box.keys(toPick: 4) ?? [] == ["down", "down", "down", "down", "enter"] && box.keys(toPick: 2) ?? [] == ["3"],
                  "a row with no number is reached by arrows from the cursor, then Enter")
     } else { t.expect(false, "a pick-any box is read") }
-    if let box = TerminalBox.read(screenshot("ask-submit")) {
+    if let box = boxOn(screenshot("ask-submit")) {
         t.expect(box.ask.hasPrefix("Review your answers") && box.ask.contains("→ Speech, Screen") && box.rows.map { $0.label } == ["Submit answers", "Cancel"],
                  "the last step shows the answers and asks to submit them")
     } else { t.expect(false, "the submit step is read") }
-    if let box = TerminalBox.read(screenshot("permission")) {
+    if let box = boxOn(screenshot("permission")) {
         t.expect(box.ask.contains("touch made-by-test.txt") && box.ask.hasSuffix("Do you want to proceed?"), "a permission box: the command and the question")
         t.expect(box.rows.count == 4 && box.rows[0].label == "Yes" && box.rows[3].label == "No"
                  && box.rows[1].label == "Yes, and always allow access to" && box.rows[1].detail?.contains("/Users/you/project") == true,
                  "its four choices, a wrapped one kept whole")
     } else { t.expect(false, "a permission box is read") }
-    if let box = TerminalBox.read(screenshot("trust")) {
+    if let box = boxOn(screenshot("trust")) {
         t.expect(box.rows.map { $0.label } == ["No, exit", "Yes, I trust this folder"] && box.rows.allSatisfy { $0.number == nil } && box.rows[0].cursor,
                  "a box with no numbers at all")
         t.expect(box.keys(toPick: 1) ?? [] == ["down", "enter"] && box.keys(toPick: 0) ?? [] == ["enter"], "is answered by arrows and Enter")
     } else { t.expect(false, "the trust box is read") }
-    t.expect(TerminalBox.read("❯ what I typed earlier\n  and its second line\n\n⏺ Claude's answer, at length.\n  More of it.\n\n✻ Working… (esc to interrupt)") == nil,
+    t.expect(boxOn("❯ what I typed earlier\n  and its second line\n\n⏺ Claude's answer, at length.\n  More of it.\n\n✻ Working… (esc to interrupt)") == nil,
              "a ❯ in the conversation is not a cursor: nothing is invented from a turn in progress")
 
     // A box is read only where Claude says it has one up. "It isn't the prompt" is not
@@ -235,15 +238,15 @@ let phoneSuite = Suite("Phone") { t in
     let longRule = String(repeating: "─", count: 60)
     let draft = ["done", longRule, "❯ 1. fix the header", longRule, "  speakhud (main*) | Opus 5.5 ctx:51% used"].joined(separator: "\n")
     let shellPrompt = "  build ok\n  2 warnings\n❯ rm -rf build"
-    t.expect(TerminalBox.read(draft) == nil, "a message being written that starts \"1. \" is not a box, and its status line is not a choice")
-    t.expect(TerminalBox.read(shellPrompt) == nil, "a shell whose prompt is ❯, under indented output, is not a box")
-    t.expect(TerminalBox.read("  1. first\n  2. second\n❯ git status") == nil, "nor is one under a numbered list it printed")
-    t.expect(TerminalBox.read(["done", longRule, "❯ 1. Yes", "  2. No", longRule, "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent"].joined(separator: "\n")) == nil,
+    t.expect(boxOn(draft) == nil, "a message being written that starts \"1. \" is not a box, and its status line is not a choice")
+    t.expect(boxOn(shellPrompt) == nil, "a shell whose prompt is ❯, under indented output, is not a box")
+    t.expect(boxOn("  1. first\n  2. second\n❯ git status") == nil, "nor is one under a numbered list it printed")
+    t.expect(boxOn(["done", longRule, "❯ 1. Yes", "  2. No", longRule, "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent"].joined(separator: "\n")) == nil,
              "numbered lines between the prompt's rules, with nothing that says keys answer them, are not a box either")
-    t.expect(TerminalBox.read("  one\n❯ two\n  three\nmain · 3 files changed") == nil, "a line with a dot in the middle of it is not a box saying how to answer")
+    t.expect(boxOn("  one\n❯ two\n  three\nmain · 3 files changed") == nil, "a line with a dot in the middle of it is not a box saying how to answer")
     let unsaid = screenshot("permission").components(separatedBy: "\n").filter { !$0.contains("Esc to cancel") }.joined(separator: "\n")
-    t.expect(unsaid != screenshot("permission") && TerminalBox.read(unsaid) == nil, "a list of choices with nothing under it that says how to answer is not read as one")
-    t.expect(TerminalBox.read(screenshot("permission") + "\nchris@mac project % ") == nil, "nor is a box left on the screen of a pane that has dropped to its shell")
+    t.expect(unsaid != screenshot("permission") && boxOn(unsaid) == nil, "a list of choices with nothing under it that says how to answer is not read as one")
+    t.expect(boxOn(screenshot("permission") + "\nchris@mac project % ") == nil, "nor is a box left on the screen of a pane that has dropped to its shell")
     var draftDesk = PhoneDesk()
     let draftAsked = draftDesk.met([Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)], now: t0)
     t.expect(draftAsked.isEmpty && draftDesk.turns.count == 1 && draftDesk.turns[0].box == nil && draftDesk.turns[0].context == 51,
@@ -262,11 +265,17 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(Reply.survey(ask: { _ in Reply.Answer(reply: "missing") }) == nil, "iTerm2 not running: nothing known, which isn't nothing open")
     t.expect(Reply.surveyScript.contains("(character id 31)") && !Reply.surveyScript.contains("& tab &"),
              "the separators are spelled as character ids: inside iTerm2's tell, tab is one of its tabs")
-    t.expect(Reply.showsClaude(atPrompt) && Reply.showsClaude("Thinking… (esc to interrupt)") && Reply.showsClaude("❯ 1. Yes\nEnter to select · Esc to cancel")
-             && !Reply.showsClaude("chris@mac ~ % ls\nnotes.txt"), "Claude Code's screen is told from a shell's")
-    t.expect(Reply.working(title: "◐ Grow guide replies — ~", screen: atPrompt) && !Reply.working(title: "✳ Grow guide replies — ~", screen: atPrompt)
-             && !Reply.working(title: "zsh", screen: "% ") && Reply.working(title: "✳ x", screen: "✻ Crunching… (esc to interrupt)"),
+    t.expect(Reply.showing(atPrompt).isClaude && Reply.showing("Thinking… (esc to interrupt)").isClaude && Reply.showing("❯ 1. Yes\nEnter to select · Esc to cancel").isClaude
+             && !Reply.showing("chris@mac ~ % ls\nnotes.txt").isClaude, "Claude Code's screen is told from a shell's")
+    t.expect(Reply.showing(atPrompt, title: "◐ Grow guide replies — ~").busy && !Reply.showing(atPrompt, title: "✳ Grow guide replies — ~").busy
+             && !Reply.showing("% ", title: "zsh").busy && Reply.showing("✻ Crunching… (esc to interrupt)", title: "✳ x").busy,
              "a spinning glyph on the title, or its screen saying so, is a terminal at work; ✳ is one waiting for you")
+    t.expect(Reply.showing("chris@mac ~ % ", title: "~ — zsh") == .working(onScreen: false) && !Reply.showing("chris@mac ~ % ", title: "~ — zsh").isClaude
+             && Reply.showing("⏺ A long answer, with no prompt box in sight.", title: "◐ Review desk — ~").busy,
+             "a glyph on the title alone says a turn may be running, never that the screen is Claude Code's: a shell's title can start with one")
+    t.expect(Reply.showing("how to answer: Esc to cancel\nchris@mac ~ % ") == .notClaude("nothing at the foot of its screen is Claude's prompt or a box of its")
+             && Reply.showing(" \n ") == .notClaude("its screen is blank") && Reply.showing("Paste the code:\n > \n Enter to confirm · Esc to cancel") == .keys("Enter to confirm · Esc to cancel"),
+             "what says it takes keys counts at the foot of the screen, not further up it; and what is none of Claude's says why")
 
     var openDesk = PhoneDesk()
     openDesk.took(turn("a", "done"), now: t0)
@@ -434,11 +443,11 @@ let phoneSuite = Suite("Phone") { t in
 
     // -- its status line: the folder, the model, how full the context is -------
     let mine = "⏺ Done.\n\n────────────────\n❯ \n────────────────\n  speakhud (main*)  |  Opus 5.5  ctx:51% used         ✔ Update installed · Restart to update\n  ⏵⏵ auto mode on · ← 1 agent"
-    t.expect(Reply.status(in: mine)?.line == "speakhud (main*) | Opus 5.5 ctx:51% used" && Reply.status(in: mine)?.context == 51,
+    t.expect(Reply.showing(mine).prompt?.status == "speakhud (main*) | Opus 5.5 ctx:51% used" && Reply.showing(mine).prompt?.context == 51,
              "the line under the prompt box, without the notice off to its right, and the context figure in it")
-    t.expect(Reply.status(in: screenshot("prompt"))?.line.hasPrefix("⏸ manual mode on") == true && Reply.status(in: screenshot("prompt"))?.context == nil,
+    t.expect(Reply.showing(screenshot("prompt")).prompt?.status?.hasPrefix("⏸ manual mode on") == true && Reply.showing(screenshot("prompt")).prompt?.context == nil,
              "whatever line a terminal has, with no figure when it gives none")
-    t.expect(Reply.status(in: screenshot("permission")) == nil, "a box has no status line to read")
+    t.expect(Reply.showing(screenshot("permission")).prompt == nil, "a box has no status line to read")
     o.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: mine)]
     o.phone.scan(now: Date().addingTimeInterval(3 * Phone.scanEvery + 3))
     let lined = turns(o.phone.state()).first

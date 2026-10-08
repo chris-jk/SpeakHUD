@@ -10,6 +10,9 @@ private let rule = String(repeating: "─", count: 94)
 
 private func screen(_ lines: String...) -> String { lines.joined(separator: "\n") }
 
+/// What Claude's prompt box holds, if that is what `screen` is showing.
+private func promptText(_ screen: String) -> String? { Reply.showing(screen).prompt?.text }
+
 /// A session at its prompt, with whatever `box` lines the prompt holds, as iTerm2 reports
 /// it: trailing spaces, a status line and the mode line under the box.
 private func atPrompt(_ box: String...) -> String {
@@ -134,30 +137,30 @@ let replySuite = Suite("Reply") { t in
 
     // -- reading the screen ------------------------------------------------
 
-    t.expectEqual(Reply.promptText(in: atPrompt("❯  ")), "", "an empty prompt box, as iTerm2 reports it")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯ Try \"edit <filepath> to...\"")), "Try \"edit <filepath> to...\"",
+    t.expectEqual(promptText(atPrompt("❯  ")), "", "an empty prompt box, as iTerm2 reports it")
+    t.expectEqual(promptText(atPrompt("❯ Try \"edit <filepath> to...\"")), "Try \"edit <filepath> to...\"",
                   "the box's text (a placeholder reads the same as typing)")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯ word0 word1 word2", "  word3 word4", "  word5")),
+    t.expectEqual(promptText(atPrompt("❯ word0 word1 word2", "  word3 word4", "  word5")),
                   "word0 word1 word2 word3 word4 word5", "a wrapped message is joined up")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯\u{00A0}hello")), "hello", "a no-break space after the mark is a space")
-    t.expect(Reply.promptText(in: questionBox) == nil, "a question box is not a prompt")
-    t.expect(Reply.promptText(in: trustBox) == nil, "the trust box is not a prompt")
-    t.expect(Reply.promptText(in: screen("Last login: Tue Oct  7", "❯ ls", "TODO.md", "❯ ")) == nil,
+    t.expectEqual(promptText(atPrompt("❯\u{00A0}hello")), "hello", "a no-break space after the mark is a space")
+    t.expect(promptText(questionBox) == nil, "a question box is not a prompt")
+    t.expect(promptText(trustBox) == nil, "the trust box is not a prompt")
+    t.expect(promptText(screen("Last login: Tue Oct  7", "❯ ls", "TODO.md", "❯ ")) == nil,
              "a shell prompt that happens to use ❯ is not Claude's")
-    t.expect(Reply.promptText(in: atPrompt("! ls -la")) == nil, "shell mode: what's pasted there would be run")
-    t.expect(Reply.promptText(in: atPrompt("❯ 1. Yes", "  2. No")) == nil, "options between two rules are still options")
-    t.expect(Reply.promptText(in: screen(rule, "❯ ", rule, "  status", "Esc to cancel")) == nil,
+    t.expect(promptText(atPrompt("! ls -la")) == nil, "shell mode: what's pasted there would be run")
+    t.expect(promptText(atPrompt("❯ 1. Yes", "  2. No")) == nil, "options between two rules are still options")
+    t.expect(promptText(screen(rule, "❯ ", rule, "  status", "Esc to cancel")) == nil,
              "a box that says how to answer it underneath takes keys as answers")
-    t.expect(Reply.promptText(in: screen(rule, "❯ quoted earlier", rule, "a", "b", "c", "d", "e", "f")) == nil,
+    t.expect(promptText(screen(rule, "❯ quoted earlier", rule, "a", "b", "c", "d", "e", "f")) == nil,
              "a rule with more than a status line or two under it isn't the prompt box")
-    t.expect(Reply.promptText(in: "") == nil, "no screen, no prompt")
+    t.expect(promptText("") == nil, "no screen, no prompt")
     // A message you're writing may start with a number. Read as "not a prompt", it was
     // taken for a list of choices, and a tap on the phone sent it.
-    t.expectEqual(Reply.promptText(in: screen("done", rule, "❯ 1. fix the header", rule, "  speakhud (main*) | Opus 5.5 ctx:51% used")),
+    t.expectEqual(promptText(screen("done", rule, "❯ 1. fix the header", rule, "  speakhud (main*) | Opus 5.5 ctx:51% used")),
                   "1. fix the header", "a message that starts \"1. \" is still a message in the prompt box")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯ 2. then the footer, which", "  wraps onto a second line")),
+    t.expectEqual(promptText(atPrompt("❯ 2. then the footer, which", "  wraps onto a second line")),
                   "2. then the footer, which wraps onto a second line", "wrapped too")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯ 10. Yes")), "10. Yes", "one numbered line is not a list of options")
+    t.expectEqual(promptText(atPrompt("❯ 10. Yes")), "10. Yes", "one numbered line is not a list of options")
 
     t.expect(Reply.shows("blue please", inPrompt: "blue please"), "the paste shows")
     t.expect(Reply.shows("word0 word1 word2 word3", inPrompt: "word0 word1 wo rd2 word3"), "however it wrapped")
