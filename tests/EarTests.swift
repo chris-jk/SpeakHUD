@@ -107,6 +107,32 @@ let earSuite = Suite("Ear") { t in
     t.expect(again.sent.isEmpty, "a command isn't sent to Claude")
     t.expectEqual(again.voice, [.speak("the turn", from: 0, rate: Playback.rateSteps[1])], "it's done: the turn is read again")
 
+    // How long a reply window waits for the mic to open, against how long the mic's own
+    // tries can take: the real pair, with the window's timer caught instead of run. The
+    // two were set apart once (6 s against 7.4 s, or 11.4 s over speech) and the last
+    // tries could never finish.
+    for overSpeech in [false, true] {
+        var armed: [TimeInterval] = []
+        let ear = MicEar(source: .recording(dir + "/reply.aiff"))
+        let voice = FakeVoice()
+        let p = Playback(voice: voice, retire: { _ in }, later: { $0() }, ear: ear,
+                         timer: { seconds, _ in armed.append(seconds); return {} })
+        voice.playback = p
+        ear.listener = p
+        p.listens = true
+        p.obeys = overSpeech   // the reply window opens the kind of mic the commands use
+        p.enqueue(SpeechItem(text: "the turn", source: "Proj", key: "s1", created: Date(),
+                             origin: Origin(term: "iTerm.app", session: "1A2B3C4D-0000-4000-8000-00000000ABCD"),
+                             answerable: true))
+        voice.finish()
+        let tries = Double(MicEar.openTries) * MicEar.tryWait(overSpeech: overSpeech)
+            + Double(MicEar.openTries - 1) * MicEar.tryGap
+        t.expect((armed.last ?? 0) > tries,
+                 "a reply window\(overSpeech ? ", over speech," : "") gives the mic longer to open (\(armed.last ?? 0) s) than its \(MicEar.openTries) tries can take (\(tries) s)")
+        p.stop()
+        spin(0.2) { false }   // let the mic's own shutdown land
+    }
+
     // Dictation from the phone: a recording as the page sends one (a WAV, 16-bit, one
     // channel, 16,000 samples a second), through the real transcriber, comes back as words.
     do {
@@ -179,6 +205,35 @@ let earSuite = Suite("Ear") { t in
             let partway = answers.dropLast().map(SpokenCommand.words).filter { !$0.isEmpty }
             t.expect(partway.contains { $0.hasPrefix("yes") && $0.count < "yes go ahead and merge it then tell me what failed".count },
                      "and before it, the words came as they were said (\(answers.dropLast()))")
+        }
+
+        // A dictation ended while its transcriber is still being readied (a new one has
+        // begun: start-up's warm-up followed at once by a real one is one way there).
+        // Nothing was open yet for the ending to shut, so the opening has to notice.
+        do {
+            let early = LiveDictation(id: "eartest-early", rate: 16_000)
+            var answer: Result<String, Dictation.Failure>?
+            early.take(Data(count: 3_200), last: false) { answer = $0 }
+            early.end()
+            spin(40) { answer != nil }   // its piece is answered once the opening is over, one way or the other
+            t.expect(answer == .failure(Dictation.Failure("that dictation is over")),
+                     "a piece sent to a dictation that has ended is told so (\(String(describing: answer)))")
+            t.expect(!early.isOpen, "and the opening it was in the middle of leaves no transcriber running")
+
+            let kept = LiveDictation(id: "eartest-kept", rate: 16_000)
+            var first: Result<String, Dictation.Failure>?
+            kept.take(Data(count: 3_200), last: false) { first = $0 }
+            spin(40) { first != nil }
+            t.expect(first == .success("") && kept.isOpen, "one still being said keeps its transcriber open (\(String(describing: first)))")
+            kept.end()
+            t.expect(!kept.isOpen, "and has let go of it once it's ended")
+
+            let whole = LiveDictation(id: "eartest-whole", rate: 16_000)
+            var last: Result<String, Dictation.Failure>?
+            whole.take(Data(count: 3_200), last: true) { last = $0 }
+            spin(40) { last != nil }
+            t.expect(last == .success("") && !whole.isOpen, "nor is one that ran to its last piece (\(String(describing: last)))")
+            spin(0.2) { false }   // let the transcriber's own shutdown land
         }
 
         var refused: Result<String, Dictation.Failure>?

@@ -261,8 +261,12 @@ What's on the page:
   closed page reads nothing: that's what the push is for.
 - **Away.** On: finished turns are pushed to your phone and not read aloud, no mic opens
   for a reply nobody is there to give, and the Mac is kept from idling to sleep (the
-  screen can still lock). The menu bar icon turns into a phone while it's on. Off: the
-  Mac reads aloud as usual, and the page still works.
+  screen can still lock). Switching it on stops the turn being read and lets go of the
+  ones waiting behind it: they're on the phone, and aren't read again when you're back.
+  The menu bar icon turns into a phone while it's on. Off: the Mac reads aloud as usual,
+  and the page still works. The few things the phone has nowhere to show (a hotkey read
+  asked for while Away is on, a queued item that isn't a Claude Code turn) wait in the
+  HUD and are read when you switch it off.
 
 Set it up once (the names below are examples: use your own):
 

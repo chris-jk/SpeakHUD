@@ -40,6 +40,9 @@ final class FakeEar: Ear {
     private(set) var window = 0   // the last window opened, still the one a stale report names
     /// A real mic takes a moment to open; tests that care set this false and call open().
     var opensAtOnce = true
+    /// How long this mic says opening may take, its own tries included (Ear.opensWithin).
+    var patience: (plain: TimeInterval, overSpeech: TimeInterval) = (7, 11)
+    func opensWithin(overSpeech: Bool) -> TimeInterval { overSpeech ? patience.overSpeech : patience.plain }
 
     func listen(window id: Int, overSpeech: Bool) {
         calls.append(overSpeech ? .attend(id) : .listen(id))
@@ -125,6 +128,11 @@ private func turn(_ text: String, key: String) -> SpeechItem {
 }
 private func read(_ text: String) -> SpeechItem {
     SpeechItem(text: text, source: "Selection", key: UUID().uuidString, created: Date())
+}
+/// A finished Claude Code turn from an iTerm2 pane: the kind you can answer, and the phone shows.
+private func answerable(_ text: String, key: String) -> SpeechItem {
+    SpeechItem(text: text, source: key, key: key, created: Date(), file: "/tmp/\(text).taken",
+               origin: Origin(term: "iTerm.app", session: "1A2B3C4D-0000-4000-8000-00000000ABCD"), answerable: true)
 }
 
 let playbackSuite = Suite("Playback") { t in
@@ -353,6 +361,7 @@ let playbackSuite = Suite("Playback") { t in
         t.expectEqual(p.current?.text, "a", "it's current, so the HUD can show it")
         t.expectEqual(r.shown, ["a"], "the HUD was told to show it")
         t.expectEqual(p.state.status, "🎙 Mic in use — waiting", "status says waiting")
+        t.expectEqual(r.logs.last, "holding A — mic in use or paused", "and so does the log")
         t.expectEqual(r.voice.take(), [], "nothing spoken")
         p.micChanged(busy: false)
         t.expectEqual(r.voice.take(), [.speak("a", from: 0, rate: r1)], "spoken once the mic lets go")
@@ -436,5 +445,200 @@ let playbackSuite = Suite("Playback") { t in
         p.replay()
         t.expectEqual(r.voice.take(), [], "nothing to replay")
         t.expect(p.current == nil, "still idle")
+    }
+
+    // -- away ----------------------------------------------------------------
+    //
+    // Nobody is at the Mac, and the phone has the turns: `onPhone` is what the phone
+    // said when it was handed each one (Phone.took).
+
+    do {  // Away goes on mid-turn: the voice stops, and what the phone has is let go
+        let r = Rig(), p = r.playback!
+        p.awayChanged(on: false)
+        t.expect(r.logs.isEmpty && r.ranDry == 0, "told it's off when it already is: nothing happens")
+        p.enqueue(turn("a", key: "A"), onPhone: true); p.enqueue(turn("b", key: "B"), onPhone: true)
+        t.expectEqual(r.logs, ["start A (1 chars)", "speaking A", "queued B — 1 waiting"], "what became of each arrival is in the log")
+        _ = r.voice.take()
+        p.awayChanged(on: true)
+        t.expectEqual(r.voice.take(), [.stop], "away: the turn being read stops")
+        t.expectEqual(r.retired, ["a", "b"], "it and what was waiting are let go, spool files and all: the phone has them")
+        t.expect(p.current == nil && p.queue.isEmpty, "nothing is left to read")
+        t.expect(!p.state.isActive, "idle, so the HUD may hide")
+        t.expectEqual(p.state.status, "📱 Away: turns go to your phone", "and says why it's quiet")
+        t.expect(r.logs.contains("away: A not read, the phone has it") && r.logs.contains("away: B not read, the phone has it"),
+                 "the log says what became of each")
+        r.voice.finish()   // the stopped synth's late didFinish
+        t.expect(p.current == nil && r.retired == ["a", "b"], "the stopped voice's late finish changes nothing")
+
+        t.expect(!p.enqueue(turn("c", key: "C"), onPhone: true), "a turn arriving while away is not read")
+        t.expectEqual(r.voice.take(), [], "the voice says nothing")
+        t.expectEqual(r.retired, ["a", "b", "c"], "it's let go at once: the phone has it")
+        t.expectEqual(r.shown, ["a"], "and the HUD isn't brought up for it")
+        t.expectEqual(r.logs.last, "away: C not read, the phone has it", "the log says so")
+        p.awayChanged(on: true)
+        t.expectEqual(r.retired, ["a", "b", "c"], "told it's on when it already is: nothing happens")
+
+        p.awayChanged(on: false)
+        t.expectEqual(r.voice.take(), [], "back: nothing that went to the phone is read after all")
+        t.expect(p.current == nil && p.queue.isEmpty && !p.state.isActive, "there's nothing to read")
+        t.expect(p.enqueue(turn("d", key: "D"), onPhone: true), "and the next turn to arrive is read as it always was")
+        t.expectEqual(r.voice.take(), [.speak("d", from: 0, rate: r1)], "aloud")
+    }
+
+    do {  // …with Listen After Reading on, no reply mic opens for a turn Away cut off
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(answerable("a", key: "A"), onPhone: true); p.enqueue(answerable("b", key: "B"), onPhone: true)
+        p.awayChanged(on: true)
+        r.voice.finish()
+        t.expectEqual(r.ear.take(), [], "away: no mic opens")
+        t.expect(r.listened.isEmpty && r.shown == ["a"], "nobody is asked for a reply, and the next turn isn't started")
+        p.awayChanged(on: false)
+        _ = r.voice.take()
+        p.replay()
+        t.expectEqual(r.voice.take(), [.speak("a", from: 0, rate: r1)], "back, Replay still brings the cut-off turn back if you ask for it")
+    }
+
+    do {  // your own pause outlasts Away, as it does a mic hold
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("note", key: "N"))
+        p.togglePause()
+        p.awayChanged(on: true)
+        _ = r.voice.take()
+        p.awayChanged(on: false)
+        t.expectEqual(r.voice.take(), [], "back, what you'd paused stays paused")
+        t.expectEqual(p.state.status, "⏸ Paused", "and says so")
+        p.togglePause()
+        t.expectEqual(r.voice.take(), [.speak("note", from: 0, rate: r1)], "Resume reads it, from the top")
+    }
+
+    do {  // a reply window open when Away goes on is shut, and nothing is sent
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(answerable("a", key: "A"), onPhone: true); p.enqueue(answerable("b", key: "B"), onPhone: true)
+        r.voice.finish()
+        r.ear.hear("half a sen")
+        t.expectEqual(r.ear.take(), [.listen(1)], "the reply window is open")
+        _ = r.voice.take()
+        p.awayChanged(on: true)
+        t.expectEqual(r.ear.take(), [.stop], "away: the mic shuts")
+        t.expect(r.armed == nil && r.sent.isEmpty && p.state.heard == nil, "what was half heard is never sent")
+        t.expectEqual(r.voice.take(), [], "and the turn behind it isn't read")
+        t.expectEqual(r.retired, ["a", "b"], "it's let go with the rest")
+    }
+
+    do {  // the mic open for commands shuts too, and stays shut
+        let r = Rig(), p = r.playback!
+        p.obeys = true
+        p.enqueue(turn("a", key: "A"), onPhone: true)
+        p.enqueue(turn("note", key: "N"))   // the phone couldn't show this one
+        t.expectEqual(r.ear.take(), [.attend(1)], "the mic is open for commands")
+        p.awayChanged(on: true)
+        t.expectEqual(r.ear.take(), [.stop], "away: it shuts")
+        t.expect(!p.state.listening, "and the HUD knows")
+        t.expectEqual(p.current?.text, "note", "with something still waiting to be read")
+        t.expect(!p.enqueue(turn("note2", key: "M")), "and more arriving")
+        t.expectEqual(r.ear.take(), [], "it stays shut")
+        p.awayChanged(on: false)
+        t.expectEqual(r.ear.take(), [.attend(2)], "back: it opens again with the reading")
+    }
+
+    do {  // what the phone couldn't show isn't lost: it waits, and is read when you're back
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("a", key: "A"), onPhone: true)
+        p.enqueue(turn("note", key: "N"))
+        p.enqueue(turn("b", key: "B"), onPhone: true)
+        _ = r.voice.take()
+        p.awayChanged(on: true)
+        t.expectEqual(r.retired, ["a", "b"], "away lets go of what the phone has, and only that")
+        t.expectEqual(p.current?.text, "note", "the one it couldn't show is up next")
+        t.expectEqual(r.shown, ["a", "note"], "on the HUD")
+        t.expectEqual(r.voice.take(), [.stop], "but not read")
+        t.expectEqual(p.state.status, "📱 Away: this is read when you're back", "the HUD says what it's waiting for")
+        t.expect(r.logs.contains("away: N waits to be read: the phone can't show it"), "and the log says why it was kept")
+
+        t.expect(!p.enqueue(turn("note2", key: "M")), "another the phone can't show, arriving while away, isn't read either")
+        t.expectEqual(p.queue.map(\.text), ["note2"], "it waits in line")
+        t.expectEqual(r.retired, ["a", "b"], "with its spool file")
+        t.expectEqual(r.logs.last, "away: M waits to be read: the phone can't show it", "the log doesn't say it went to the phone")
+        t.expectEqual(r.voice.take(), [], "and still nothing is said")
+
+        p.awayChanged(on: false)
+        t.expectEqual(r.voice.take(), [.speak("note", from: 0, rate: r1)], "back: what waited is read")
+        r.voice.finish()
+        t.expectEqual(r.voice.take(), [.speak("note2", from: 0, rate: r1)], "all of it")
+    }
+
+    do {  // what the phone has is remembered per turn, and forgotten with the turn
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("x", key: "A"), onPhone: true)
+        r.voice.finish()
+        p.awayChanged(on: true)
+        p.enqueue(turn("x", key: "N"))   // the same spool file name, used again, for something the phone can't show
+        t.expect(r.retired == ["x"] && p.current?.key == "N", "a spool file that was once the phone's doesn't make the next one the phone's")
+    }
+
+    do {  // …and if it was the one being read, it starts again from the top
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("one two three", key: "N"))
+        r.voice.word(at: 4)
+        _ = r.voice.take()
+        p.awayChanged(on: true)
+        t.expectEqual(r.voice.take(), [.stop], "away: it stops")
+        t.expect(r.retired.isEmpty && p.current?.text == "one two three", "and is kept: the phone hasn't got it")
+        p.awayChanged(on: false)
+        t.expectEqual(r.voice.take(), [.speak("one two three", from: 0, rate: r1)], "back: read from the top, not from the middle of a sentence")
+    }
+
+    do {  // reads asked for by hand
+        let r = Rig(), p = r.playback!
+        p.playNow(read("sel"))
+        _ = r.voice.take()
+        p.awayChanged(on: true)
+        t.expectEqual(r.voice.take(), [.stop], "away: a hotkey read stops like anything else")
+        t.expect(r.retired == ["sel"] && p.current == nil, "and is let go: nothing on disk backs it, and whoever asked has left")
+
+        p.playNow(read("later sel"))
+        t.expectEqual(p.current?.text, "later sel", "a hotkey read asked for while away is shown")
+        t.expectEqual(r.voice.take(), [], "but nothing is read while away")
+        t.expectEqual(p.state.status, "📱 Away: this is read when you're back", "and the HUD says why")
+        p.awayChanged(on: false)
+        t.expectEqual(r.voice.take(), [.speak("later sel", from: 0, rate: r1)], "back: it's read")
+    }
+
+    do {  // a turn put off with "later" is on the phone too
+        let r = Rig(), p = r.playback!
+        p.obeys = true
+        p.enqueue(turn("a", key: "A"), onPhone: true)
+        r.ear.hear("later"); r.fire(Playback.commandPause)
+        t.expectEqual(p.state.putOff, 1, "put off, with nothing else waiting")
+        p.awayChanged(on: true)
+        t.expect(r.retired == ["a"] && p.state.putOff == 0, "away lets go of it with the rest")
+    }
+
+    do {  // the agent's forward: what the phone kept is what Away lets go of
+        let suite = "speakhud-away-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let phone = Phone(config: PhoneConfig(token: String(repeating: "k", count: 32)), defaults: defaults)
+        phone.transport = { _, done in done(nil) }
+        let r = Rig(), p = r.playback!
+        phone.onAwayChange = { p.awayChanged(on: $0) }
+        func arrives(_ item: SpeechItem) -> Bool { p.enqueue(item, onPhone: phone.took(item)) }   // Agent.drainSpool
+
+        t.expect(arrives(answerable("a", key: "A")), "at the Mac, a turn is read")
+        phone.setAway(true)
+        t.expectEqual(r.retired, ["a"], "the phone's switch reaches the reading: the turn stops and is let go")
+        t.expectEqual(phone.desk.turn("A")?.text, "a", "the phone has it")
+        t.expect(!arrives(answerable("b", key: "B")), "away, a finished turn is not read")
+        t.expect(!arrives(turn("which one?", key: "B" + PhoneDesk.questionSuffix)), "nor a question")
+        t.expectEqual(r.retired, ["a", "b", "which one?"], "both are let go")
+        t.expect(phone.desk.turn("B")?.text == "b" && phone.desk.turn("B")?.question == "which one?", "to the phone, which has them")
+        t.expect(!arrives(turn("note", key: "N")), "something with no terminal to answer in is not read either")
+        t.expect(phone.desk.turn("N") == nil && r.retired == ["a", "b", "which one?"] && p.current?.text == "note",
+                 "but the phone didn't keep it, so the Mac does")
+        t.expectEqual(r.voice.take(), [.speak("a", from: 0, rate: r1), .stop], "nothing has been read since Away went on")
+        phone.setAway(false)
+        t.expectEqual(r.voice.take(), [.speak("note", from: 0, rate: r1)], "back: only what the phone never had is read")
     }
 }
