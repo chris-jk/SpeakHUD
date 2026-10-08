@@ -676,9 +676,10 @@ let phoneSuite = Suite("Phone") { t in
              && (listed.first?["v"] as? String)?.isEmpty == false && !String(describing: listed).contains(shots),
              "by name, size and a mark that changes with the file: never by where it is on the Mac")
 
-    func file(_ i: String, key: String = "m", range: String? = nil, w: String? = nil, paired: Bool = true) -> HTTP.Response {
+    func file(_ i: String, key: String = "m", range: String? = nil, w: String? = nil, save: Bool = false, paired: Bool = true) -> HTTP.Response {
         var query = ["key": key, "i": i]
         if let w = w { query["w"] = w }
+        if save { query["save"] = "1" }
         var r = get("/api/file", query: query, paired: paired)
         if let range = range { r.headers["range"] = range }
         return m.phone.respond(to: r)
@@ -712,6 +713,16 @@ let phoneSuite = Suite("Phone") { t in
              && max(lightRep?.pixelsWide ?? 0, lightRep?.pixelsHigh ?? 0) == 400, "a heavy picture goes as a lighter copy, as wide as asked")
     t.expect((file("0").file?.length ?? 0) > 300_000, "and whole when no width is asked: that's the tap to open it")
     t.expect(file("3", w: "400").file?.length == 2_000, "a light picture goes as it is")
+    let toKeep = file("0", w: "400", save: true)
+    t.expect((toKeep.file?.length ?? 0) > 300_000 && toKeep.body.isEmpty && toKeep.type == "image/png"
+             && toKeep.headers.contains { $0.0 == "Content-Disposition" && $0.1 == "attachment; filename*=UTF-8''big.png" },
+             "asked for to keep, a picture goes as the file itself, whatever width was asked, marked for the phone to download under its name")
+    t.expect(file("0").headers.contains { $0.0 == "Content-Disposition" && $0.1.hasPrefix("inline;") }
+             && file("2", save: true).headers.contains { $0.0 == "Content-Disposition" && $0.1.hasPrefix("attachment;") }
+             && file("2", range: "bytes=100-199", save: true).status == 206,
+             "shown, a file is marked to show; a video to keep is still sent in the parts asked for")
+    t.expect(m.logs.contains { $0.contains("phone saved big.png (image,") } && file("1", save: true).status == 404 && file("0", save: true, paired: false).status == 401,
+             "what was saved is logged by name; keeping reaches nothing that showing doesn't")
     t.expect((NSBitmapImageRep(data: file("0", w: "99999").body)?.pixelsWide ?? 9999) <= 2400, "a silly width is cut down")
 
     try? fm.removeItem(atPath: shots + "/small.jpg")

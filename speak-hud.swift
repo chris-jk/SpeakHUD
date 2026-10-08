@@ -4739,12 +4739,13 @@ enum HTTP {
 
         /// A file of `size` bytes, or the part of it `range` asks for: a phone only ever
         /// asks for a video in parts. The phone may keep it for an hour; the page asks
-        /// for a changed file under a new address.
-        static func file(_ path: String, size: UInt64, type: String, range: String?) -> Response {
+        /// for a changed file under a new address. `save` says it's to be kept, not
+        /// shown: a browser then downloads it under its name.
+        static func file(_ path: String, size: UInt64, type: String, range: String?, save: Bool = false) -> Response {
             let name = (path as NSString).lastPathComponent
                 .addingPercentEncoding(withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._"))) ?? "file"
             var r = Response(type: type, headers: [("Accept-Ranges", "bytes"), ("Cache-Control", "private, max-age=3600"),
-                                                   ("Content-Disposition", "inline; filename*=UTF-8''\(name)")])
+                                                   ("Content-Disposition", "\(save ? "attachment" : "inline"); filename*=UTF-8''\(name)")])
             switch HTTP.range(range, of: size) {
             case .whole:
                 r.file = Slice(path: path, offset: 0, length: size)
@@ -5139,9 +5140,12 @@ final class Phone {
             return .json(["error": "that file isn't there any more"], status: 404)
         }
         let range = r.headers["range"]
+        // To keep on the phone: always the file itself, never the lighter copy of a picture.
+        let save = r.query["save"] == "1"
         if HTTP.range(range, of: file.size) != .none, range == nil || range?.hasPrefix("bytes=0-") == true {
-            log("phone shown \(file.name) (\(file.kind), \(file.size / 1024) KB) from \(turn.name)")
+            log("phone \(save ? "saved" : "shown") \(file.name) (\(file.kind), \(file.size / 1024) KB) from \(turn.name)")
         }
+        if save { return .file(file.path, size: file.size, type: file.type, range: range, save: true) }
         if PhoneMedia.sendsSmaller(file), let side = Int(r.query["w"] ?? ""),
            let small = PhoneMedia.small(file.path, side: min(max(side, 64), 2400)) {
             return HTTP.Response(type: small.type, headers: [("Cache-Control", "private, max-age=3600")], body: small.data)

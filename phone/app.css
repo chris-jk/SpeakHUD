@@ -400,6 +400,21 @@ main { margin-top: 14px; }
   white-space: nowrap;
 }
 .media figcaption small { flex: none; font-size: inherit; }
+/* Keep this file on the phone. */
+.media-save {
+  flex: none;
+  min-width: 60px;
+  min-height: 32px;
+  margin-left: auto;
+  padding: 0 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 16px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+}
+.media.is-gone .media-save { display: none; }
 .media.is-file figcaption,
 .media.is-gone figcaption {
   padding: 10px 12px;

@@ -381,7 +381,12 @@
     name.textContent = m.name;
     const size = document.createElement('small');
     size.textContent = bytes(m.size);
-    caption.append(name, size);
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'media-save';
+    save.textContent = 'Save';
+    save.addEventListener('click', () => keep(src + '&save=1', m, save));
+    caption.append(name, size, save);
     // Gone from the Mac since it was listed, or a kind this phone can't show.
     const failed = () => {
       figure.classList.add('is-gone');
@@ -414,6 +419,51 @@
     }
     figure.append(caption);
     return figure;
+  }
+
+  // Save a file a turn made onto the phone. Where the phone can hand a file to its share
+  // sheet (on an iPhone that's where Save Image and Save Video put it in Photos, beside
+  // Save to Files and AirDrop), the file is fetched and handed over. A very big one, or
+  // a phone that can't, gets a plain download, which lands in its downloads.
+  const HAND_OVER_LIMIT = 150 * 1024 * 1024;
+  const fetched = new Map();   // address -> the file, fetched and waiting for a tap
+  async function keep(src, m, button) {
+    const download = () => {
+      const link = document.createElement('a');
+      link.href = src;
+      link.download = m.name;
+      document.body.append(link);
+      link.click();
+      link.remove();
+    };
+    if (typeof navigator.canShare !== 'function' || typeof window.File !== 'function' || m.size > HAND_OVER_LIMIT) return download();
+    try {
+      let file = fetched.get(src);
+      if (!file) {
+        button.disabled = true;
+        button.textContent = 'Getting it';
+        const res = await fetch(src);
+        if (!res.ok) throw new Error('gone');
+        const blob = await res.blob();
+        file = new window.File([blob], m.name, { type: blob.type || 'application/octet-stream' });
+        button.disabled = false;
+        button.textContent = 'Save';
+        if (!navigator.canShare({ files: [file] })) return download();
+        fetched.set(src, file);
+      }
+      await navigator.share({ files: [file] });
+      fetched.delete(src);
+      button.textContent = 'Save';
+    } catch (e) {
+      button.disabled = false;
+      // A phone only opens its share sheet straight off a tap. A file that took a while
+      // to fetch has outlived the tap that asked for it: it's kept, and the next tap opens the sheet.
+      if (e && e.name === 'NotAllowedError' && fetched.has(src)) { button.textContent = 'Tap to save'; return; }
+      button.textContent = 'Save';
+      if (e && e.name === 'AbortError') return;   // you closed the sheet
+      fetched.delete(src);
+      download();
+    }
   }
 
   async function call(path, body) {
