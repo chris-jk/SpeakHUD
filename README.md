@@ -255,7 +255,9 @@ What's on the page:
   scrolls under it. Only the newest open tab of the page speaks: each push you tap opens another. With the **Read aloud** switch on, turns are read as they arrive while the
   page is open; the switch is remembered, and after reopening the page one tap anywhere
   lets it speak again (phones only let a page talk after a tap). **Speed** steps through
-  1×, 1.25×, 1.5×, 1.75×, 2× and 0.75×, and is remembered too. A locked phone or a
+  1×, 1.25×, 1.5×, 1.75×, 2× and 0.75×, and is remembered too. **Voice** lists the
+  phone's own voices in your language, the ones for your region first; pick one and it
+  says who it is, and it reads from then on (also remembered, on that phone). A locked phone or a
   closed page reads nothing: that's what the push is for.
 - **Away.** On: finished turns are pushed to your phone and not read aloud, no mic opens
   for a reply nobody is there to give, and the Mac is kept from idling to sleep (the

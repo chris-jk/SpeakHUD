@@ -5558,6 +5558,10 @@ final class Phone {
             if let lang = body["lang"] as? String, lang.range(of: #"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"#, options: .regularExpression) != nil {
                 said.append("lang \(lang)")
             }
+            // Which of the phone's voices read it (a name as the phone gives it, or "own").
+            if let name = body["voice"] as? String, name.range(of: #"^[A-Za-z0-9 ()._'-]{1,40}$"#, options: .regularExpression) != nil {
+                said.append("voice \(name)")
+            }
             // What started it, what ended it, and which open copy of the page it was.
             for name in ["why", "end", "page"] {
                 if let word = body[name] as? String, word.range(of: #"^[a-z0-9-]{1,12}$"#, options: .regularExpression) != nil {

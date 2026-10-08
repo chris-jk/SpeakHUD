@@ -236,9 +236,38 @@
 
   function utter(words) {
     const said = new window.SpeechSynthesisUtterance(words);
-    said.lang = navigator.language || 'en-US';
+    said.lang = chosen ? chosen.lang : navigator.language || 'en-US';
+    if (chosen) said.voice = chosen;
     said.rate = speed;
     return said;
+  }
+
+  // The voice that reads: one of the phone's own, picked from its list and remembered
+  // by name. A phone tells a page its voices late and in its own time, so the list is
+  // drawn whenever it says they've changed. Only voices in the page's language are
+  // offered (the phone has dozens in others), the ones for this region first.
+  const voicePick = document.getElementById('voice-pick');
+  const voiceList = document.getElementById('voice');
+  let chosen = null;         // the voice picked, or null for the phone's own choice
+  function voiceWanted() { try { return localStorage.getItem('voice') || ''; } catch (e) { return ''; } }
+  function drawVoices() {
+    const mine = (navigator.language || 'en-US').toLowerCase();
+    const tongue = mine.split('-')[0];
+    const all = (voice.getVoices ? voice.getVoices() : []).filter((v) => (v.lang || '').toLowerCase().replace('_', '-').split('-')[0] === tongue);
+    all.sort((a, b) => ((b.lang || '').toLowerCase() === mine) - ((a.lang || '').toLowerCase() === mine) || a.name.localeCompare(b.name));
+    const wanted = voiceWanted();
+    chosen = all.find((v) => v.voiceURI === wanted) || all.find((v) => v.name === wanted) || null;
+    const own = document.createElement('option');
+    own.value = '';
+    own.textContent = "Phone's own";
+    voiceList.replaceChildren(own, ...all.map((v) => {
+      const option = document.createElement('option');
+      option.value = v.voiceURI || v.name;
+      option.textContent = (v.lang || '').toLowerCase() === mine ? v.name : v.name + ' (' + v.lang + ')';
+      return option;
+    }));
+    voiceList.value = chosen ? chosen.voiceURI || chosen.name : '';
+    voicePick.hidden = all.length < 2;
   }
 
   // Stop whatever the voice is saying. Only when it is saying something: a phone's
@@ -287,6 +316,7 @@
     if (!heard) {
       heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, scrolls: 0, stalls: 0, last: -1, lastAt: 0,
                 speed, marks: canMark, voices: voice.getVoices ? voice.getVoices().length : 0, lang: navigator.language || '',
+                voice: chosen ? chosen.name : 'own',
                 why: why || 'tap' };
     }
     // The whole turn is opened, so the words being read are there to see.
@@ -1132,6 +1162,18 @@
       try { localStorage.setItem('speed', String(speed)); } catch (e) { /* private mode */ }
       showSpeed();
       if (reading && now) read(now.key, now.what, now, 'speed');   // hear the new speed at once, from the same word
+    });
+    drawVoices();
+    if (voice.addEventListener) voice.addEventListener('voiceschanged', drawVoices);
+    voiceList.addEventListener('change', () => {
+      try { localStorage.setItem('voice', voiceList.value); } catch (e) { /* private mode */ }
+      drawVoices();
+      // Hear it at once: what's being read carries on in the new voice from the same
+      // word, or the voice says who it is.
+      if (reading && now) return read(now.key, now.what, now, 'voice');
+      quiet();
+      unlocked = true;
+      voice.speak(utter(chosen ? 'This is ' + chosen.name.replace(/\s*\(.*\)\s*$/, '') + '.' : "This is the phone's own voice."));
     });
     document.getElementById('speak-switch').hidden = false;
     speakOn = remembered();
