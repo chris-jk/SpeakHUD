@@ -2850,6 +2850,10 @@ final class LiveDictation: @unchecked Sendable {
 
     var text: String { (settled + guess).trimmingCharacters(in: .whitespacesAndNewlines) }
 
+    /// Whether this dictation is holding a transcriber open. One that has ended must
+    /// not be, whenever it was ended (tests/EarTests.swift).
+    var isOpen: Bool { analyzer != nil || feed != nil || results != nil }
+
     /// Feed it `sound`; `done` gets the words so far, or, for the `last` piece, the words
     /// as they finally stand once the transcriber has heard everything.
     func take(_ sound: Data, last: Bool, done: @escaping (Result<String, Dictation.Failure>) -> Void) {
@@ -2863,8 +2867,9 @@ final class LiveDictation: @unchecked Sendable {
         Task {
             await ready?.value   // the first piece waits for the transcriber; the rest find it open
             await MainActor.run {
-                if let problem = self.problem { self.end(); return done(.failure(Dictation.Failure(problem))) }
+                // Ended first: shutting a transcriber can leave a problem of its own behind.
                 guard !self.ended else { return done(.failure(Dictation.Failure("that dictation is over"))) }
+                if let problem = self.problem { self.end(); return done(.failure(Dictation.Failure(problem))) }
                 self.samples += sound.count / 2
                 if Double(self.samples) / Double(self.rate) > Dictation.liveLongest {
                     self.end()
@@ -2890,10 +2895,7 @@ final class LiveDictation: @unchecked Sendable {
             let analyzer = SpeechAnalyzer(modules: [transcriber])
             let (stream, feed) = AsyncStream<AnalyzerInput>.makeStream()
             try await analyzer.start(inputSequence: stream)
-            await MainActor.run {
-                (self.analyzer, self.feed, self.converter, self.from, self.to) = (analyzer, feed, converter, from, to)
-            }
-            results = Task {
+            let results = Task {
                 do {
                     for try await result in transcriber.results {
                         let piece = String(result.text.characters), final = result.isFinal
@@ -2905,6 +2907,19 @@ final class LiveDictation: @unchecked Sendable {
                     let why = error.localizedDescription
                     await MainActor.run { self.problem = self.problem ?? why }
                 }
+            }
+            // On the main thread, where end() runs. A dictation ended while all this was
+            // being readied found nothing open to shut, so what was started is shut here.
+            let kept = await MainActor.run { () -> Bool in
+                guard !self.ended else { return false }
+                (self.analyzer, self.feed, self.results) = (analyzer, feed, results)
+                (self.converter, self.from, self.to) = (converter, from, to)
+                return true
+            }
+            if !kept {
+                feed.finish()
+                results.cancel()
+                await analyzer.cancelAndFinishNow()
             }
         } catch {
             let why = (error as? MicEar.Failure)?.why ?? error.localizedDescription
@@ -2938,13 +2953,15 @@ final class LiveDictation: @unchecked Sendable {
             await results?.value
             let trouble = failure
             await MainActor.run {
+                (self.analyzer, self.feed, self.results) = (nil, nil, nil)   // finished: nothing is open now
                 if let why = trouble ?? self.problem { done(.failure(Dictation.Failure(why))) } else { done(.success(self.text)) }
             }
         }
     }
 
     /// Stop hearing it, with nothing more to say: a new dictation has begun, or the page
-    /// went quiet.
+    /// went quiet. If its transcriber is still being readied there's nothing to shut
+    /// yet: `open` sees that it has ended and shuts what it started.
     func end() {
         guard !ended else { return }
         ended = true
@@ -2952,6 +2969,7 @@ final class LiveDictation: @unchecked Sendable {
         feed?.finish()
         results?.cancel()
         if let analyzer = analyzer { Task { await analyzer.cancelAndFinishNow() } }
+        (analyzer, feed, results) = (nil, nil, nil)
     }
 }
 

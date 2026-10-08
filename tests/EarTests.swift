@@ -207,6 +207,35 @@ let earSuite = Suite("Ear") { t in
                      "and before it, the words came as they were said (\(answers.dropLast()))")
         }
 
+        // A dictation ended while its transcriber is still being readied (a new one has
+        // begun: start-up's warm-up followed at once by a real one is one way there).
+        // Nothing was open yet for the ending to shut, so the opening has to notice.
+        do {
+            let early = LiveDictation(id: "eartest-early", rate: 16_000)
+            var answer: Result<String, Dictation.Failure>?
+            early.take(Data(count: 3_200), last: false) { answer = $0 }
+            early.end()
+            spin(40) { answer != nil }   // its piece is answered once the opening is over, one way or the other
+            t.expect(answer == .failure(Dictation.Failure("that dictation is over")),
+                     "a piece sent to a dictation that has ended is told so (\(String(describing: answer)))")
+            t.expect(!early.isOpen, "and the opening it was in the middle of leaves no transcriber running")
+
+            let kept = LiveDictation(id: "eartest-kept", rate: 16_000)
+            var first: Result<String, Dictation.Failure>?
+            kept.take(Data(count: 3_200), last: false) { first = $0 }
+            spin(40) { first != nil }
+            t.expect(first == .success("") && kept.isOpen, "one still being said keeps its transcriber open (\(String(describing: first)))")
+            kept.end()
+            t.expect(!kept.isOpen, "and has let go of it once it's ended")
+
+            let whole = LiveDictation(id: "eartest-whole", rate: 16_000)
+            var last: Result<String, Dictation.Failure>?
+            whole.take(Data(count: 3_200), last: true) { last = $0 }
+            spin(40) { last != nil }
+            t.expect(last == .success("") && !whole.isOpen, "nor is one that ran to its last piece (\(String(describing: last)))")
+            spin(0.2) { false }   // let the transcriber's own shutdown land
+        }
+
         var refused: Result<String, Dictation.Failure>?
         Dictation.transcriber?(Data("RIFF....WAVEnot really a recording at all".utf8) + Data(count: 4_000)) { refused = $0 }
         spin(20) { refused != nil }
