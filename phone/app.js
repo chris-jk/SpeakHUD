@@ -3,6 +3,9 @@
 // are typing is never wiped. Turn text only ever goes in as text, never as markup.
 // Pictures, video and sound a turn made come from the Mac too, and show under the turn.
 // With Read aloud on, the phone's own voice reads turns as they arrive.
+// One script, two things in it: the Reader, which is everything about what the voice
+// is reading, and after it the page, which draws, asks the Mac, and tells the Reader
+// what happened. tests/page runs both as they are, in a stand-in browser.
 'use strict';
 
 // -- the Reader ----------------------------------------------------------------
@@ -101,8 +104,8 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
   // after a pause, or a change of speed or voice (a voice can't change either
   // mid-sentence). `why` is what asked for it, for the log.
   function start(key, what, from, why) {
-    const parts = from ? from.parts : (can ? page.parts(key, what) : null);
-    if (!can || !parts) return next();
+    const parts = can && (from ? from.parts : page.parts(key, what));
+    if (!parts) return next();
     quiet();
     const mine = ++readId;
     const first = from ? from.at : 0;

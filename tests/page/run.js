@@ -5,7 +5,7 @@
 //   node tests/page/run.js stall      only those with "stall" in the name
 'use strict';
 const assert = require('assert');
-const { makeWorld, turn, speaks, mute, hangs } = require('./browser.js');
+const { makeWorld, makeClock, makeVoice, Utterance, turn, speaks, mute, hangs } = require('./browser.js');
 
 const scenarios = [];
 const scenario = (name, run) => scenarios.push({ name, run });
@@ -557,6 +557,167 @@ scenario('the mic by an answer box puts what the Mac heard in the box', async ()
   assert.strictEqual(answerBox(w, 'a').value, 'hello there');
   assert.strictEqual(mic.classList.contains('is-listening'), false);
   assert.deepStrictEqual([w.mic.opened, w.mic.stopped], [1, 1]);
+});
+
+// -- the Reader by itself ------------------------------------------------------
+// The page's Reader, made again with nothing of the page around it: a voice and a clock
+// of the test's own in place of the phone's, and for a page a table of what to say.
+// What the scenarios above check through taps and polls, these check through the
+// Reader's own calls.
+
+async function rig(opts = {}) {
+  const base = await open([]);                // only to be handed the page's own Reader
+  const errors = [];
+  opened.push({ errors });
+  const caught = (e) => errors.push(e);
+  const clock = makeClock({ caught });
+  const voice = opts.noVoice ? undefined : makeVoice(clock, { caught, manner: opts.manner });
+  const r = { clock, voice, hidden: false, says: opts.says || {}, drawn: [], reports: [] };
+  r.reader = base.Reader({
+    voice, Utterance, clock,
+    page: {
+      parts: (key) => (r.says[key] ? [{ say: key + '.' }].concat(r.says[key].map((say) => ({ say }))) : null),
+      hidden: () => r.hidden,
+      started: (part) => r.drawn.push(part.say),
+      word: (part, index) => r.drawn.push(index),
+      cleared: () => r.drawn.push('clear'),
+      changed: () => {},
+    },
+    report: (told) => r.reports.push(told),
+    lang: 'en-US', speed: 1, aloud: !!opts.aloud,
+  });
+  r.state = () => ({ ...r.reader.state() });
+  r.spoken = () => voice.texts().filter((t) => t.trim());   // without the silent word that lets a page speak
+  return r;
+}
+const ARRIVAL = ['turn', 'arrival'];
+
+scenario('Reader: reads a window part by part, with a voice and a clock that are not the phone\'s', async () => {
+  const r = await rig({ says: { a: ['First.', 'Second.'] }, manner: speaks({ perWord: 100 }) });
+  r.reader.read('a');
+  assert.deepStrictEqual(r.state(), { reading: 'a', paused: null, aloud: false, unlocked: true, speed: 1 });
+  await r.clock.advance(3000);
+  assert.deepStrictEqual(r.voice.texts(), ['a.', 'First.', 'Second.']);
+  assert.deepStrictEqual(r.drawn, ['clear', 'a.', 0, 'First.', 0, 'Second.', 0, 'clear']);
+  assert.deepStrictEqual(r.reports.map((t) => [t.parts, t.words, t.end, t.why, t.speed, t.voice]), [[3, 3, 'finished', 'tap', 1, 'own']]);
+  assert.strictEqual(r.state().reading, null);
+});
+
+scenario('Reader: the page hears of each word as the voice gets to it, and of nothing from a reading that was stopped', async () => {
+  const r = await rig({ says: { a: ['one two three.'] }, manner: speaks({ perWord: 100 }) });
+  r.reader.read('a');
+  await r.clock.advance(300);                 // the name, then "one", "two"
+  assert.deepStrictEqual(r.drawn, ['clear', 'a.', 0, 'one two three.', 0, 4]);
+  const dropped = r.voice.said[1];
+  r.reader.stop();
+  dropped.onboundary({ name: 'word', charIndex: 8, charLength: 5 });   // a phone can still report on what it was told to drop
+  dropped.onend({});
+  await r.clock.advance(1000);
+  assert.deepStrictEqual(r.drawn, ['clear', 'a.', 0, 'one two three.', 0, 4, 'clear']);
+  assert.deepStrictEqual(r.voice.texts(), ['a.', 'one two three.']);
+});
+
+scenario('Reader: turns are read as they arrive only with the switch on, after a tap, on a page someone is looking at', async () => {
+  const r = await rig({ says: { a: ['Alpha.'], b: ['Bee.'], c: ['See.'] }, aloud: true });
+  r.reader.arrived('a', ...ARRIVAL);          // no tap yet in this visit
+  assert.strictEqual(r.reader.tapped(), true);
+  assert.strictEqual(r.reader.tapped(), false);   // only the first is news
+  r.hidden = true;
+  r.reader.arrived('a', ...ARRIVAL);          // nobody is looking
+  r.hidden = false;
+  await r.clock.advance(1000);
+  assert.deepStrictEqual(r.spoken(), []);
+
+  r.reader.arrived('a', ...ARRIVAL);
+  r.reader.arrived('b', ...ARRIVAL);
+  r.reader.arrived('b', ...ARRIVAL);          // told of twice, it waits once
+  r.reader.arrived('c', ...ARRIVAL);
+  await r.clock.advance(5000);
+  assert.deepStrictEqual(r.spoken(), ['a.', 'Alpha.', 'b.', 'Bee.', 'c.', 'See.']);
+
+  r.reader.setAloud(false);
+  r.reader.arrived('a', ...ARRIVAL);
+  await r.clock.advance(1000);
+  assert.strictEqual(r.spoken().length, 6);
+});
+
+scenario('Reader: Stop also drops what was waiting, and nothing is read over a pause of your own', async () => {
+  const r = await rig({ says: { a: ['one two three four.'], b: ['Bee.'], c: ['See.'] }, aloud: true, manner: speaks({ perWord: 100 }) });
+  r.reader.read('a');
+  r.reader.arrived('b', ...ARRIVAL);          // waits behind a
+  await r.clock.advance(300);
+  r.reader.stop();
+  assert.strictEqual(r.state().reading, null);
+  await r.clock.advance(5000);
+  r.reader.arrived('c', ...ARRIVAL);          // the next thing to be read is not followed by what Stop dropped
+  await r.clock.advance(5000);
+  assert.deepStrictEqual(r.voice.texts(), ['a.', 'one two three four.', 'c.', 'See.']);
+
+  r.reader.read('a');
+  await r.clock.advance(300);                 // as far as "two"
+  r.reader.pause();
+  assert.strictEqual(r.state().paused, 'a');
+  r.reader.arrived('b', ...ARRIVAL);          // not read over the pause, and not kept for later
+  await r.clock.advance(5000);
+  r.reader.resume();
+  await r.clock.advance(5000);
+  assert.deepStrictEqual(r.voice.texts().slice(4), ['a.', 'one two three four.', 'two three four.']);
+  assert.deepStrictEqual(r.reports.map((t) => t.end), ['stopped', 'finished', 'paused', 'finished']);
+});
+
+scenario('Reader: leaving the page keeps the place and lets go of what was waiting', async () => {
+  const r = await rig({ says: { a: ['one two three four.'], b: ['Bee.'] }, aloud: true, manner: speaks({ perWord: 100 }) });
+  r.reader.read('a');
+  r.reader.arrived('b', ...ARRIVAL);          // waits behind a
+  await r.clock.advance(300);                 // as far as "two"
+  r.hidden = true;
+  r.reader.left();
+  assert.deepStrictEqual([r.state().reading, r.state().paused, r.voice.speaking], [null, 'a', false]);
+  r.hidden = false;
+  r.reader.resume();
+  await r.clock.advance(5000);
+  assert.deepStrictEqual(r.voice.texts(), ['a.', 'one two three four.', 'two three four.']);
+  assert.deepStrictEqual(r.reports.map((t) => t.end), ['hidden', 'finished']);
+});
+
+scenario('Reader: a new speed or voice is heard at once from the same word, and is one reading in the log', async () => {
+  const r = await rig({ says: { a: ['one two three four five six.'] }, manner: speaks({ perWord: 100 }) });
+  const daniel = { name: 'Daniel (Enhanced)', lang: 'en-GB', voiceURI: 'daniel' };
+  const last = () => r.voice.said[r.voice.said.length - 1];
+  r.reader.setVoice(daniel);                  // as remembered from a last visit: nothing is said
+  assert.deepStrictEqual(r.voice.texts(), []);
+  r.reader.read('a');
+  await r.clock.advance(400);                 // as far as "three"
+  r.reader.setSpeed(1.5);
+  assert.deepStrictEqual([last().text, last().rate, last().voice.name, last().lang], ['three four five six.', 1.5, 'Daniel (Enhanced)', 'en-GB']);
+  await r.clock.advance(150);                 // on to "four"
+  r.reader.setVoice(null, true);
+  assert.deepStrictEqual([last().text, last().rate, last().voice, last().lang], ['four five six.', 1.5, undefined, 'en-US']);
+  await r.clock.advance(3000);
+  assert.deepStrictEqual(r.reports.map((t) => [t.why, t.end, t.speed, t.voice]), [['tap', 'finished', 1, 'Daniel (Enhanced)']]);
+
+  r.reader.setVoice(daniel, true);            // with nothing being read, it says who it is
+  assert.strictEqual(last().text, 'This is Daniel.');
+});
+
+scenario('Reader: with no voice to speak with, it reads nothing and nothing trips', async () => {
+  const r = await rig({ says: { a: ['Alpha.'] }, aloud: true, noVoice: true });
+  assert.strictEqual(r.reader.tapped(), false);
+  r.reader.read('a');
+  r.reader.arrived('a', ...ARRIVAL);
+  r.reader.setAloud(true);
+  r.reader.setVoice(null, true);
+  r.reader.setSpeed(2);
+  r.reader.micOpened();
+  r.reader.micClosed();
+  r.reader.pause();
+  r.reader.resume();
+  r.reader.left();
+  r.reader.textChanged('a');
+  r.reader.windowGone('a');
+  r.reader.stop();
+  await r.clock.advance(5000);
+  assert.deepStrictEqual([r.state().reading, r.state().paused, r.reports.length], [null, null, 0]);
 });
 
 // -- run them ------------------------------------------------------------------

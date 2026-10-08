@@ -8,6 +8,8 @@
 //     its `manner` says: a healthy voice, one that never starts, one that goes quiet;
 //   - the Mac (`fetch`) answers /api/state from `mac.state` and anything else from
 //     `mac.routes`, and records every request.
+// The clock and the voice can also be made by themselves (makeClock, makeVoice), to be
+// handed straight to the page's Reader in place of the phone's own.
 // It knows nothing about what the page should do: that's run.js.
 'use strict';
 const fs = require('fs');
@@ -33,27 +35,109 @@ const mute = () => () => ({ drop: true });
 // It starts, reports `words` words, then goes quiet for good while still saying it's speaking.
 const hangs = ({ start = 10, words = 0, perWord = 50 } = {}) => () => ({ start, perWord, words, never: true });
 
-function makeWorld(opts = {}) {
-  const world = { errors: [], logged: [], scrolledTo: [] };
-  const caught = (e) => { world.errors.push(e); };
-  // Run something of the page's, keeping what it throws (now or when its promise settles).
-  const guard = (fn, ...args) => {
-    try {
-      const r = fn(...args);
-      if (r && typeof r.catch === 'function') r.catch(caught);
-    } catch (e) { caught(e); }
-  };
+// Run something of the page's, handing what it throws (now, or when its promise
+// settles) to `caught`.
+const guarded = (caught) => (fn, ...args) => {
+  try {
+    const r = fn(...args);
+    if (r && typeof r.catch === 'function') r.catch(caught);
+  } catch (e) { caught(e); }
+};
 
-  // ---- the clock ----
+// -- a clock moved by hand -------------------------------------------------------
+// Time stands still until `advance(ms)`, which runs each timer at the moment it falls
+// due. `settle` lets whatever a timer set going come to rest before the next one.
+function makeClock({ caught, settle = async () => {} }) {
+  const guard = guarded(caught);
   let t = 1_700_000_000_000;
   let seq = 0;
   const timers = new Map();
-  const clock = {
+  const clear = (id) => { timers.delete(id); };
+  return {
     now: () => t,
     setTimeout: (fn, ms = 0) => { const id = ++seq; timers.set(id, { fn, at: t + Math.max(0, ms || 0), every: 0 }); return id; },
     setInterval: (fn, ms) => { const id = ++seq; timers.set(id, { fn, at: t + Math.max(1, ms || 0), every: Math.max(1, ms || 0) }); return id; },
-    clear: (id) => { timers.delete(id); },
+    clearTimeout: clear,
+    clearInterval: clear,
+    async advance(ms) {
+      const end = t + ms;
+      await settle();
+      for (let runs = 0; ; runs++) {
+        if (runs > 200000) throw new Error('the page never stops setting timers');
+        let due = null;
+        for (const [id, x] of timers) if (x.at <= end && (!due || x.at < due.x.at)) due = { id, x };
+        if (!due) break;
+        t = Math.max(t, due.x.at);
+        if (due.x.every) due.x.at += due.x.every; else timers.delete(due.id);
+        guard(due.x.fn);
+        await settle();
+      }
+      t = end;
+      await settle();
+    },
   };
+}
+
+// -- a voice that makes no sound -------------------------------------------------
+// It has the shape of a phone's speechSynthesis. It records what it was handed
+// (`said`, `texts()`), and plays the part its `manner` says on the clock it's given:
+// start, word and end are told to the utterance's own handlers, as a phone tells them.
+class Utterance {
+  constructor(text) { this.text = String(text); this.rate = 1; this.volume = 1; }
+}
+function makeVoice(clock, { caught, manner = speaks(), voices = [] }) {
+  const guard = guarded(caught);
+  const said = [];       // everything handed to the voice, in order
+  const waiting = [];    // handed over and not begun
+  let current = null;    // { u, timers } being said
+  const tell = (u, kind, more) => { const fn = u['on' + kind]; if (fn) guard(fn, Object.assign({ type: kind, utterance: u }, more)); };
+  function begin() {
+    while (!current && waiting.length) {
+      const u = waiting.shift();
+      const plan = voice.manner(u);
+      if (plan.drop) continue;
+      const mine = current = { u, timers: [] };
+      const at = (ms, fn) => mine.timers.push(clock.setTimeout(() => { if (current === mine) fn(); }, ms));
+      at(plan.start, () => tell(u, 'start'));
+      const words = [...String(u.text).matchAll(/\S+/g)];
+      const told = plan.never ? words.slice(0, plan.words) : (plan.perWord ? words : []);
+      told.forEach((w, i) => at(plan.start + i * plan.perWord + 1, () => tell(u, 'boundary', { name: 'word', charIndex: w.index, charLength: w[0].length })));
+      if (!plan.never) {
+        at(plan.start + (plan.perWord ? words.length * plan.perWord + 1 : plan.lasts), () => {
+          current = null;
+          voice.speaking = waiting.length > 0;
+          tell(u, 'end');
+          begin();
+        });
+      }
+    }
+    voice.speaking = !!current;
+    voice.pending = !!current && waiting.length > 0;
+  }
+  const voice = {
+    speaking: false, pending: false, cancels: 0, said, manner,
+    texts: () => said.map((u) => u.text),
+    speak(u) { said.push(u); waiting.push(u); begin(); },
+    // Everything in hand is dropped; what was being said hears of it, as a phone tells it.
+    cancel() {
+      voice.cancels++;
+      const was = current;
+      current = null;
+      waiting.length = 0;
+      voice.speaking = voice.pending = false;
+      if (was) { was.timers.forEach(clock.clearTimeout); clock.setTimeout(() => tell(was.u, 'error', { error: 'canceled' }), 0); }
+    },
+    getVoices: () => voices,
+    addEventListener() {},
+  };
+  return voice;
+}
+
+function makeWorld(opts = {}) {
+  const world = { errors: [], logged: [], scrolledTo: [] };
+  const caught = (e) => { world.errors.push(e); };
+  const guard = guarded(caught);
+
   // Let everything already under way (promises, the fake Mac's answers) run to rest.
   let flying = 0;   // requests the Mac has yet to answer (not the ones held on the line)
   async function settle() {
@@ -62,23 +146,8 @@ function makeWorld(opts = {}) {
       await new Promise((r) => setImmediate(r));
     }
   }
-  // Move the clock on by `ms`, running each timer at the moment it falls due.
-  async function advance(ms) {
-    const end = t + ms;
-    await settle();
-    for (let runs = 0; ; runs++) {
-      if (runs > 200000) throw new Error('the page never stops setting timers');
-      let due = null;
-      for (const [id, x] of timers) if (x.at <= end && (!due || x.at < due.x.at)) due = { id, x };
-      if (!due) break;
-      t = Math.max(t, due.x.at);
-      if (due.x.every) due.x.at += due.x.every; else timers.delete(due.id);
-      guard(due.x.fn);
-      await settle();
-    }
-    t = end;
-    await settle();
-  }
+  const clock = makeClock({ caught, settle });
+  const advance = clock.advance;
 
   // ---- the elements ----
   class Target {
@@ -262,52 +331,7 @@ function makeWorld(opts = {}) {
   });
   document.activeElement = document.body;
 
-  // ---- the voice ----
-  const said = [];       // everything handed to the voice, in order
-  const waiting = [];    // handed over and not begun
-  let current = null;    // { u, timers } being said
-  const tell = (u, kind, more) => { const fn = u['on' + kind]; if (fn) guard(fn, Object.assign({ type: kind, utterance: u }, more)); };
-  function begin() {
-    while (!current && waiting.length) {
-      const u = waiting.shift();
-      const plan = voice.manner(u);
-      if (plan.drop) continue;
-      const mine = current = { u, timers: [] };
-      const at = (ms, fn) => mine.timers.push(clock.setTimeout(() => { if (current === mine) fn(); }, ms));
-      at(plan.start, () => tell(u, 'start'));
-      const words = [...String(u.text).matchAll(/\S+/g)];
-      const told = plan.never ? words.slice(0, plan.words) : (plan.perWord ? words : []);
-      told.forEach((w, i) => at(plan.start + i * plan.perWord + 1, () => tell(u, 'boundary', { name: 'word', charIndex: w.index, charLength: w[0].length })));
-      if (!plan.never) {
-        at(plan.start + (plan.perWord ? words.length * plan.perWord + 1 : plan.lasts), () => {
-          current = null;
-          voice.speaking = waiting.length > 0;
-          tell(u, 'end');
-          begin();
-        });
-      }
-    }
-    voice.speaking = !!current;
-    voice.pending = !!current && waiting.length > 0;
-  }
-  const voice = {
-    speaking: false, pending: false, cancels: 0, said,
-    manner: opts.manner || speaks(),
-    texts: () => said.map((u) => u.text),
-    speak(u) { said.push(u); waiting.push(u); begin(); },
-    // Everything in hand is dropped; what was being said hears of it, as a phone tells it.
-    cancel() {
-      voice.cancels++;
-      const was = current;
-      current = null;
-      waiting.length = 0;
-      voice.speaking = voice.pending = false;
-      if (was) { was.timers.forEach(clock.clear); clock.setTimeout(() => tell(was.u, 'error', { error: 'canceled' }), 0); }
-    },
-    getVoices: () => opts.voices || [],
-    addEventListener() {},
-  };
-  class Utterance { constructor(text) { this.text = String(text); this.rate = 1; this.volume = 1; } }
+  const voice = makeVoice(clock, { caught, manner: opts.manner, voices: opts.voices });
 
   // ---- the Mac ----
   const requests = [];
@@ -374,8 +398,8 @@ function makeWorld(opts = {}) {
   // ---- the page's globals: in a browser `window` is the global itself ----
   const store = new Map(Object.entries(opts.storage || {}));
   class FakeDate extends Date {
-    constructor(...a) { if (a.length) super(...a); else super(t); }
-    static now() { return t; }
+    constructor(...a) { if (a.length) super(...a); else super(clock.now()); }
+    static now() { return clock.now(); }
   }
   const sandbox = {
     document,
@@ -386,7 +410,7 @@ function makeWorld(opts = {}) {
     fetch, Range, TextEncoder, BroadcastChannel,
     Event: class { constructor(type, how) { this.type = type; this.bubbles = !!(how && how.bubbles); } },
     console: { log: (...a) => world.logged.push(a), warn: (...a) => world.logged.push(a), error: (...a) => world.logged.push(a) },
-    setTimeout: clock.setTimeout, setInterval: clock.setInterval, clearTimeout: clock.clear, clearInterval: clock.clear,
+    setTimeout: clock.setTimeout, setInterval: clock.setInterval, clearTimeout: clock.clearTimeout, clearInterval: clock.clearInterval,
     requestAnimationFrame: (fn) => clock.setTimeout(fn, 16),
     Date: FakeDate,
     speechSynthesis: opts.noVoice ? undefined : voice,
@@ -403,9 +427,11 @@ function makeWorld(opts = {}) {
   Object.assign(world, {
     document, voice, mac, mic, clock, channels, store, advance, settle,
     location: sandbox.location,
-    // Load the page: the real script, as served.
+    // Load the page: the real script, as served. Its Reader is then there to be made
+    // again by a test, with a voice and a clock of the test's own.
     async load() {
       vm.runInContext(fs.readFileSync(path.join(PHONE, 'app.js'), 'utf8'), sandbox, { filename: path.join(PHONE, 'app.js') });
+      world.Reader = sandbox.Reader;
       await settle();
     },
     $: (id) => byId[id] || null,
@@ -436,4 +462,4 @@ function makeWorld(opts = {}) {
   return world;
 }
 
-module.exports = { makeWorld, turn, speaks, mute, hangs };
+module.exports = { makeWorld, makeClock, makeVoice, Utterance, turn, speaks, mute, hangs };
