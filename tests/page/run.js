@@ -111,6 +111,19 @@ scenario('the status line reads model first, then context, and takes a colour as
   assert.strictEqual(w.win('b').querySelector('.win-status').textContent, 'a line of my own');
 });
 
+scenario('the status line puts the model first however the Mac\'s line is cut into pieces', async () => {
+  const lines = [
+    ['speakhud (main*) | Opus 5.5 | ctx:51% used', 'Opus 5.5 · context 51% · speakhud (main*)'],   // the model in a piece of its own
+    ['speakhud (main*) | Opus 5.5 ctx:51% used', 'Opus 5.5 · context 51% · speakhud (main*)'],     // or beside the context
+    ['ctx:51% used | speakhud (main*) | Sonnet 4.5', 'Sonnet 4.5 · context 51% · speakhud (main*)'],
+    ['speakhud ctx:51% | Opus 5.5', 'Opus 5.5 · context 51% · speakhud'],
+    ['speakhud (main*) | ctx:51% used', 'context 51% · speakhud (main*)'],   // no model to tell apart
+    ['notes ctx:51% | zsh', 'notes · context 51% · zsh'],               // nor here: what sits by the context leads, as before
+  ];
+  const w = await open(lines.map(([status], i) => turn('t' + i, 'Text.', { status, context: 51 })));
+  assert.deepStrictEqual(lines.map((line, i) => w.win('t' + i).querySelector('.win-status').textContent), lines.map((line) => line[1]));
+});
+
 scenario('the Mac out of reach is said on the page, and unsaid once it answers again', async () => {
   const w = await open([turn('a', 'Alpha.')]);
   w.mac.down = true;
