@@ -5285,7 +5285,7 @@ final class Phone {
             // How a reading went on the phone, for the log: numbers only, and no more
             // than these names. It is what a page's own voice did, which nothing on the
             // Mac can see.
-            let names = ["parts", "words", "sized", "backwards", "gap", "scrolls", "seconds", "speed", "voices"]
+            let names = ["parts", "words", "sized", "backwards", "gap", "scrolls", "stalls", "seconds", "speed", "voices"]
             var said = names.compactMap { name in (body[name] as? NSNumber).map { "\(name) \($0.doubleValue == $0.doubleValue.rounded() ? String($0.intValue) : String($0.doubleValue))" } }
             if let marks = body["marks"] as? Bool { said.append("marks \(marks ? "yes" : "no")") }
             if let lang = body["lang"] as? String, lang.range(of: #"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"#, options: .regularExpression) != nil {

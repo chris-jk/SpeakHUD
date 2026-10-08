@@ -247,6 +247,27 @@
     if (canSpeak && (voice.speaking || voice.pending)) voice.cancel();
   }
 
+  // A phone's voice sometimes goes quiet between one thing it was handed and the next,
+  // and never says so: the page waits at the end of a paragraph for a start that isn't
+  // coming. So the voice is handed one paragraph at a time, the next when it says it has
+  // finished, and it's watched: `pulse` is when it last gave a sign of life (a start, a
+  // word, an end), and after STALL_MS without one it's taken to have stalled.
+  const STALL_MS = 4000;
+  const STALL_TRIES = 3;
+  let pulse = 0;
+  let stalled = null;        // what to do about it, for the reading in hand
+  let watch = null;
+  const beat = () => { pulse = Date.now(); };
+  function watchOver(check) {
+    stalled = check;
+    if (!watch) watch = setInterval(() => { if (stalled) stalled(); }, 500);
+  }
+  function watchOff() {
+    stalled = null;
+    clearInterval(watch);
+    watch = null;
+  }
+
   // Read a window. `from` picks a reading up where it was, at the word it had reached:
   // after a pause, or a change of speed (a voice can't change rate mid-sentence).
   // `why` is what asked for it, for the log.
@@ -264,26 +285,75 @@
     unlocked = true;
     now = { key, what, parts, at: start, word };
     if (!heard) {
-      heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, scrolls: 0, last: -1, lastAt: 0,
+      heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, scrolls: 0, stalls: 0, last: -1, lastAt: 0,
                 speed, marks: canMark, voices: voice.getVoices ? voice.getVoices().length : 0, lang: navigator.language || '',
                 why: why || 'tap' };
     }
     // The whole turn is opened, so the words being read are there to see.
     w.el.querySelector('.win-text').classList.remove('is-clamped');
     w.el.querySelector('.win-more').hidden = true;
-    parts.slice(start).forEach((part, i) => {
-      const skip = i === 0 ? word : 0;   // picked up mid-sentence: the rest of it
+
+    const over = (end) => { watchOff(); reading = null; now = null; unmark(); tally(end); next(); };
+    let tries = 0;
+    // Hand the voice part `index`, from `skip` characters in (picked up mid-sentence).
+    const say = (index, skip) => {
+      if (mine !== readId) return;
+      if (index >= parts.length) return over('finished');
+      const part = parts[index];
       const said = utter(part.say.slice(skip));
-      said.onstart = () => { if (mine === readId) { now.at = start + i; now.word = skip; follow(part); if (heard) heard.last = skip - 1; } };
-      said.onboundary = (e) => {
-        if (mine === readId && (!e.name || e.name === 'word')) point(part, skip + (e.charIndex || 0), e.charLength || 0);
+      let done = false;
+      // This part is over, however the voice came to say so: on to the next, after the
+      // breath a phone's voice wants between two.
+      const onward = () => {
+        if (done || mine !== readId) return;
+        done = true;
+        setTimeout(() => say(index + 1, 0), 40);
       };
-      if (start + i === parts.length - 1) {
-        said.onend = () => { if (mine === readId) { reading = null; now = null; unmark(); tally('finished'); next(); } };
-        said.onerror = () => { if (mine === readId) { reading = null; now = null; unmark(); tally('error'); next(); } };
-      }
+      said.onstart = () => {
+        if (mine !== readId || done) return;
+        beat();
+        now.at = index;
+        now.word = skip;
+        follow(part);
+        if (heard) heard.last = skip - 1;
+      };
+      said.onboundary = (e) => {
+        if (mine !== readId || done) return;
+        beat();
+        if (!e.name || e.name === 'word') point(part, skip + (e.charIndex || 0), e.charLength || 0);
+      };
+      said.onend = () => { beat(); onward(); };
+      said.onerror = (e) => {
+        if (e && (e.error === 'canceled' || e.error === 'interrupted')) return;   // our own doing
+        onward();
+      };
+      now.at = index;
+      now.word = skip;
+      beat();
       voice.speak(said);
-    });
+      watchOver(() => {
+        if (mine !== readId || done || document.hidden) return;
+        const quietFor = Date.now() - pulse;
+        const idle = !voice.speaking && !voice.pending;
+        // A voice that reports its words is stalled when they stop coming. One that never
+        // does can only be told by its having nothing in hand at all.
+        // It had reached this part's last word: that part is said, and what's missing is
+        // the next one starting, so it isn't given as long.
+        const rest = part.say.slice(now.word || 0).trim();
+        const reachedEnd = (now.word || 0) > skip && !/\s/.test(rest);
+        const limit = reachedEnd ? STALL_MS / 2 : STALL_MS;
+        if (!(quietFor > limit && (idle || (heard && heard.words > 0))) && !(idle && quietFor > 1500)) return;
+        if (heard) heard.stalls++;
+        done = true;
+        if (++tries > STALL_TRIES) return over('stalled');
+        quiet();
+        // Past its last word, go on to the next part. Otherwise pick this one up from
+        // the word it had reached.
+        beat();
+        setTimeout(() => (reachedEnd ? say(index + 1, 0) : say(index, now.word || 0)), 120);
+      });
+    };
+    say(start, word);
     mark();
   }
 
@@ -295,6 +365,7 @@
   // Stop reading and forget where it was. `end` says why, for the log.
   function hush(end) {
     readId++;
+    watchOff();
     quiet();
     reading = null;
     now = null;
@@ -310,6 +381,7 @@
     if (!reading || !now) return;
     paused = { key: now.key, what: now.what, parts: now.parts, at: now.at, word: now.word || 0 };
     readId++;
+    watchOff();
     quiet();
     reading = null;
     now = null;
