@@ -222,7 +222,9 @@ What's on the page:
   [Dictation from the phone](#dictation-from-the-phone).
 - **What the turn made.** Pictures, video and sound a turn made or named show under it:
   a picture as a lighter copy (tap it for the real one), a video or a recording to play
-  right there, a PDF as its name to open. **Save** beside each one puts the file itself
+  right there, a PDF as its name to open. A tap on a picture opens the turn's pictures
+  over the page, one to a screen: swipe to the next, Save the one you're on, and the
+  phone's own back (or the ✕) closes it. **Save** beside each one puts the file itself
   on the phone: through the share sheet where the phone has one for files (on an iPhone
   that's Save Image, Save Video, Save to Files, AirDrop), as a plain download otherwise. They come straight from the Mac over your
   tailnet; nothing is uploaded anywhere. A question brings what its turn has made so

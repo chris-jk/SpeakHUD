@@ -33,7 +33,7 @@
     window.addEventListener(kind, () => { touched = Date.now(); }, { passive: true });
   }
   const typing = () => !!document.activeElement && document.activeElement.tagName === 'TEXTAREA';
-  const settled = () => !typing() && !reading && !hearing && Date.now() - touched > SETTLE_MS;
+  const settled = () => !typing() && !reading && !paused && !hearing && Date.now() - touched > SETTLE_MS;
   // The word being read is marked by a soft block that sits behind the text and glides
   // from word to word, which the browser's own text highlights can't do: those jump.
   const canMark = true;
@@ -441,8 +441,13 @@
   // One thing a turn made, as the Mac lists it: a picture (a lighter copy; a tap opens
   // the real one), a video or a recording to play here, or anything else as its name
   // to open. The Mac is asked by the turn and the file's place in it, never by a path.
+  // Where the Mac hands over a turn's file: by the turn and the file's place in it.
+  function fileAt(key, m) {
+    return '/api/file?key=' + encodeURIComponent(key) + '&i=' + m.i + '&v=' + encodeURIComponent(m.v);
+  }
+
   function piece(key, m) {
-    const src = '/api/file?key=' + encodeURIComponent(key) + '&i=' + m.i + '&v=' + encodeURIComponent(m.v);
+    const src = fileAt(key, m);
     const figure = document.createElement('figure');
     figure.className = 'media is-' + m.kind;
     const caption = document.createElement('figcaption');
@@ -475,6 +480,9 @@
       img.addEventListener('error', failed);
       img.src = src + '&w=1200';
       open.append(img);
+      // A tap opens the turn's pictures to look through, this one first. (The link
+      // itself is still there to press and hold.)
+      open.addEventListener('click', (e) => { e.preventDefault(); look2(key, m.i); });
       figure.append(open);
     } else if (m.kind === 'video' || m.kind === 'audio') {
       const player = document.createElement(m.kind);
@@ -521,6 +529,60 @@
     if (bitmap.close) bitmap.close();
     return { blob, thumb };
   }
+
+  // -- looking through a turn's pictures -----------------------------------
+  // The whole screen, one picture at a time, a swipe to the next: the strip scrolls
+  // sideways and stops on each picture by itself. The phone's own back closes it.
+  const viewer = document.getElementById('viewer');
+  const strip = document.getElementById('viewer-strip');
+  const viewerCount = document.getElementById('viewer-count');
+  const viewerSave = document.getElementById('viewer-save');
+  let viewing = null;   // { key, pics, at }
+
+  function look2(key, i) {
+    const w = shown.get(key);
+    const pics = w ? (w.turn.media || []).filter((m) => m.kind === 'image') : [];
+    if (!pics.length) return;
+    strip.replaceChildren(...pics.map((m) => {
+      const slide = document.createElement('figure');
+      const img = document.createElement('img');
+      img.alt = m.name;
+      img.decoding = 'async';
+      img.loading = 'lazy';
+      img.src = fileAt(key, m) + '&w=2400';
+      slide.append(img);
+      return slide;
+    }));
+    viewing = { key, pics, at: Math.max(0, pics.findIndex((m) => m.i === i)) };
+    viewer.hidden = false;
+    document.documentElement.classList.add('is-viewing');
+    strip.scrollLeft = viewing.at * strip.clientWidth;
+    counted();
+    history.pushState({ viewer: true }, '');
+  }
+
+  function counted() {
+    if (!viewing) return;
+    viewing.at = Math.max(0, Math.min(viewing.pics.length - 1, Math.round(strip.scrollLeft / Math.max(1, strip.clientWidth))));
+    viewerCount.textContent = viewing.pics.length > 1 ? (viewing.at + 1) + ' of ' + viewing.pics.length : '';
+  }
+
+  function shut() {
+    if (!viewing) return;
+    viewing = null;
+    viewer.hidden = true;
+    strip.replaceChildren();
+    document.documentElement.classList.remove('is-viewing');
+  }
+
+  strip.addEventListener('scroll', () => requestAnimationFrame(counted), { passive: true });
+  window.addEventListener('popstate', shut);
+  document.getElementById('viewer-close').addEventListener('click', () => history.back());
+  viewerSave.addEventListener('click', () => {
+    if (!viewing) return;
+    const m = viewing.pics[viewing.at];
+    keep(fileAt(viewing.key, m) + '&save=1', m, viewerSave);
+  });
 
   // Save a file a turn made onto the phone. Where the phone can hand a file to its share
   // sheet (on an iPhone that's where Save Image and Save Video put it in Photos, beside
