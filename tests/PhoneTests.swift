@@ -608,6 +608,20 @@ let phoneSuite = Suite("Phone") { t in
     let answered = key("2", navy)
     t.expect(!went(answered) && q.pressed.count == had && (answered["outcome"] as? String)?.contains("changed") == true && answered["state"] != nil,
              "back at Claude's prompt the question has gone: that is a box that has changed, and the page is given what's there")
+    // A key that says it was tapped on a box, in words that can't be read as one, was not
+    // tapped on no box: taken for that, Enter went into Claude's prompt.
+    had = q.pressed.count
+    let unreadable: [Any] = [[String: Any](), ["ask": "Do you want to proceed?", "rows": [["label": "Yes"], ["label": "No"]]], "a box", NSNull(),
+                             ["ask": "Do you want to proceed?", "tabs": 3, "rows": ["Yes", "No"]]]
+    let blind = unreadable.map { q.phone.respond(to: post("/api/key", ["key": "a", "press": "enter", "box": $0])) }
+    t.expect(blind.allSatisfy { $0.status == 400 } && q.pressed.count == had,
+             "a key whose box can't be read is refused outright, and nothing is pressed: at Claude's prompt Enter would have sent whatever is typed")
+    had = q.pressed.count
+    let halves: [[String: Any]] = [["asked": "Which colour for the bar?"], ["option": "Navy. Like the factory"], ["asked": 3, "option": "Navy. Like the factory"]]
+    t.expect(halves.allSatisfy { q.phone.respond(to: post("/api/key", ["key": "a", "press": "enter"].merging($0) { $1 })).status == 400 } && q.pressed.count == had,
+             "and so is one with half of a question's words, or words that aren't words")
+    had = q.pressed.count
+    t.expect(went(key("enter")) && q.pressed.count == had + 1, "a key that names no box at all is still a key under a screen with none drawn")
     let pageScript = String(decoding: fm.contents(atPath: "phone/app.js") ?? Data(), as: UTF8.self)
     t.expect(pageScript.contains("box: w.box") && pageScript.contains("body.box = w.box") && pageScript.contains("body.option = "),
              "the page's taps and keys say what they were drawn in")

@@ -4896,10 +4896,13 @@ struct TerminalBox: Equatable {
 
         init(ask: String, tabs: String? = nil, rows: [String]) { (self.ask, self.tabs, self.rows) = (ask, tabs, rows) }
 
-        /// As the page sends it. Nil for anything else.
+        /// As the page sends it. Nil for anything else: a strip that is there and isn't
+        /// words is not "no strip".
         init?(json: Any?) {
             guard let o = json as? [String: Any], let ask = o["ask"] as? String, let rows = o["rows"] as? [String] else { return nil }
-            self.init(ask: ask, tabs: o["tabs"] as? String, rows: rows)
+            let tabs = o["tabs"]
+            guard tabs == nil || tabs is NSNull || tabs is String else { return nil }
+            self.init(ask: ask, tabs: tabs as? String, rows: rows)
         }
     }
 
@@ -6085,10 +6088,17 @@ final class Phone {
             // What the page had drawn when the key was tapped: a box, or the hook's
             // question with the choice this number was beside, or neither. `Reply.press`
             // looks at the pane and presses only where that still stands and takes the key.
+            // Neither is said by saying nothing. A box or a question that is there but
+            // can't be read is refused, never taken for none: Enter tapped on a box
+            // would then go into Claude's prompt.
             let tapped: Reply.Tapped
-            if let drawn = TerminalBox.Drawn(json: body["box"]) {
+            if let box = body["box"] {
+                guard let drawn = TerminalBox.Drawn(json: box) else { return .json(["error": "which box?"], status: 400) }
                 tapped = .box(drawn)
-            } else if let asked = body["asked"] as? String, let option = body["option"] as? String {
+            } else if body["asked"] != nil || body["option"] != nil {
+                guard let asked = body["asked"] as? String, let option = body["option"] as? String else {
+                    return .json(["error": "which question?"], status: 400)
+                }
                 tapped = .question(asked: asked, option: option)
             } else {
                 tapped = .noBox
