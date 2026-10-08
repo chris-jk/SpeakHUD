@@ -41,6 +41,19 @@
   let loaded = false;        // the first draw is what was already there, not news
   let wentTo = null;         // the #key already scrolled to
 
+  // One copy of the page at a time (see the foot of this file): `active` is false once
+  // a newer tab has taken over. An old copy does nothing at all. Every tap, key and
+  // form on it stops here, before anything of the page's own hears of it, except the
+  // tap on its notice, which takes the page back.
+  let active = true;
+  for (const kind of ['click', 'submit', 'change', 'input', 'keydown']) {
+    document.addEventListener(kind, (e) => {
+      if (active || e.target === trouble) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    }, true);
+  }
+
   // -- reading aloud -------------------------------------------------------
   // A phone lets a page speak only after a tap in that visit, so `unlocked` is per
   // page load while the switch itself is remembered.
@@ -51,7 +64,6 @@
   const line = [];           // [key, what] waiting their turn to be read
   let now = null;            // what's being read: { key, what, parts, at, word }
   let paused = null;         // a reading stopped with its place kept, same shape
-  let active = true;         // false once another tab of this page has taken over
   // Each tap on the speed button is the next of these; the phone's voice takes a rate.
   const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.75];
   const speedButton = document.getElementById('speed');
@@ -505,6 +517,7 @@
   }
 
   function say(problem) {
+    if (!active) return;   // an old copy of the page keeps its one notice, whatever comes back late
     trouble.textContent = problem;
     trouble.hidden = !problem;
   }
@@ -722,6 +735,7 @@
     busy = true;
     try {
       const { ok, status, data } = await call('/api/state');
+      if (!active) return;   // a newer tab took over while this was on its way
       if (status === 401) {
         say("This phone isn't paired with the Mac any more. On the Mac, open SpeakHUD's menu: Phone, Pair a Phone.");
       } else if (!ok) {
@@ -1640,23 +1654,28 @@
   });
 
   // One copy of the page at a time. Every push you tap opens another tab, and two of
-  // them reading aloud at once is no use: the newest takes over, the others go quiet
-  // and say so, and a tap on one of those takes it back.
+  // them reading aloud at once is no use, and an old one answering from windows it no
+  // longer keeps up to date is worse: the newest takes over, and the others stop. An
+  // old copy says nothing, sends nothing and asks the Mac nothing; it fades, and its
+  // one notice stays up, where a tap takes the page back.
   const tabs = 'BroadcastChannel' in window ? new BroadcastChannel('speakhud-page') : null;
   if (tabs) {
     tabs.onmessage = (e) => {
       if (!e.data || e.data.from === pageId || !active) return;
+      say('This page is open in a newer tab. Tap here to use this one instead.');
       active = false;
       line.length = 0;
-      if (reading) hush('other-tab');
-      trouble.textContent = 'This page is open in a newer tab. Tap here to use this one instead.';
-      trouble.hidden = false;
+      hush('other-tab');
+      if (hearing) finish(hearing);   // and it lets go of the mic
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      document.documentElement.classList.add('is-old');
     };
     tabs.postMessage({ from: pageId });
   }
   trouble.addEventListener('click', () => {
     if (active) return;
     active = true;
+    document.documentElement.classList.remove('is-old');
     say('');
     if (tabs) tabs.postMessage({ from: pageId });
     refresh();

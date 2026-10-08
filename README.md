@@ -252,7 +252,9 @@ What's on the page:
   of the screen. While it reads the button is **Pause**; **Resume** carries on from the
   word it had reached (leaving the page pauses it too). Start over (↻) and stop (■) sit
   beside it in the bar, and the bar stays at the top of the screen while its turn
-  scrolls under it. Only the newest open tab of the page speaks: each push you tap opens another. With the **Read aloud** switch on, turns are read as they arrive while the
+  scrolls under it. Only the newest open tab of the page speaks: each push you tap opens
+  another, and an older one fades and says so, and neither speaks nor sends anything
+  until a tap on its notice takes the page back. With the **Read aloud** switch on, turns are read as they arrive while the
   page is open; the switch is remembered, and after reopening the page one tap anywhere
   lets it speak again (phones only let a page talk after a tap). **Speed** steps through
   1×, 1.25×, 1.5×, 1.75×, 2× and 0.75×, and is remembered too. **Voice** lists the

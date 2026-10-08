@@ -332,6 +332,45 @@ scenario('a newer tab takes over: this one stops reading and says so, and a tap 
   assert.strictEqual(w.channels[0].posted.length, 2);            // and has told the other tab so
 });
 
+scenario('the newer-tab notice outlasts a poll that was already on its way', async () => {
+  const w = await open([turn('a', 'Alpha.')]);
+  const line = w.mac.hold('/api/state');
+  await w.advance(2500);                      // the next poll leaves, and hangs on the line
+  assert.strictEqual(line.waiting.length, 1);
+  await w.newerTab();
+  line.release();
+  await w.settle();
+  assert.strictEqual(w.$('trouble').hidden, false);
+  assert.match(w.$('trouble').textContent, /newer tab/);
+});
+
+scenario('an old tab does nothing, and looks it, until a tap on its notice takes it back', async () => {
+  const w = await open([turn('a', 'Alpha.')], SPEAK_ON);
+  w.mac.routes['/api/reply'] = () => ({ data: { sent: true, outcome: 'sent' } });
+  const html = w.document.documentElement;
+  await w.newerTab();
+  assert.strictEqual(html.classList.contains('is-old'), true);
+
+  await w.tap(readButton(w, 'a'));
+  await w.advance(1000);
+  assert.deepStrictEqual(w.voice.texts(), []);                   // it doesn't speak
+  await w.type(answerBox(w, 'a'), 'sent from the old tab');
+  await w.tap(w.win('a').querySelector('.win-answer button[type="submit"]'));
+  w.win('a').querySelector('.win-answer').requestSubmit();       // Enter on a keyboard
+  await w.tap(w.$('away'));
+  await w.settle();
+  assert.deepStrictEqual(w.mac.requests.filter((r) => r.method === 'POST').map((r) => r.path), []);   // or send anything
+  assert.strictEqual(w.$('away').checked, false);
+  assert.strictEqual(w.$('trouble').hidden, false);
+
+  await w.tap(w.$('trouble'));
+  assert.strictEqual(html.classList.contains('is-old'), false);
+  assert.strictEqual(w.$('trouble').hidden, true);
+  await w.tap(readButton(w, 'a'));
+  await w.advance(1000);
+  assert.deepStrictEqual(w.voice.texts().filter((t) => t.trim()), ['T-a.', 'Alpha.']);
+});
+
 // -- dictation -----------------------------------------------------------------
 
 scenario('the mic by an answer box puts what the Mac heard in the box', async () => {

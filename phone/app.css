@@ -203,6 +203,18 @@ main { margin-top: 14px; }
   font-weight: 600;
 }
 
+/* A copy of the page that a newer tab has taken over from: everything but its notice
+   fades and is out of reach, and the notice stays in view wherever the page was left,
+   since a tap on it is the one thing this copy still does. */
+html.is-old body > :not(.trouble) { opacity: 0.35; pointer-events: none; }
+html.is-old .trouble {
+  position: sticky;
+  top: calc(10px + env(safe-area-inset-top));
+  z-index: 10;
+  background: var(--win);
+  cursor: pointer;
+}
+
 .empty {
   margin: 48px 20px;
   color: var(--quiet);
