@@ -157,10 +157,12 @@
   // the Mac's log: voices differ in whether and how they report the word they're on, and
   // a reading that jumps about or cuts off can only be explained from the phone that did
   // it. `why` is what started it, `end` what ended it, `page` which open copy of this page.
+  // A reading the voice never began is told too (`parts 0`): a voice that takes what
+  // it's handed and stays silent is the failure the log most needs to show.
   const pageId = Math.random().toString(16).slice(2, 6).padEnd(4, '0');
   let heard = null;
   function tally(end) {
-    if (!heard || !heard.parts) { heard = null; return; }
+    if (!heard) return;
     const report = Object.assign({}, heard, { seconds: Math.round((Date.now() - heard.began) / 1000), end, page: pageId });
     delete report.began; delete report.last; delete report.lastAt;
     heard = null;

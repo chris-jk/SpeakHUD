@@ -206,6 +206,17 @@ scenario('a voice that goes quiet mid-paragraph is picked up from the word it ha
   assert.deepStrictEqual(heard(w).map((h) => [h.stalls, h.end]), [[1, 'finished']]);
 });
 
+scenario('a voice that never starts gives up, and the Mac\'s log is told', async () => {
+  const w = await open([turn('a', 'Alpha one.\nAlpha two.')], { manner: mute() });
+  await w.tap(readButton(w, 'a'));
+  assert.strictEqual(readButton(w, 'a').textContent, 'Pause');
+  await w.advance(30000);
+  assert.strictEqual(readButton(w, 'a').textContent, 'Read');
+  const told = heard(w);
+  assert.strictEqual(told.length, 1);
+  assert.deepStrictEqual([told[0].parts, told[0].words, told[0].end, told[0].stalls > 0], [0, 0, 'stalled', true]);
+});
+
 scenario('the speed button steps the rate, and a reading picks up at the new rate from the same word', async () => {
   const w = await open([turn('a', 'one two three four five six.')], { manner: speaks({ perWord: 100 }) });
   await w.tap(readButton(w, 'a'));
