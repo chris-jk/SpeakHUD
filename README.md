@@ -30,6 +30,10 @@ a standalone app.
   After Reading** ticked, the mic opens when a Claude Code turn has been read; what you
   say is typed into that terminal and sent when you stop. See
   [Listen After Reading](#listen-after-reading).
+- **Talk over it** (macOS 26+, off until you turn it on). With **Listen While Reading**
+  ticked, say *"skip"*, *"later"*, *"again"*, *"pause"* or *"go on"* while a turn is being
+  read. The Mac's own voice is cancelled out of the mic, so it doesn't obey itself. See
+  [Listen While Reading](#listen-while-reading).
 - **Global hotkey to read your highlighted text** from any app (default `⌃⌥S`), with
   play / pause / speed controls in the HUD. The combo is **user-configurable**.
 - **Menu-bar settings** (a small speaker icon) to read the clipboard, pick the hotkey,
@@ -100,8 +104,8 @@ its turn, and the HUD shows what's behind it:
 Off by default; tick it in the menu bar (macOS 26 or later, iTerm2). The first time, macOS
 asks for the microphone.
 
-When a Claude Code turn has been read to its end, a *tink* sounds and the mic opens for
-that turn. The HUD says who you'd be answering and shows the words as they're heard.
+When a Claude Code turn has been read to its end, the mic opens for that turn and a
+*tink* says it's listening. The HUD says who you'd be answering and shows the words as they're heard.
 
 - **Say your reply.** After a pause of 1.5 s it shows as *Sending…* for another 1.5 s (say
   more and it goes back to listening; **Skip** or `⌃⌥P` takes it back), then it's pasted
@@ -121,7 +125,8 @@ that turn. The HUD says who you'd be answering and shows the words as they're he
   key closes it (you're answering that way instead).
 
 Everything is transcribed on the Mac by the system's own transcriber (`SpeechAnalyzer`);
-no audio or text leaves it. The mic is only open between the *tink* and the reply.
+no audio or text leaves it. With only this setting on, the mic is open from the end of a
+turn to your reply and at no other time.
 
 **What it will and won't type into.** A question or permission box in Claude Code takes
 a typed digit as its answer on the spot, so a reply is never typed: it goes in as a
@@ -137,8 +142,40 @@ pasted after it and Return is left to you.
 seconds is heard as your reply. That's what the *Sending…* pause is for; keep it off
 when the room isn't yours.
 
-Not yet: commands while a turn is still being read (it would hear itself), answering a
-Claude Code question box by voice, Terminal.app.
+Not yet: answering a Claude Code question box by voice, Terminal.app.
+
+## Listen While Reading
+
+Off by default; tick it in the menu bar (macOS 26 or later). While turns are being read
+the mic is open, the status line ends in `🎙 again · later · skip · pause`, and a short
+phrase said on its own is a command. A *bottle* sound means it heard one.
+
+| Say | It does |
+| --- | --- |
+| *"skip"*, *"next"*, *"move on"* | drops this turn and reads the next |
+| *"later"*, *"not now"*, *"put it off"* | sends this turn to the back of the queue, to be read from the top then (with nothing else queued, it waits for the next turn to arrive) |
+| *"again"*, *"repeat"*, *"start over"*, *"say that again"* | reads this turn from the top |
+| *"pause"*, *"stop"*, *"wait"*, *"hold on"* | pauses; the mic stays open for a minute for… |
+| *"go on"*, *"continue"*, *"keep going"* | …carrying on from where it was |
+| *"stop everything"*, *"clear the queue"* | what the Stop button does: silence, queue thrown away |
+
+- **On its own** means with a breath (0.6 s) after it, and nothing before it but an
+  "okay" or "um": *"skip the tests"* said to someone else in the room is not a command.
+- **It doesn't obey itself.** The mic is opened with the system's voice processing, which
+  cancels whatever the Mac is playing out of what the mic hears. Tried on a MacBook's own
+  speakers and mic: with a plain mic the transcriber caught 20 of 24 words the voice said;
+  with voice processing, none, and a text made of *"Skip. Next. Later. Pause."* was read to
+  its end. As a second line of defence, a command that matches words the voice has just
+  said (or is about to) is ignored.
+- **Your dictation is left alone.** The moment another app records (Claude Code's
+  dictation key, a call), the mic shuts until it's done.
+- **Paused by key or button, the mic shuts.** Only a pause you asked for by voice keeps it
+  open, and only for a minute.
+- The mic is open the whole time something is being read, so macOS shows its orange dot
+  for that long. Nothing is recorded or kept, and it's all on the Mac. Voice processing
+  also turns other sound down a little while it's on; it's set to the least it allows.
+- Bluetooth headsets drop to call quality while their mic is open. This is for speakers,
+  or wired headphones with the Mac's own mic.
 
 ## How it picks what to read
 
@@ -251,6 +288,8 @@ The background agent shows a small **speaker icon** in the menu bar:
   mic. Turning it off releases a hold at once. Shared with the standalone reader.
 - **Listen After Reading** — off by default: answer a Claude Code turn out loud
   (see [Listen After Reading](#listen-after-reading)). Needs macOS 26.
+- **Listen While Reading** — off by default: say "skip", "later", "again", "pause" while
+  a turn is read (see [Listen While Reading](#listen-while-reading)). Needs macOS 26.
 - **Global Hotkey** — pick a preset or open the config file (a warning line appears
   here if the file is invalid).
 - **Grant Accessibility Access…** — shown only until the permission is granted.

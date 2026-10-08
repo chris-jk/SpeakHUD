@@ -33,12 +33,20 @@ final class FakeVoice: Voice {
 
 /// Records what Playback asked of the mic, and says things into it on demand.
 final class FakeEar: Ear {
-    enum Call: Equatable { case listen(Int), stop }
+    /// `listen`: opened for a reply. `attend`: opened over the voice, for commands.
+    enum Call: Equatable { case listen(Int), attend(Int), stop }
     weak var listener: Playback?
     private(set) var calls: [Call] = []
     private(set) var window = 0   // the last window opened, still the one a stale report names
+    /// A real mic takes a moment to open; tests that care set this false and call open().
+    var opensAtOnce = true
 
-    func listen(window id: Int) { calls.append(.listen(id)); window = id }
+    func listen(window id: Int, overSpeech: Bool) {
+        calls.append(overSpeech ? .attend(id) : .listen(id))
+        window = id
+        if opensAtOnce { open() }
+    }
+    func open() { listener?.earOpened(window: window) }
     func stop() { calls.append(.stop) }
 
     func take() -> [Call] { defer { calls = [] }; return calls }
@@ -64,6 +72,13 @@ final class Rig {
     var armed: Pending? { timers.last { !$0.cancelled && !$0.fired } }
     /// Let the running timer run out.
     func fire() { guard let t = armed else { return }; t.fired = true; t.work() }
+    /// …or the one running for `seconds`, when more than one is.
+    func fire(_ seconds: TimeInterval) {
+        guard let t = timers.last(where: { !$0.cancelled && !$0.fired && $0.seconds == seconds }) else { return }
+        t.fired = true
+        t.work()
+    }
+    var commands: [SpokenCommand] = []     // commands Playback said it heard
     var listened: [String] = []            // texts of the turns the mic opened for
     var replied: [Reply.Outcome] = []
     var sent: [(text: String, to: String)] = []   // what `deliver` was handed
@@ -91,6 +106,7 @@ final class Rig {
         p.onListen = { [unowned self] in self.listened.append($0.text) }
         p.onReplied = { [unowned self] in self.replied.append($0) }
         p.onEarFailed = { [unowned self] in self.earFailures.append($0) }
+        p.onCommand = { [unowned self] in self.commands.append($0) }
         p.deliver = { [unowned self] text, item in self.sent.append((text, item.source)); return self.delivery }
         p.onStart = { [unowned self] in self.shown.append($0.text) }
         p.onRanDry = { [unowned self] in self.ranDry += 1 }

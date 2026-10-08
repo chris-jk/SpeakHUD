@@ -73,6 +73,35 @@ let earSuite = Suite("Ear") { t in
     t.expect(reply.logs.contains { $0.range(of: #"^mic shut after [1-9]\d* buffers$"#, options: .regularExpression) != nil },
              "the log says how much sound arrived (\(reply.logs.last ?? ""))")
 
+    // A command while a turn is being read: the same real pieces, over a voice that
+    // (being fake) never finishes, so only the command can move things on.
+    do {
+        var failure: String?
+        if let file = recording(of: "Skip this one.", in: dir, "skip") {
+            let ear = MicEar(source: .recording(file))
+            let voice = FakeVoice()
+            let p = Playback(voice: voice, retire: { _ in }, later: { $0() }, ear: ear)
+            voice.playback = p
+            ear.listener = p
+            var heard: [SpokenCommand] = [], logs: [String] = []
+            p.onCommand = { heard.append($0) }
+            p.log = { logs.append($0) }
+            p.obeys = true
+            for (text, key) in [("the first turn", "s1"), ("the second turn", "s2")] {
+                p.enqueue(SpeechItem(text: text, source: key, key: key, created: Date()))
+            }
+            spin(40) { !heard.isEmpty || logs.contains { $0.hasPrefix("can't listen") } }
+            failure = logs.first { $0.hasPrefix("can't listen") }
+            t.expectEqual(heard, [.skip], "\"Skip this one.\", said while a turn is read, is heard as skip")
+            t.expectEqual(p.current?.text, "the second turn", "and done: the next turn is being read")
+            p.stop()
+            spin(0.2) { false }
+        } else {
+            failure = "say could not write a recording"
+        }
+        t.expect(failure == nil, "the transcriber opened for commands (\(failure ?? "no failure"))")
+    }
+
     let again = say("Say that again.", "again")
     t.expect(again.failure == nil, "…and opened a second time (\(again.failure ?? "no failure"))")
     t.expect(again.sent.isEmpty, "a command isn't sent to Claude")

@@ -268,6 +268,37 @@ let replySuite = Suite("Reply") { t in
         t.expect(p.state.heard == nil, "nothing is left on screen")
     }
 
+    do {  // a real mic takes a moment to open: your time starts when it has
+        let r = Rig(), p = r.playback!
+        r.ear.opensAtOnce = false
+        p.listens = true
+        p.enqueue(turn("a", key: "A")); p.enqueue(turn("b", key: "B"))
+        _ = r.voice.take()
+        r.voice.finish()
+        t.expectEqual(r.ear.take(), [.listen(1)], "the mic is asked for")
+        t.expectEqual(p.state.status, "🎙 Opening the mic…", "the HUD says it's opening")
+        t.expectEqual(r.listened, [], "no \"your turn\" yet")
+        t.expectEqual(r.armed?.seconds, Playback.replyWait + Playback.micOpenLimit, "only a limit on how long it may take")
+        r.ear.open()
+        t.expectEqual(r.listened, ["a"], "open: now it's your turn")
+        t.expectEqual(p.state.status, "🎙 Listening: answer A, or say nothing", "and the HUD says so")
+        t.expectEqual(r.armed?.seconds, Playback.replyWait, "with the full \(Int(Playback.replyWait))s to start")
+        r.ear.open()
+        t.expectEqual(r.listened, ["a"], "a second \"open\" is not a second turn")
+
+        let s = Rig(), q = s.playback!
+        s.ear.opensAtOnce = false
+        q.listens = true
+        q.enqueue(turn("a", key: "A")); q.enqueue(turn("b", key: "B"))
+        _ = s.voice.take()
+        s.voice.finish()
+        _ = s.ear.take()
+        s.fire()
+        t.expectEqual(s.ear.take(), [.stop], "a mic that never opens is given up on")
+        t.expectEqual(q.current?.text, "b", "and the queue moves")
+        t.expect(s.listened.isEmpty && s.sent.isEmpty, "with no turn offered and nothing sent")
+    }
+
     do {  // a reply: heard, settled, shown as sending, sent
         let r = listening("a", "b"), p = r.playback!
         _ = r.ear.take()
