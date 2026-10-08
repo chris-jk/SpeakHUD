@@ -230,6 +230,17 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
         t.expect(fm.contentsEqual(atPath: real, andPath: script.path), "its target was updated")
     }
 
+    // build.sh puts every hook script in the app's Resources, which is where an install
+    // copies them from. build.sh can't be run from a test, so this reads it.
+    let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    let build = (try? String(contentsOf: repo.appendingPathComponent("build.sh"), encoding: .utf8)) ?? ""
+    let scripts = ((try? fm.contentsOfDirectory(atPath: repo.appendingPathComponent("hook").path)) ?? [])
+        .filter { $0.hasSuffix(".py") }.sorted()
+    t.expectEqual(scripts, ["read-question.py", "read-summary.py"], "the hook scripts there are")
+    for s in scripts {
+        t.expect(build.contains("\ncp hook/\(s) \"$STAGE/Contents/Resources/\(s)\""), "build.sh bundles \(s)")
+    }
+
     // Outside a test dir the command keeps its portable ~ form.
     unsetenv("SPEAKHUD_CLAUDE_DIR")
     t.expectEqual(ClaudeHook.hookCommand, "python3 ~/.claude/read-summary.py", "default command")

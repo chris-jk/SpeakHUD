@@ -30,6 +30,7 @@ if [ ! -f AppIcon.icns ]; then
 fi
 cp AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
 cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the in-app Claude Code setup
+cp hook/read-question.py "$STAGE/Contents/Resources/read-question.py" # same: the AskUserQuestion hook
 mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in speak-hud.swift)
 cp phone/index.html phone/app.css phone/app.js phone/mic.js "$STAGE/Contents/Resources/phone/"
 

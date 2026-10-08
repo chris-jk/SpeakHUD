@@ -117,6 +117,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - [ ] Have `ClaudeHook` (--setup-claude) install read-question.py and both its hook entries, and bundle it in build.sh, so it stops being a hand install
   - Branch `fix/hook`, 10-08: a test runs read-question.py from where it is installed (`~/.claude/hooks`, read-summary.py one folder up, a throwaway home); every other test ran the repo's copy. Checked 10-08: it passes, and fails alone when the installed-location lookup is pointed elsewhere (15 python tests). Nothing in the app changed yet
   - Unticking "Read Claude Code Responses Aloud" (`ClaudeHook.remove`) now takes out the question hook's two entries with the Stop entry, and leaves other tools' hooks on every event as they were. Checked 10-08: new tests start from the shape of this Mac's `hooks` key (read that day) and fail with the fix held to the Stop entry; whole suite 1125/1125 and 15 python tests. Install and status still know only the Stop hook
+  - build.sh copies `hook/read-question.py` into the app's Resources beside read-summary.py. Checked 10-08 by a test that reads build.sh for a copy line per script in `hook/` (red before the line was added); build.sh itself was not run, so no built app has been looked inside
 - [ ] Terminal.app path is untested live (no Terminal windows open), including its copy of the 10-05 by-id fix; iTerm2 verified
 - [ ] The reveal script brings the terminal app forward even when the pane is gone (it activates before it searches)
 
