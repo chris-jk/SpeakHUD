@@ -42,11 +42,13 @@ body {
 
 /* -- top ------------------------------------------------------------------ */
 
-.top {
+.top { padding: 18px 4px 2px; }
+
+.switches {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 18px 4px 2px;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin: 12px 0 4px;
 }
 
 h1 {
@@ -56,14 +58,14 @@ h1 {
   letter-spacing: -0.02em;
 }
 
-.away {
+.switch {
   display: flex;
   align-items: center;
   gap: 10px;
   font-weight: 600;
 }
 
-.away input {
+.switch input {
   appearance: none;
   -webkit-appearance: none;
   position: relative;
@@ -74,7 +76,7 @@ h1 {
   background: var(--line);
   transition: background 0.15s;
 }
-.away input::after {
+.switch input::after {
   content: "";
   position: absolute;
   top: 3px;
@@ -86,20 +88,21 @@ h1 {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   transition: transform 0.15s;
 }
-.away input:checked { background: var(--ink); }
-.away input:checked::after { transform: translateX(20px); }
+.switch input:checked { background: var(--ink); }
+.switch input:checked::after { transform: translateX(20px); }
 @media (prefers-color-scheme: dark) {
-  .away input:checked::after { background: var(--desk); }
+  .switch input:checked::after { background: var(--desk); }
 }
 
-.away-says {
-  margin: 0 4px 14px;
+.says {
+  margin: 0 4px 6px;
   color: var(--quiet);
   font-size: 0.875rem;
 }
+main { margin-top: 14px; }
 
 .trouble {
-  margin: 0 0 12px;
+  margin: 14px 0 0;
   padding: 12px 14px;
   border: 1.5px solid var(--alarm);
   border-radius: 12px;
@@ -126,7 +129,6 @@ h1 {
 .win-bar {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: 12px;
   padding: 9px 14px;
   background: var(--frame);
@@ -144,8 +146,36 @@ h1 {
 
 .win-when {
   flex: none;
+  margin-left: auto;
   font-size: 0.8125rem;
   opacity: 0.8;
+}
+
+/* Read this turn aloud on the phone. Sits in the bar, in the bar's own ink. */
+.win-read {
+  flex: none;
+  align-self: center;
+  min-width: 56px;
+  min-height: 30px;
+  margin: -4px -6px -4px 0;
+  padding: 0 10px;
+  border: 1.5px solid currentColor;
+  border-radius: 15px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 650;
+}
+.win-read.is-reading {
+  background: var(--on-frame);
+  color: var(--frame);
+  border-color: var(--on-frame);
+}
+.win.is-working .win-read.is-reading {
+  background: var(--ink);
+  color: var(--win);
+  border-color: var(--ink);
 }
 
 /* A window whose terminal is busy with what you sent steps back: its bar thins to a
@@ -271,7 +301,7 @@ h1 {
 button:disabled { opacity: 0.45; }
 button:focus-visible,
 summary:focus-visible,
-.away input:focus-visible,
+.switch input:focus-visible,
 .win-pre:focus-visible {
   outline: 2.5px solid var(--ink);
   outline-offset: 2px;

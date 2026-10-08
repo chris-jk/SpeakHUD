@@ -1,6 +1,7 @@
 // The phone page: each terminal's last turn, an answer box for it, and the Away switch.
 // It asks the Mac for /api/state every few seconds and redraws in place, so what you
 // are typing is never wiped. Turn text only ever goes in as text, never as markup.
+// With Read aloud on, the phone's own voice reads turns as they arrive.
 'use strict';
 (() => {
   const POLL_MS = 2500;
@@ -16,9 +17,93 @@
   const trouble = document.getElementById('trouble');
   const empty = document.getElementById('empty');
 
-  const shown = new Map();   // session key -> { el, text, question }
+  const speakSwitch = document.getElementById('speak');
+  const speakSays = document.getElementById('speak-says');
+  const voice = window.speechSynthesis;
+  const canSpeak = !!voice && typeof window.SpeechSynthesisUtterance === 'function';
+
+  const shown = new Map();   // session key -> { el, turn, text, question, note }
   let busy = false;
+  let loaded = false;        // the first draw is what was already there, not news
   let wentTo = null;         // the #key already scrolled to
+
+  // -- reading aloud -------------------------------------------------------
+  // A phone lets a page speak only after a tap in that visit, so `unlocked` is per
+  // page load while the switch itself is remembered.
+  let speakOn = false;
+  let unlocked = false;
+  let reading = null;        // the key being read
+  let readId = 0;            // so a cancelled reading's end can't end the next one
+  const line = [];           // [key, what] waiting their turn to be read
+  const asked = new Map();   // key -> timer: a question's pieces settle before it's read
+
+  function remembered() { try { return localStorage.getItem('speak') === '1'; } catch (e) { return false; } }
+  function remember(on) { try { localStorage.setItem('speak', on ? '1' : '0'); } catch (e) { /* private mode */ } }
+
+  function paragraphs(text) {
+    return (text || '').split(/\n+/).map((p) => p.replace(/^\s*[-*\u2022]\s*/, '').trim()).filter(Boolean);
+  }
+
+  // What to say for a window: who it is, then its turn, its question, or both.
+  function wordsFor(turn, what) {
+    const parts = [];
+    if (what !== 'question') parts.push(turn.name + '.', ...paragraphs(turn.text));
+    if (what !== 'turn' && turn.question) {
+      parts.push(what === 'question' ? turn.name + ' is asking.' : 'It is asking.', ...paragraphs(turn.question));
+    }
+    return parts;
+  }
+
+  function mark() {
+    for (const [key, w] of shown) {
+      const button = w.el.querySelector('.win-read');
+      button.classList.toggle('is-reading', key === reading);
+      button.textContent = key === reading ? 'Stop' : 'Read';
+    }
+    speakSays.hidden = !speakOn;
+    speakSays.textContent = unlocked
+      ? 'This phone reads new turns aloud while this page is open.'
+      : 'Tap anywhere once and this phone will read new turns aloud.';
+  }
+
+  function read(key, what) {
+    const w = shown.get(key);
+    if (!canSpeak || !w || !w.turn) return next();
+    voice.cancel();
+    const mine = ++readId;
+    const parts = wordsFor(w.turn, what);
+    reading = key;
+    unlocked = true;
+    parts.forEach((part, i) => {
+      const said = new window.SpeechSynthesisUtterance(part);
+      said.lang = navigator.language || 'en-US';
+      if (i === parts.length - 1) {
+        said.onend = said.onerror = () => { if (mine === readId) { reading = null; next(); } };
+      }
+      voice.speak(said);
+    });
+    if (!parts.length) { reading = null; return next(); }
+    mark();
+  }
+
+  function next() {
+    const waiting = line.shift();
+    if (waiting) read(waiting[0], waiting[1]); else mark();
+  }
+
+  function hush() {
+    readId++;
+    if (canSpeak) voice.cancel();
+    reading = null;
+    mark();
+  }
+
+  // News for a window: read it now, or after what's being read.
+  function announce(key, what) {
+    if (!speakOn || !unlocked || document.hidden) return;
+    if (line.some((l) => l[0] === key && l[1] === what)) return;
+    if (reading) line.push([key, what]); else read(key, what);
+  }
 
   function accent(name) {
     let h = 5381n;
@@ -99,6 +184,8 @@
     }
     empty.hidden = keys.length > 0;
     goToHash();
+    loaded = true;
+    mark();
   }
 
   function build(turn) {
@@ -151,6 +238,14 @@
       }
     });
 
+    const readButton = el.querySelector('.win-read');
+    readButton.hidden = !canSpeak;
+    readButton.addEventListener('click', () => {
+      if (reading === turn.key) return hush();
+      line.length = 0;
+      read(turn.key, 'all');
+    });
+
     screen.addEventListener('toggle', () => { if (screen.open) look(turn.key); });
     el.querySelector('.win-keys').addEventListener('click', (e) => {
       const key = e.target.closest('button');
@@ -180,6 +275,7 @@
   function update(turn) {
     const w = shown.get(turn.key) || build(turn);
     const el = w.el;
+    w.turn = turn;
     const frame = /^#[0-9a-f]{6}$/i.test(turn.color || '') ? turn.color : accent(turn.name);
     el.style.setProperty('--frame', frame);
     el.style.setProperty('--on-frame', inkOn(frame));
@@ -189,17 +285,17 @@
     const text = el.querySelector('.win-text');
     const more = el.querySelector('.win-more');
     if (w.text !== turn.text) {
-      const first = w.text === null;
       w.text = turn.text;
       w.note = '';
       text.textContent = turn.text;
       text.hidden = !turn.text;
       text.classList.add('is-clamped');
       more.hidden = text.scrollHeight <= text.clientHeight + 1;
-      if (!first) {
+      if (loaded) {
         el.classList.remove('is-new');
         void el.offsetWidth;   // restart the arrival flash
         el.classList.add('is-new');
+        if (turn.text) announce(turn.key, 'turn');
       }
     }
 
@@ -223,6 +319,11 @@
         options.append(button);
       }
       el.querySelector('.win-question').textContent = said.join('\n');
+      // A question comes in two pieces a few seconds apart: read it once, whole.
+      clearTimeout(asked.get(turn.key));
+      if (turn.question && loaded) {
+        asked.set(turn.key, setTimeout(() => announce(turn.key, 'question'), 3500));
+      }
     }
     asks.hidden = !turn.question;
 
@@ -298,6 +399,37 @@
     if (!w) return;
     wentTo = key;
     w.el.scrollIntoView({ block: 'start' });
+  }
+
+  if (canSpeak) {
+    document.getElementById('speak-switch').hidden = false;
+    speakOn = remembered();
+    speakSwitch.checked = speakOn;
+    speakSwitch.addEventListener('change', () => {
+      speakOn = speakSwitch.checked;
+      remember(speakOn);
+      if (speakOn) {
+        // Said from this tap, which is also what lets the page speak from now on.
+        unlocked = true;
+        voice.speak(new window.SpeechSynthesisUtterance('Reading aloud.'));
+      } else {
+        line.length = 0;
+        hush();
+      }
+      mark();
+    });
+    // Switch left on from a last visit: the first tap anywhere lets the page speak
+    // again, and if a push brought you to a window, that's the one it reads.
+    document.addEventListener('click', (e) => {
+      if (!speakOn || unlocked || e.target === speakSwitch) return;
+      unlocked = true;
+      if (e.target.closest('.win-read')) return;   // that tap reads its own window
+      const quiet = new window.SpeechSynthesisUtterance(' ');
+      quiet.volume = 0;
+      voice.speak(quiet);
+      if (wentTo && shown.has(wentTo)) announce(wentTo, 'all');
+      mark();
+    }, true);
   }
 
   awaySwitch.addEventListener('change', async () => {

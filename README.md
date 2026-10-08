@@ -204,6 +204,11 @@ What's on the page:
   choices show as buttons; a tap presses that number in the terminal.
 - **Its screen**: the foot of the terminal as text, with keys (1 to 4, up, down, Enter,
   Esc) for anything that wants a key: a permission box, or Esc to stop a turn.
+- **Read aloud.** A **Read** button on each window has the phone read that turn in its
+  own voice. With the **Read aloud** switch on, turns are read as they arrive while the
+  page is open; the switch is remembered, and after reopening the page one tap anywhere
+  lets it speak again (phones only let a page talk after a tap). A locked phone or a
+  closed page reads nothing: that's what the push is for.
 - **Away.** On: finished turns are pushed to your phone and not read aloud, no mic opens
   for a reply nobody is there to give, and the Mac is kept from idling to sleep (the
   screen can still lock). The menu bar icon turns into a phone while it's on. Off: the
