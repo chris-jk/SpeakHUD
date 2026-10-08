@@ -3987,21 +3987,31 @@ enum ClaudeHook {
     }
     static var settingsPath: String { dir + "/settings.json" }
     static var scriptPath: String { dir + "/read-summary.py" }
+    /// The question hook goes one folder down, where it was first put by hand; from there
+    /// it finds read-summary.py in ~/.claude (tests/read_question_test.py runs it so).
+    static var hooksDir: String { dir + "/hooks" }
+    static var questionPath: String { hooksDir + "/read-question.py" }
     static var binDir: String { dir + "/bin" }
     static var binPath: String { binDir + "/speak-hud" }
 
     /// The command registered in settings.json. For the real dir it stays the portable
     /// `~` form; with SPEAKHUD_CLAUDE_DIR set it names the overridden script, so the entry
     /// and the file it runs never disagree. (read-summary.py's own fallback still looks
-    /// for ~/.claude/bin/speak-hud — the override exists for tests, which never run it.)
-    static var hookCommand: String {
-        if dir == defaultDir { return "python3 ~/.claude/read-summary.py" }
-        return "python3 '" + scriptPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    /// for ~/.claude/bin/speak-hud, and read-question.py for ~/.claude/read-summary.py:
+    /// the override exists for tests, which never run them.)
+    static var hookCommand: String { command(scriptPath, "~/.claude/read-summary.py") }
+    /// The question hook's, before AskUserQuestion; after it, the same with ` --answered`.
+    static var questionCommand: String { command(questionPath, "~/.claude/hooks/read-question.py") }
+    private static func command(_ path: String, _ portable: String) -> String {
+        if dir == defaultDir { return "python3 " + portable }
+        return "python3 '" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// read-summary.py shipped inside SpeakHUD.app. Nil when running outside the bundle
     /// (e.g. as ~/.claude/bin/speak-hud).
     static var bundledScript: URL? { Bundle.main.url(forResource: "read-summary", withExtension: "py") }
+    /// read-question.py, bundled beside it by build.sh.
+    static var bundledQuestionScript: URL? { Bundle.main.url(forResource: "read-question", withExtension: "py") }
 
     /// The file this process is running from, absolute and with symlinks resolved.
     /// argv[0] isn't good enough: it's relative when invoked via PATH or `./`.
@@ -4026,10 +4036,31 @@ enum ClaudeHook {
         return .ok(root)
     }
 
-    /// The events we own an entry on, each with the script that entry runs: the Stop hook,
-    /// and the question hook before and after AskUserQuestion (hook/read-question.py).
-    private static let owned: [(event: String, script: String)] = [
-        ("Stop", "read-summary.py"), ("PreToolUse", "read-question.py"), ("PostToolUse", "read-question.py")]
+    /// One settings.json entry of ours: the event it's on, the script it runs (which is
+    /// how an entry already there is known as ours), and the group an install adds.
+    private struct Piece {
+        let event: String, script: String
+        let group: [String: Any]
+    }
+    /// The three an install owns: the Stop hook, and the question hook before and after
+    /// AskUserQuestion. The question hook's two are written exactly as they were first
+    /// put in by hand (hook/README.md), and nothing else is ever written to settings.json.
+    private static var pieces: [Piece] {
+        func group(_ matcher: String?, _ command: String, _ more: [String: Any]) -> [String: Any] {
+            let entry = more.merging(["type": "command", "command": command]) { a, _ in a }
+            return matcher.map { ["matcher": $0, "hooks": [entry]] } ?? ["hooks": [entry]]
+        }
+        return [
+            Piece(event: "Stop", script: "read-summary.py",
+                  group: group(nil, hookCommand, ["async": true])),
+            // Async: it waits on the HUD to read the question, then its options.
+            Piece(event: "PreToolUse", script: "read-question.py",
+                  group: group("AskUserQuestion", questionCommand, ["async": true, "timeout": 600])),
+            // Not async: it only drops the question's marker.
+            Piece(event: "PostToolUse", script: "read-question.py",
+                  group: group("AskUserQuestion", questionCommand + " --answered", ["timeout": 5])),
+        ]
+    }
 
     /// The groups under one event, as written. Read loosely (`Any`), so a group or entry
     /// of a shape we don't know is carried through a rewrite instead of dropped.
@@ -4044,8 +4075,21 @@ enum ClaudeHook {
     private static func groupRuns(_ group: Any, _ script: String) -> Bool {
         ((group as? [String: Any])?["hooks"] as? [Any])?.contains(where: { runs($0, script) }) == true
     }
-    private static func stopRegistered(_ root: [String: Any]) -> Bool {
-        groups(root, "Stop").contains(where: { groupRuns($0, "read-summary.py") })
+    private static func registered(_ root: [String: Any], _ piece: Piece) -> Bool {
+        groups(root, piece.event).contains(where: { groupRuns($0, piece.script) })
+    }
+    private static func stopRegistered(_ root: [String: Any]) -> Bool { registered(root, pieces[0]) }
+    /// Why we won't add to this settings.json: `hooks`, or one of our events under it,
+    /// isn't the object or list Claude Code writes. Adding ours would mean replacing it.
+    private static func unknownShape(_ root: [String: Any]) -> String? {
+        guard let hooks = root["hooks"] else { return nil }
+        guard let events = hooks as? [String: Any] else { return "\"hooks\" in \(settingsPath) is not an object" }
+        for piece in pieces {
+            if let there = events[piece.event], !(there is [Any]) {
+                return "\"hooks.\(piece.event)\" in \(settingsPath) is not a list"
+            }
+        }
+        return nil
     }
 
     // MARK: files
@@ -4148,11 +4192,14 @@ enum ClaudeHook {
         return done.isEmpty ? "nothing to refresh" : "refreshed " + done.joined(separator: ", ")
     }
 
-    /// Install or repair all three pieces. Returns "installed", or "error: …" naming every
-    /// step that failed. Idempotent: re-running refreshes the files and leaves an existing
-    /// settings entry alone.
+    /// Install or repair every piece: both scripts, the binary, and the three settings
+    /// entries. Returns "installed", or "error: …" naming every step that failed.
+    /// Idempotent: re-running refreshes the files and leaves an existing settings entry
+    /// alone, one put in by hand included; an install that had only the Stop entry (from
+    /// before the question hook was ours) gains the other two.
     @discardableResult
-    static func install(script: URL? = bundledScript, binary: URL? = runningExecutable) -> String {
+    static func install(script: URL? = bundledScript, question: URL? = bundledQuestionScript,
+                        binary: URL? = runningExecutable) -> String {
         let fm = FileManager.default
         // Settings first: if the file can't be parsed, touch nothing at all.
         var root: [String: Any] = [:]
@@ -4161,18 +4208,25 @@ enum ClaudeHook {
         case .ok(let r): root = r
         case .missing: break
         }
-        do { try fm.createDirectory(atPath: binDir, withIntermediateDirectories: true) }
-        catch { return "error: couldn't create \(binDir): \(error.localizedDescription)" }
+        if let why = unknownShape(root) { return "error: \(why) — left it untouched" }
+        for d in [binDir, hooksDir] {
+            do { try fm.createDirectory(atPath: d, withIntermediateDirectories: true) }
+            catch { return "error: couldn't create \(d): \(error.localizedDescription)" }
+        }
 
         var problems: [String] = []
-        if let s = script {
-            if let e = placeFile(from: s.path, to: scriptPath, mode: 0o644) { problems.append("script: \(e)") }
-        } else if !fm.fileExists(atPath: scriptPath) {
-            problems.append("script: no bundled read-summary.py to install (run this from SpeakHUD.app)")
+        for (what, source, path) in [("script", script, scriptPath), ("question script", question, questionPath)] {
+            if let s = source {
+                if let e = placeFile(from: s.path, to: path, mode: 0o644) { problems.append("\(what): \(e)") }
+            } else if !fm.fileExists(atPath: path) {
+                let name = (path as NSString).lastPathComponent
+                problems.append("\(what): no bundled \(name) to install (run this from SpeakHUD.app)")
+            }
         }
-        // Registering a hook that points at nothing is the silent failure we're avoiding.
-        guard fm.fileExists(atPath: scriptPath) else {
-            return "error: " + problems.joined(separator: "; ") + " — hook not registered"
+        // Registering a hook that points at nothing is the silent failure we're avoiding,
+        // and the question hook runs on the Stop hook's code: both scripts, or neither hook.
+        guard fm.fileExists(atPath: scriptPath), fm.fileExists(atPath: questionPath) else {
+            return "error: " + problems.joined(separator: "; ") + " — hooks not registered"
         }
         if let b = binary {
             if let e = placeFile(from: b.path, to: binPath, mode: 0o755) { problems.append("binary: \(e)") }
@@ -4180,11 +4234,12 @@ enum ClaudeHook {
             problems.append("binary: couldn't locate the running executable")
         }
 
+        // Only what's missing is added, each as a group of its own after whatever is on
+        // that event; with all three there, settings.json isn't rewritten at all.
         var hooks = root["hooks"] as? [String: Any] ?? [:]
-        var stop = groups(root, "Stop")
-        if !stopRegistered(root) {
-            stop.append(["hooks": [["type": "command", "command": hookCommand, "async": true]]])
-            hooks["Stop"] = stop
+        let missing = pieces.filter { !registered(root, $0) }
+        for piece in missing { hooks[piece.event] = groups(root, piece.event) + [piece.group] }
+        if !missing.isEmpty {
             root["hooks"] = hooks
             if !write(root) { problems.append("settings: couldn't write \(settingsPath)") }
         }
@@ -4205,19 +4260,17 @@ enum ClaudeHook {
         }
         guard var hooks = root["hooks"] as? [String: Any] else { return "nothing to remove" }
         var found = false
-        for (event, script) in owned {
-            let all = groups(root, event)
-            guard all.contains(where: { groupRuns($0, script) }) else { continue }
+        for piece in pieces where registered(root, piece) {
             found = true
-            let kept: [Any] = all.compactMap { group -> Any? in
-                guard groupRuns(group, script), var g = group as? [String: Any],
+            let kept: [Any] = groups(root, piece.event).compactMap { group -> Any? in
+                guard groupRuns(group, piece.script), var g = group as? [String: Any],
                       var inner = g["hooks"] as? [Any] else { return group }
-                inner.removeAll(where: { runs($0, script) })
+                inner.removeAll(where: { runs($0, piece.script) })
                 if inner.isEmpty { return nil }
                 g["hooks"] = inner
                 return g
             }
-            if kept.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = kept }
+            if kept.isEmpty { hooks.removeValue(forKey: piece.event) } else { hooks[piece.event] = kept }
         }
         guard found else { return "nothing to remove" }
         if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
