@@ -210,8 +210,15 @@ What's on the page:
   answered blind.
 - **Working, asking, or waiting on you.** A window in full colour is waiting on you; one
   that has stepped back to a stripe says "working", and its Send becomes Queue; one
-  with a box up says "asking". Under the bar is the terminal's own status line, which
-  is where your model and context figure show if your status line has them.
+  with a box up says "asking". A working window also runs a bar down by its answer
+  buttons, where your thumb is, for as long as its terminal is at work. Under the bar
+  at the top is the terminal's own status line, which is where your model and context
+  figure show if your status line has them.
+- **What the turn made.** Pictures, video and sound a turn made or named show under it:
+  a picture as a lighter copy (tap it for the real one), a video or a recording to play
+  right there, a PDF as its name to open. They come straight from the Mac over your
+  tailnet; nothing is uploaded anywhere. A question brings what its turn has made so
+  far, so "which of these?" comes with them. See [What the turn made](#what-the-turn-made).
 - **Quick answers.** The things you always send ("Wrap up") as one-tap buttons on every
   window. Add and remove your own under **Quick answers** at the top; they're kept on
   the Mac.
@@ -263,10 +270,32 @@ Settings live in `~/.config/speakhud/phone.json` (yours alone, mode 600). Delete
 restart the agent to turn the page off; `tailscale serve --https=443 off` stops the
 tailnet carrying it.
 
+### What the turn made
+
+The hook that queues a turn looks through that turn in Claude Code's transcript, from
+the last thing you said to the end, for files of these kinds: `png jpg jpeg gif webp
+heic svg`, `mp4 m4v mov webm`, `mp3 m4a wav aac`, `pdf`. A file counts if a tool call or
+its output names it and it was written after the turn began, or if the turn's own words
+name it (then its age doesn't matter). The newest twelve go with the turn.
+
+The page never names a path. It asks the Mac for a turn's first, second, third file,
+and the Mac sends only what is on that turn's list, is still there, and is still one of
+those kinds (a link is followed, and what it leads to is what's judged). A video is sent
+in the parts the phone asks for, never read whole into memory. A picture over 300 KB
+goes as a copy no more than 1200 pixels a side; a tap on it, or on any file's name,
+opens the real file. The agent's log says what the phone was shown, by name.
+
+Not found: a file a command names only through a shell variable (`$OUT/clip.mp4`)
+whose output doesn't print the path either; a bare name with spaces in it; a file moved
+into place with its old dates. Saying the path in the turn's words always works.
+
 Limits:
 
 - A sleeping Mac answers nothing. Away holds off idle sleep, but a closed lid still
   sleeps.
+- A window shows what its last finished turn made: the next turn replaces it.
+- Whether a video plays is up to the phone: iPhones play H.264 and HEVC in `mp4` and
+  `mov`; one it can't play says so and offers its name to open or save.
 - Only iTerm2 panes can be answered, as with a spoken reply.
 - A terminal that hasn't finished a turn since SpeakHUD first saw it shows an empty
   window (its screen and the answer box still work), in a colour picked from its name

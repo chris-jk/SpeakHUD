@@ -125,6 +125,18 @@ class ReadQuestion(unittest.TestCase):
     def texts(self):
         return [h[0] for h in self.hud.heard]
 
+    def test_what_the_turn_made_goes_with_the_question(self):
+        made = os.path.join(self.tmp, "two looks.png")
+        open(made, "w").close()
+        began = datetime.fromtimestamp(time.time() - 30, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        with open(self.transcript, "a") as f:
+            f.write(json.dumps({"type": "user", "timestamp": began, "message": {"content": "two looks, then ask me"}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "cwd": self.tmp, "message": {"content": [
+                {"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": f'render "{made}"'}}]}}) + "\n")
+        self.ask(question("Which look?", ("First", ""), ("Second", "")))
+        self.assertEqual([i.get("media") for i in self.hud.items], [[made], None],
+                         "the question carries what the turn has made; its options come by themselves")
+
     def test_question_then_pause_then_options(self):
         self.ask(question("Which **method**?", ("OAuth (Recommended)", "Safer."), ("Key", "Simpler.")))
         self.assertEqual(self.texts(), ["Which method?", "1. OAuth (Recommended). Safer.\n2. Key. Simpler."])

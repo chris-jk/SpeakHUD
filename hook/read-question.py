@@ -244,6 +244,13 @@ def run(data, questions, marker, key):
         spoken.append((text, clickable, pause))
     if not spoken:
         return
+    # What the turn has made so far goes with the question: "which of these?" is no
+    # use to a phone that can't see them. (An older read-summary.py doesn't look.)
+    try:
+        named = [l["path"] for _, clickable, _ in spoken for l in clickable if "path" in l]
+        media = rs.turn_media(path, named, cwd) if hasattr(rs, "turn_media") else []
+    except Exception:
+        media = []
 
     if not rs.agent_running():
         chime()
@@ -252,10 +259,10 @@ def run(data, questions, marker, key):
 
     # Its own key: the session's Stop-hook turn must never be swapped for options
     # (the agent keeps only the newest waiting item per key).
-    ask(marker, spoken, source, key + ":question", where, cwd)
+    ask(marker, spoken, source, key + ":question", where, cwd, media)
 
 
-def ask(marker, spoken, source, key, where, cwd):
+def ask(marker, spoken, source, key, where, cwd, media=None):
     deadline = time.time() + BUDGET
     prev, queued_at = None, 0.0
     for text, clickable, pause in spoken:
@@ -279,7 +286,9 @@ def ask(marker, spoken, source, key, where, cwd):
             if marker.superseded():
                 return
         try:
-            prev = rs.enqueue(text, source, key, where, clickable, cwd)
+            # The first piece carries the media: the options follow by themselves.
+            prev = (rs.enqueue(text, source, key, where, clickable, cwd, media=media) if media and not prev
+                    else rs.enqueue(text, source, key, where, clickable, cwd))
         except OSError as e:
             print(f"speakhud: could not queue question ({e})", file=sys.stderr)
             return

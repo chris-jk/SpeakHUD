@@ -4,6 +4,7 @@
 // stand-in for iTerm2 and for the push server; then one real round trip through
 // PhoneServer on this Mac's loopback. Nothing here reaches a terminal or a network.
 import Cocoa
+import ImageIO
 
 private let fm = FileManager.default
 private let pane = Origin(term: "iTerm.app", session: "0A1B2C3D-0000-4000-8000-00000000000A", color: "#2f6f4f")
@@ -584,6 +585,153 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(quiet.pushes.isEmpty && quiet.logs.contains { $0.contains("no ntfy topic") }, "no push server set up: said in the log, nothing sent")
     t.expect(!(b.logs + quiet.logs).contains { $0.contains(token) || $0.contains("tk_secret") }, "no token is ever logged")
 
+    // -- what a turn made, shown under it ------------------------------------
+    let shots = dir + "/shots"
+    try? fm.createDirectory(atPath: shots, withIntermediateDirectories: true)
+    /// A real PNG, `side` pixels square, of noise (so it stays heavy), see-through all over if `clear`.
+    func picture(_ path: String, side: Int, clear: Bool = false) {
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        var seed: UInt32 = 12345
+        for i in pixels.indices {
+            seed = seed &* 1664525 &+ 1013904223
+            pixels[i] = clear && i % 4 == 3 ? 128 : UInt8(seed >> 24) / (clear ? 2 : 1)
+        }
+        let info: CGImageAlphaInfo = clear ? .premultipliedLast : .noneSkipLast
+        guard let context = CGContext(data: &pixels, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info.rawValue),
+              let image = context.makeImage(),
+              let to = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil)
+        else { return }
+        CGImageDestinationAddImage(to, image, nil)
+        CGImageDestinationFinalize(to)
+    }
+    picture(shots + "/big.png", side: 600)
+    picture(shots + "/cutout.png", side: 600, clear: true)
+    fm.createFile(atPath: shots + "/small.jpg", contents: Data(repeating: 7, count: 2_000))
+    let clip = Data((0..<700_000).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ ($0 >> 8)) })
+    fm.createFile(atPath: shots + "/clip one.mp4", contents: clip)
+    fm.createFile(atPath: shots + "/secret.txt", contents: Data("keys".utf8))
+    try? fm.createSymbolicLink(atPath: shots + "/sneaky.png", withDestinationPath: shots + "/secret.txt")
+    try? fm.createSymbolicLink(atPath: shots + "/alias.mp4", withDestinationPath: shots + "/clip one.mp4")
+
+    t.expectEqual(PhoneMedia.parse([shots + "/big.png", "relative.png", shots + "/secret.txt", 7, shots + "/big.png", shots + "/clip one.mp4"]),
+                  [shots + "/big.png", shots + "/clip one.mp4"],
+                  "a turn's media: absolute paths of a kind the page shows, each once")
+    t.expectEqual(PhoneMedia.parse((0..<20).map { "/x/\($0).png" }).count, PhoneMedia.limit, "and no more than the page takes")
+    t.expect(PhoneMedia.parse("nonsense").isEmpty && PhoneMedia.parse(nil).isEmpty, "anything that isn't a list is none")
+    t.expect(PhoneMedia.file(shots + "/sneaky.png") == nil, "a picture's name on a link to something else: not followed")
+    t.expect(PhoneMedia.file(shots + "/alias.mp4")?.kind == "video" && PhoneMedia.file(shots + "/alias.mp4")?.name == "clip one.mp4",
+             "a link to a video is the video")
+    t.expect(PhoneMedia.file(shots + "/gone.png") == nil && PhoneMedia.file(shots) == nil, "gone, or a folder: nothing to show")
+    t.expect(PhoneMedia.said(["/a.png", "/b.jpg"]) == "2 pictures" && PhoneMedia.said(["/a.mov"]) == "1 video"
+             && PhoneMedia.said(["/a.png", "/b.mp4", "/c.pdf"]) == "3 files" && PhoneMedia.said([]) == nil,
+             "what came with a turn, in words")
+
+    // The hook finds them, so its list of kinds and its limit are this one's.
+    let hookSource = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("hook/read-summary.py").path
+    let ask = Process(), told = Pipe()
+    ask.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    ask.arguments = ["python3", "-c", """
+        import importlib.util, json, sys
+        spec = importlib.util.spec_from_file_location("read_summary", sys.argv[1])
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        print(json.dumps({"kinds": sorted(hook.MEDIA_EXT), "limit": hook.MAX_MEDIA}))
+        """, hookSource]
+    ask.standardOutput = told
+    ask.standardError = FileHandle.nullDevice
+    try? ask.run()
+    let hooks = (try? JSONSerialization.jsonObject(with: told.fileHandleForReading.readDataToEndOfFile()) as? [String: Any]) ?? [:]
+    ask.waitUntilExit()
+    t.expectEqual(hooks["kinds"] as? [String] ?? [], PhoneMedia.types.keys.sorted(), "the hook looks for exactly the kinds the page shows")
+    t.expectEqual(hooks["limit"] as? Int ?? 0, PhoneMedia.limit, "and sends no more than the page takes")
+
+    t.expect(HTTP.range(nil, of: 10) == .whole && HTTP.range("bytes=0-", of: 10) == .part(0...9)
+             && HTTP.range("bytes=2-5", of: 10) == .part(2...5) && HTTP.range(" Bytes=2-99", of: 10) == .part(2...9),
+             "a range: none asked is the whole file, an open end runs to the last byte, an end past it is cut to it")
+    t.expect(HTTP.range("bytes=-3", of: 10) == .part(7...9) && HTTP.range("bytes=-99", of: 10) == .part(0...9),
+             "the last so many bytes")
+    t.expect(HTTP.range("bytes=10-", of: 10) == .none && HTTP.range("bytes=-0", of: 10) == .none && HTTP.range("bytes=0-", of: 0) == .none,
+             "a start past the end, or none of an empty file: nothing to send")
+    t.expect(HTTP.range("bytes=0-1,4-5", of: 10) == .whole && HTTP.range("lines=1-2", of: 10) == .whole
+             && HTTP.range("bytes=5-2", of: 10) == .whole && HTTP.range("bytes=a-b", of: 10) == .whole,
+             "a range this doesn't read gets the whole file, as a server may")
+
+    let m = Bench()
+    var three = turn("m", "Three made.")
+    three.media = [shots + "/big.png", shots + "/sneaky.png", shots + "/clip one.mp4", shots + "/small.jpg"]
+    m.phone.took(three)
+    let listed = turns(m.phone.state()).first?["media"] as? [[String: Any]] ?? []
+    t.expectEqual(listed.map { $0["i"] as? Int ?? -1 }, [0, 2, 3], "each is listed by its place in the turn's list; what isn't a file of its kind is left out")
+    t.expectEqual(listed.map { $0["kind"] as? String ?? "" }, ["image", "video", "image"], "with what the page should do with it")
+    t.expect(listed.first?["name"] as? String == "big.png" && ((listed.first?["size"] as? NSNumber)?.intValue ?? 0) > 300_000
+             && (listed.first?["v"] as? String)?.isEmpty == false && !String(describing: listed).contains(shots),
+             "by name, size and a mark that changes with the file: never by where it is on the Mac")
+
+    func file(_ i: String, key: String = "m", range: String? = nil, w: String? = nil, paired: Bool = true) -> HTTP.Response {
+        var query = ["key": key, "i": i]
+        if let w = w { query["w"] = w }
+        var r = get("/api/file", query: query, paired: paired)
+        if let range = range { r.headers["range"] = range }
+        return m.phone.respond(to: r)
+    }
+    t.expectEqual(file("2", paired: false).status, 401, "an unpaired phone gets no file")
+    let whole = file("2")
+    t.expect(whole.status == 200 && whole.type == "video/mp4" && whole.file?.offset == 0 && whole.file?.length == 700_000 && whole.body.isEmpty,
+             "a video is handed over as a file to send in pieces, never read whole")
+    let part = file("2", range: "bytes=100-199")
+    t.expect(part.status == 206 && part.file?.offset == 100 && part.file?.length == 100
+             && part.headers.contains { $0 == ("Content-Range", "bytes 100-199/700000") }, "the part a phone asks for, and where it sits in the whole")
+    let partHead = String(decoding: part.head(), as: UTF8.self)
+    t.expect(partHead.hasPrefix("HTTP/1.1 206 Partial Content\r\n") && partHead.contains("Content-Length: 100\r\n")
+             && partHead.contains("Accept-Ranges: bytes\r\n") && partHead.contains("filename*=UTF-8''clip%20one.mp4\r\n"),
+             "said as a part, by its own length and name")
+    t.expect(partHead.contains("Cache-Control: private, max-age=3600\r\n") && !partHead.contains("no-store")
+             && partHead.contains("media-src 'self'") && partHead.contains("X-Content-Type-Options: nosniff"),
+             "the phone may keep a file a while, and the page may play what comes from the Mac")
+    let past = file("2", range: "bytes=700000-")
+    t.expect(past.status == 416 && past.file == nil && past.headers.contains { $0 == ("Content-Range", "bytes */700000") },
+             "a part past the end: refused, with the real length")
+    t.expectEqual(file("1").status, 404, "the link to something else is never sent")
+    t.expect(file("9").status == 404 && file("x").status == 404 && file("-1").status == 404 && file("0", key: "nope").status == 404,
+             "a place the turn's list doesn't have, or a turn that isn't there: nothing")
+    t.expect(m.logs.contains { $0.contains("phone shown clip one.mp4 (video, 683 KB) from Grow guide replies") }
+             && !m.logs.contains { $0.contains(shots) }, "what the phone was shown is logged by name, not by path")
+
+    let lighter = file("0", w: "400")
+    let lightRep = NSBitmapImageRep(data: lighter.body)
+    t.expect(lighter.status == 200 && lighter.file == nil && lighter.type == "image/jpeg" && lighter.body.count < 300_000
+             && max(lightRep?.pixelsWide ?? 0, lightRep?.pixelsHigh ?? 0) == 400, "a heavy picture goes as a lighter copy, as wide as asked")
+    t.expect((file("0").file?.length ?? 0) > 300_000, "and whole when no width is asked: that's the tap to open it")
+    t.expect(file("3", w: "400").file?.length == 2_000, "a light picture goes as it is")
+    t.expect((NSBitmapImageRep(data: file("0", w: "99999").body)?.pixelsWide ?? 9999) <= 2400, "a silly width is cut down")
+
+    try? fm.removeItem(atPath: shots + "/small.jpg")
+    t.expect((turns(m.phone.state()).first?["media"] as? [[String: Any]])?.count == 2 && file("3").status == 404,
+             "a file deleted since is off the list, and asking for it gets nothing")
+
+    var asks = turn("m:question", "Which of these?")
+    asks.media = [shots + "/cutout.png"]
+    m.phone.took(asks)
+    t.expect(m.phone.desk.turn("m")?.media == [shots + "/cutout.png"] && m.phone.desk.turn("m")?.text == "Three made.",
+             "a question brings what its turn has made so far")
+    m.phone.took(turn("m:question", "- 1. One.\n- 2. Two."))
+    t.expectEqual(m.phone.desk.turn("m")?.media.count ?? 0, 1, "and its options, which come by themselves, don't take it away")
+    let cut = file("0", w: "400")
+    t.expect(cut.type == "image/png" && cut.file == nil && !cut.body.isEmpty, "a picture with see-through parts stays see-through when made lighter")
+    t.expectEqual(PhoneDesk(snapshot: m.phone.desk.snapshot()).turn("m")?.media ?? [], [shots + "/cutout.png"],
+                  "the list is kept across a restart of the agent")
+    m.phone.took(turn("m", "Nothing made this time."))
+    t.expect(m.phone.desk.turn("m")?.media.isEmpty == true && file("0").status == 404, "the next turn's window shows only what that turn made")
+    m.phone.setAway(true)
+    var ready = turn("m", "The clip is ready.")
+    ready.media = [shots + "/clip one.mp4"]
+    m.phone.took(ready)
+    let pushed = (try? JSONSerialization.jsonObject(with: m.pushes.last?.httpBody ?? Data()) as? [String: Any]) ?? [:]
+    t.expectEqual(pushed["title"] as? String ?? "", "Grow guide replies (1 video)", "away, the push says something came with the turn")
+    m.phone.setAway(false)
+
     // -- through the real server, on this Mac's loopback --------------------
     guard let server = try? PhoneServer(port: 0, handle: { b.phone.respond(to: $0) }) else {
         t.expect(false, "the server can listen on a free loopback port")
@@ -618,4 +766,35 @@ let phoneSuite = Suite("Phone") { t in
     let live = fetch("/api/state", cookie: "\(Phone.cookie)=\(token)")
     t.expect(live?.status == 200 && live?.body.contains("\"key\":\"a\"") == true, "and a paired one gets its terminals")
     t.expect(fetch("/", cookie: "\(Phone.cookie)=\(token)")?.status == 404, "the page route answers too (its files were taken away above)")
+
+    // A video through the real server: whole (more than two pieces of it), and in part.
+    var film = turn("film", "Rendered.")
+    film.media = [shots + "/clip one.mp4"]
+    b.phone.took(film)
+    func download(_ range: String?) -> (status: Int, range: String?, data: Data)? {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/file?key=film&i=0")!)
+        request.httpShouldHandleCookies = false
+        request.timeoutInterval = 10
+        request.setValue("\(Phone.cookie)=\(token)", forHTTPHeaderField: "Cookie")
+        if let range = range { request.setValue(range, forHTTPHeaderField: "Range") }
+        var got: (Int, String?, Data)?
+        var finished = false
+        URLSession(configuration: .ephemeral).dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse {
+                got = (http.statusCode, http.value(forHTTPHeaderField: "Content-Range"), data ?? Data())
+            }
+            finished = true
+        }.resume()
+        spin(12) { finished }
+        return got.map { (status: $0.0, range: $0.1, data: $0.2) }
+    }
+    t.expect(clip.count > 2 * PhoneServer.piece, "the test video is more than two pieces long")
+    let all = download(nil)
+    t.expect(all?.status == 200 && all?.data == clip, "over a real connection a video arrives whole and unchanged, piece by piece")
+    let some = download("bytes=300000-300099")
+    t.expect(some?.status == 206 && some?.range == "bytes 300000-300099/700000" && some?.data == clip.subdata(in: 300_000..<300_100),
+             "and the part asked for is exactly that part")
+    t.expectEqual(download("bytes=-5")?.data ?? Data(), clip.suffix(5), "down to its last few bytes")
+    try? fm.removeItem(atPath: shots + "/clip one.mp4")
+    t.expectEqual(download(nil)?.status ?? 0, 404, "a file gone by the time it's asked for: nothing")
 }

@@ -333,6 +333,59 @@ main { margin-top: 14px; }
   text-decoration: underline;
 }
 
+/* What the turn made: pictures, video and sound, straight from the Mac. One picture
+   is shown whole; several go two across, squared off, each a tap from the real one. */
+.win-media {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.win-media.is-many { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.media { margin: 0; min-width: 0; }
+.media.is-video,
+.media.is-audio,
+.media.is-file { grid-column: 1 / -1; }
+.media img,
+.media video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  border-radius: 8px;
+  background: var(--field);
+  object-fit: contain;
+}
+.media video { background: #000000; }
+.win-media.is-many .media.is-image img { aspect-ratio: 1; object-fit: cover; }
+.media audio { display: block; width: 100%; }
+.media figcaption {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 4px 0 0;
+  color: var(--quiet);
+  font-size: 0.8125rem;
+}
+.media figcaption a {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media figcaption small { flex: none; font-size: inherit; }
+.media.is-file figcaption,
+.media.is-gone figcaption {
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--field);
+  color: var(--ink);
+  font-size: 0.9375rem;
+}
+.media.is-gone > :not(figcaption) { display: none; }
+.media.is-gone figcaption { flex-wrap: wrap; }
+.media.is-gone figcaption small { flex: 1 1 100%; color: var(--quiet); }
+
 /* A question box on the Mac looks like a box here, with its choices as buttons. */
 .win-asks {
   margin: 12px 0 0;
@@ -409,6 +462,40 @@ main { margin-top: 14px; }
 .win-sent { color: var(--quiet); }
 .win-note { color: var(--alarm); font-weight: 600; }
 .win-note.is-plain { color: var(--quiet); font-weight: 400; }
+
+/* Down by the buttons: a bar that keeps moving for as long as its terminal is at work.
+   It runs end to end and back, so some of it is always in sight. */
+.win-working {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+  color: var(--quiet);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.win-working-track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--frame) 16%, var(--field));
+  overflow: hidden;
+}
+.win-working-track span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  border-radius: 4px;
+  background: var(--frame);
+  animation: working 1.1s ease-in-out infinite alternate;
+}
+@keyframes working {
+  from { transform: translateX(0); }
+  to { transform: translateX(150%); }
+}
 
 /* Quick answers: one tap sends it to this terminal. */
 .win-quick {

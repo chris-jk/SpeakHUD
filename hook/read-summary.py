@@ -12,6 +12,7 @@ Claude at once would otherwise each kill whatever was already playing. The
 SpeakHUD agent owns the one HUD and drains this queue one item at a time.
 """
 import sys, json, os, re, glob, time, subprocess, shlex, shutil, textwrap, importlib.util
+from datetime import datetime
 
 WAIT_SECONDS = 3.0      # max time to wait for the final message to be flushed
 POLL_SECONDS = 0.1
@@ -385,6 +386,152 @@ def path_target(s, cwd, loose):
         return p
     return None
 
+# -- what the phone can show -------------------------------------------------------
+# The phone page shows a turn's pictures, video and sound under it. The hook finds
+# them, since it has the transcript: a file of one of these kinds that a tool call or
+# its output names and that was written since the turn began, plus any the turn's own
+# words name. Must match PhoneMedia.types in speak-hud.swift (tests/PhoneTests.swift
+# pins both).
+MEDIA_EXT = {"png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "mp4", "m4v", "mov", "webm",
+             "mp3", "m4a", "wav", "aac", "pdf"}
+MAX_MEDIA = 12          # PhoneMedia.limit; the newest are kept
+MEDIA_END = re.compile(r"\.(?:" + "|".join(sorted(MEDIA_EXT)) + r")(?![A-Za-z0-9])", re.I)
+PATH_BEFORE = " \t\"'`=:([{<>|,;"   # what a path in a command or its output comes after
+PATH_BREAK = re.compile(r"[\s\"'`=(\[{<>|,;]")
+MEDIA_TRIES = 24        # places a path could start on its line, tried longest first
+MEDIA_SLACK = 2.0       # seconds: a file stamped just before the entry that asked for it
+MAX_BLOB = 200_000      # the tail of a tool's output that is looked through
+
+
+def media_file(raw):
+    """`raw` as an absolute path if it's a file of a kind the phone shows, else None."""
+    p = os.path.normpath(os.path.expanduser(raw))
+    if not os.path.isabs(p) or len(p) > MAX_LINK or any(ord(c) < 32 for c in p):
+        return None
+    if os.path.splitext(p)[1][1:].lower() not in MEDIA_EXT or not os.path.isfile(p):
+        return None
+    return p
+
+
+def media_in(blob, cwds):
+    """The media files `blob` (a command, a tool's output) names. A path may have spaces
+    in it, so each ending is tried from every place a path could start on its line, the
+    longest first; a bare name is looked for in `cwds`."""
+    found = []
+    for m in MEDIA_END.finditer(blob):
+        end = m.end()
+        line = blob[max(blob.rfind("\n", 0, end) + 1, end - MAX_LINK):end]
+        tries = [line[s.start():] for s in re.finditer(r"~?/", line)
+                 if s.start() == 0 or line[s.start() - 1] in PATH_BEFORE][:MEDIA_TRIES]
+        word = PATH_BREAK.split(line)[-1]
+        if word and not word.startswith(("/", "~")):
+            tries += [os.path.join(cwd, word) for cwd in cwds]
+        for raw in tries:
+            p = media_file(raw) or ("\\" in raw and media_file(raw.replace("\\", "")))
+            if p:
+                if p not in found:
+                    found.append(p)
+                break
+    return found
+
+
+def strings(value):
+    """Every string inside a tool's input, however it's nested."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from strings(v)
+
+
+def blobs(entry):
+    """The text of a transcript entry a file could be named in: what Claude wrote, what
+    it handed a tool, and what the tool said back."""
+    content = (entry.get("message") or {}).get("content")
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            yield block.get("text") or ""
+        elif kind == "tool_use":
+            yield from strings(block.get("input"))
+        elif kind == "tool_result":
+            said = block.get("content")
+            if isinstance(said, str):
+                yield said
+            for piece in said if isinstance(said, list) else []:
+                if isinstance(piece, dict) and isinstance(piece.get("text"), str):
+                    yield piece["text"]
+
+
+def typed(entry):
+    """Whether a "user" entry is something you said. A tool's result and an answer to a
+    question box are "user" entries too, and so are notes Claude Code adds by itself."""
+    if entry.get("type") != "user" or entry.get("isMeta"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, list):
+        return not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+    return isinstance(content, str)
+
+
+def turn_entries(path):
+    """(when the turn began, its entries): what's in the transcript after the last thing
+    you said. (None, []) when that can't be told."""
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return None, []
+    out = []
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if typed(entry):
+            try:
+                began = datetime.fromisoformat(str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None, []
+            return began, out[::-1]
+        out.append(entry)
+    return None, []
+
+
+def turn_media(path, named, cwd):
+    """[absolute path] of what the phone should show under this turn: the files `named`
+    in its words, and those its tool calls made or changed, oldest first. No more than
+    MAX_MEDIA, the ones it named kept before the rest."""
+    said = []
+    for raw in named:
+        p = media_file(raw)
+        if p and p not in said:
+            said.append(p)
+    began, entries = turn_entries(path) if path else (None, [])
+    made = {}
+    for entry in entries if began else []:
+        cwds = list(dict.fromkeys(c for c in (entry.get("cwd"), cwd) if c))
+        for blob in blobs(entry):
+            for p in media_in(blob[-MAX_BLOB:], cwds):
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                at = max(st.st_mtime, getattr(st, "st_birthtime", 0))
+                if at >= began - MEDIA_SLACK:
+                    made[p] = at
+    rest = [p for p in sorted(made, key=made.get) if p not in said]
+    keep = max(0, MAX_MEDIA - len(said))
+    return (rest[-keep:] if keep else []) + said[:MAX_MEDIA]
+
+
 def origin():
     """Which terminal this turn came from, so clicking the HUD's project pill can take
     you back to it: {"term", "session", "tty", "app_pid", "color"}, each only if found.
@@ -484,7 +631,7 @@ def heartbeat_fresh():
     return -HEARTBEAT_STALE < age < HEARTBEAT_STALE
 
 
-def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, reply=None):
+def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, reply=None, media=None):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
     The fields are the contract with Spool.drain in speak-hud.swift, pinned by
@@ -509,6 +656,8 @@ def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, re
             item["blocks"] = blocks
         if reply:
             item["reply"] = reply
+        if media:
+            item["media"] = media
         with open(tmp, "w") as f:
             json.dump(item, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))
@@ -602,6 +751,11 @@ def main():
     except Exception as e:  # a classification bug shouldn't cost the turn its voice
         print(f"speakhud: could not mark links ({e})", file=sys.stderr)
         clickable, shown = [], []
+    try:
+        seen = turn_media(path, [l["path"] for l in clickable if "path" in l], cwd)
+    except Exception as e:  # nor should a turn lose its voice over a picture
+        print(f"speakhud: could not look for media ({e})", file=sys.stderr)
+        seen = []
     source = source_name(path, cwd)
     # Coalesce on the session, not the project: two terminals in the same repo are
     # two independent conversations and both deserve to be heard. The transcript is
@@ -614,7 +768,7 @@ def main():
         try:
             # A turn that has ended leaves its terminal at Claude's prompt, which is
             # where a spoken answer goes. (A question from read-question.py doesn't.)
-            enqueue(text, source, key, where, clickable, cwd, shown, reply="prompt")
+            enqueue(text, source, key, where, clickable, cwd, shown, reply="prompt", media=seen)
             return
         except OSError as e:
             # A full disk or an unwritable spool shouldn't mean silence.

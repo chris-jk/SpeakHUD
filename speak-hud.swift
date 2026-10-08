@@ -5,6 +5,7 @@ import ApplicationServices
 import Carbon.HIToolbox
 import CoreAudio
 import Network
+import ImageIO
 
 // Shared prefs domain so the speed setting is the same no matter how the reader
 // was launched (double-click app, Claude Code hook, or the global hotkey).
@@ -58,6 +59,9 @@ struct SpeechItem {
     /// A finished Claude Code turn, whose terminal is back at Claude's prompt: an answer
     /// said out loud can go there (Reply). Only the Stop hook says so.
     var answerable = false
+    /// Pictures, video and sound the turn made or named, for the phone page to show
+    /// under it (PhoneMedia). Only the hook finds these.
+    var media: [String] = []
 }
 
 /// A fenced code block from the turn: never spoken, but shown where it was, with its
@@ -1098,7 +1102,8 @@ enum Spool {
                                           links: TextLink.parse(obj["links"], in: text),
                                           cwd: TextLink.absolutePath(obj["cwd"]),
                                           blocks: CodeBlock.parse(obj["blocks"], in: text),
-                                          answerable: obj["reply"] as? String == "prompt"))
+                                          answerable: obj["reply"] as? String == "prompt",
+                                          media: PhoneMedia.parse(obj["media"])))
         }
         return batch
     }
@@ -4276,6 +4281,101 @@ struct PhoneConfig: Equatable {
     var pairLink: String? { url.map { "\($0)/pair?k=\(token)" } }
 }
 
+/// Pictures, video and sound for the phone to show under a turn: files the turn made or
+/// named, found by the hook (`turn_media` in read-summary.py). The page never names a
+/// path. It asks for a turn's nth file, and only a file of these kinds is ever sent.
+enum PhoneMedia {
+    static let limit = 12   // MAX_MEDIA in the hook
+    /// By extension: what the page does with it, and what it's sent as. Must match
+    /// MEDIA_EXT in the hook (tests/PhoneTests.swift pins both).
+    static let types: [String: (kind: String, type: String)] = [
+        "png": ("image", "image/png"), "jpg": ("image", "image/jpeg"), "jpeg": ("image", "image/jpeg"),
+        "gif": ("image", "image/gif"), "webp": ("image", "image/webp"), "heic": ("image", "image/heic"),
+        "svg": ("image", "image/svg+xml"),
+        "mp4": ("video", "video/mp4"), "m4v": ("video", "video/x-m4v"), "mov": ("video", "video/quicktime"),
+        "webm": ("video", "video/webm"),
+        "mp3": ("audio", "audio/mpeg"), "m4a": ("audio", "audio/mp4"), "wav": ("audio", "audio/wav"),
+        "aac": ("audio", "audio/aac"),
+        "pdf": ("file", "application/pdf")]
+    /// A picture is sent smaller than it is, for a phone on a slow line, unless it's
+    /// already light or would lose something by it (a GIF its movement, an SVG its lines).
+    static let lightEnough: UInt64 = 300_000
+    static let keptWhole: Set<String> = ["gif", "svg"]
+    /// Not every browser draws one of these, so it always goes as the smaller copy.
+    static let alwaysRedrawn: Set<String> = ["heic"]
+
+    static func sendsSmaller(_ file: File) -> Bool {
+        let kind = ext(file.path)
+        return file.kind == "image" && !keptWhole.contains(kind) && (file.size > lightEnough || alwaysRedrawn.contains(kind))
+    }
+
+    struct File: Equatable {
+        let path: String      // where it really is, links followed
+        let size: UInt64
+        let changed: Date
+        let kind: String
+        let type: String
+        var name: String { (path as NSString).lastPathComponent }
+        /// Changes when the file does, so the phone never shows a kept copy of the last one.
+        var version: String {
+            var h: UInt64 = 0xcbf29ce484222325
+            for byte in "\(path)|\(changed.timeIntervalSince1970)|\(size)".utf8 { h = (h ^ UInt64(byte)) &* 0x100000001b3 }
+            return String(h, radix: 16)
+        }
+    }
+
+    static func ext(_ path: String) -> String { (path as NSString).pathExtension.lowercased() }
+
+    /// From the spool's `media`, or the list kept between runs: absolute paths of a kind
+    /// the page shows, no more than `limit`.
+    static func parse(_ json: Any?) -> [String] {
+        var out: [String] = []
+        for raw in json as? [Any] ?? [] {
+            guard let path = TextLink.absolutePath(raw), types[ext(path)] != nil, !out.contains(path) else { continue }
+            out.append(path)
+            if out.count == limit { break }
+        }
+        return out
+    }
+
+    /// `path` as it is now: nil once it's gone, or if it leads to anything but a file of
+    /// one of these kinds (a link is followed, and what it leads to is what's judged).
+    static func file(_ path: String) -> File? {
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard let type = types[ext(real)], let found = try? FileManager.default.attributesOfItem(atPath: real),
+              found[.type] as? FileAttributeType == .typeRegular, let size = (found[.size] as? NSNumber)?.uint64Value
+        else { return nil }
+        return File(path: real, size: size, changed: found[.modificationDate] as? Date ?? .distantPast,
+                    kind: type.kind, type: type.type)
+    }
+
+    /// The picture at `path` no more than `side` pixels a side: a JPEG, or a PNG when it
+    /// has see-through parts. nil if it can't be read as a picture.
+    static func small(_ path: String, side: Int) -> (data: Data, type: String)? {
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceCreateThumbnailWithTransform: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: side]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let opaque: [CGImageAlphaInfo] = [.none, .noneSkipFirst, .noneSkipLast]
+        let clear = !opaque.contains(image.alphaInfo)
+        let out = NSMutableData()
+        guard let to = CGImageDestinationCreateWithData(out, (clear ? "public.png" : "public.jpeg") as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(to, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        guard CGImageDestinationFinalize(to) else { return nil }
+        return (out as Data, clear ? "image/png" : "image/jpeg")
+    }
+
+    /// "2 pictures", "1 video", "3 files": what a push says came with a turn.
+    static func said(_ paths: [String]) -> String? {
+        let kinds = Set(paths.compactMap { types[ext($0)]?.kind })
+        guard !paths.isEmpty, let kind = kinds.first else { return nil }
+        let word = kinds.count > 1 ? "file" : ["image": "picture", "video": "video", "audio": "recording"][kind] ?? "file"
+        return "\(paths.count) \(word)\(paths.count == 1 ? "" : "s")"
+    }
+}
+
 /// What the page shows: the last turn of each terminal, the newest first.
 struct PhoneDesk {
     static let keep = 30
@@ -4299,6 +4399,7 @@ struct PhoneDesk {
         var busy = false             // in the middle of a turn
         var status: String? = nil    // its status line as last seen: folder, model, context
         var context: Int? = nil      // how full its context is, in percent, if the line says
+        var media: [String] = []     // pictures, video and sound that turn made or named
     }
 
     /// A terminal seen open that hasn't finished a turn since it was first seen: its key
@@ -4363,6 +4464,7 @@ struct PhoneDesk {
             if let note = t.note { o["note"] = note }
             if let status = t.status { o["status"] = status }
             if let context = t.context { o["context"] = context }
+            if !t.media.isEmpty { o["media"] = t.media }
             return o
         }
         return (try? JSONSerialization.data(withJSONObject: ["v": 1, "turns": rows])) ?? Data()
@@ -4383,6 +4485,7 @@ struct PhoneDesk {
             t.note = row["note"] as? String
             t.status = row["status"] as? String
             t.context = (row["context"] as? NSNumber)?.intValue
+            t.media = PhoneMedia.parse(row["media"])
             turns.append(t)
         }
     }
@@ -4406,8 +4509,11 @@ struct PhoneDesk {
             t.askedAt = now
             t.origin = item.origin ?? t.origin
             (t.sent, t.note) = (nil, nil)
+            // What the turn has made so far comes with its question ("which of these?").
+            if !item.media.isEmpty { t.media = item.media }
         } else {
             t = Turn(key: key, name: item.source, text: item.text, at: now, origin: item.origin)
+            t.media = item.media
             // What was last read off its pane's screen still stands.
             if let was = turns.first(where: { $0.origin?.session != nil && $0.origin?.session == item.origin?.session }) {
                 (t.status, t.context) = (was.status, was.context)
@@ -4441,8 +4547,8 @@ struct PhoneDesk {
     }
 }
 
-/// Just enough HTTP for one page and a few JSON calls: a request read whole, one
-/// response, connection closed.
+/// Just enough HTTP for one page, a few JSON calls and a file: a request read whole,
+/// one response, connection closed.
 enum HTTP {
     static let maxHead = 16 * 1024
     static let maxBody = 64 * 1024
@@ -4506,11 +4612,41 @@ enum HTTP {
         return .request(r)
     }
 
+    /// Which bytes of a file a `Range` header asks for.
+    enum Ranged: Equatable { case whole, part(ClosedRange<UInt64>), none }
+
+    /// `header` against a file of `size` bytes. No header, or one this doesn't read
+    /// (several ranges at once), is the whole file; a start past the end is `.none`.
+    static func range(_ header: String?, of size: UInt64) -> Ranged {
+        guard let h = header?.trimmingCharacters(in: .whitespaces), h.lowercased().hasPrefix("bytes="), !h.contains(",")
+        else { return .whole }
+        let ends = h.dropFirst(6).split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard ends.count == 2 else { return .whole }
+        if ends[0].isEmpty {   // "-500": the last 500 bytes
+            guard let n = UInt64(ends[1]) else { return .whole }
+            return n > 0 && size > 0 ? .part((size - min(n, size))...(size - 1)) : .none
+        }
+        guard let from = UInt64(ends[0]) else { return .whole }
+        guard from < size else { return .none }
+        if ends[1].isEmpty { return .part(from...(size - 1)) }
+        guard let to = UInt64(ends[1]), to >= from else { return .whole }
+        return .part(from...min(to, size - 1))
+    }
+
     struct Response {
+        /// Part of a file, sent in place of `body` a piece at a time (PhoneServer).
+        struct Slice: Equatable {
+            let path: String
+            let offset: UInt64
+            let length: UInt64
+        }
+
         var status = 200
         var type = "application/json"
         var headers: [(String, String)] = []
         var body = Data()
+        var file: Slice? = nil
 
         static func json(_ o: Any, status: Int = 200) -> Response {
             Response(status: status, body: (try? JSONSerialization.data(withJSONObject: o)) ?? Data("{}".utf8))
@@ -4519,21 +4655,50 @@ enum HTTP {
             Response(status: status, type: type, body: Data(s.utf8))
         }
 
-        private static let reasons = [200: "OK", 303: "See Other", 400: "Bad Request", 401: "Unauthorized",
-                                      403: "Forbidden", 404: "Not Found", 409: "Conflict"]
+        /// A file of `size` bytes, or the part of it `range` asks for: a phone only ever
+        /// asks for a video in parts. The phone may keep it for an hour; the page asks
+        /// for a changed file under a new address.
+        static func file(_ path: String, size: UInt64, type: String, range: String?) -> Response {
+            let name = (path as NSString).lastPathComponent
+                .addingPercentEncoding(withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._"))) ?? "file"
+            var r = Response(type: type, headers: [("Accept-Ranges", "bytes"), ("Cache-Control", "private, max-age=3600"),
+                                                   ("Content-Disposition", "inline; filename*=UTF-8''\(name)")])
+            switch HTTP.range(range, of: size) {
+            case .whole:
+                r.file = Slice(path: path, offset: 0, length: size)
+            case .part(let part):
+                r.status = 206
+                r.headers.append(("Content-Range", "bytes \(part.lowerBound)-\(part.upperBound)/\(size)"))
+                r.file = Slice(path: path, offset: part.lowerBound, length: part.upperBound - part.lowerBound + 1)
+            case .none:
+                r.status = 416
+                r.headers.append(("Content-Range", "bytes */\(size)"))
+            }
+            return r
+        }
 
-        /// The bytes to send. Every response says what it is, that nothing may keep or
-        /// frame it, and that the page loads nothing from anywhere else.
-        func wire() -> Data {
+        private static let reasons = [200: "OK", 206: "Partial Content", 303: "See Other", 400: "Bad Request",
+                                      401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict",
+                                      416: "Range Not Satisfiable"]
+
+        /// The status line and headers. Every response says what it is, that nothing may
+        /// frame it, that the page loads nothing from anywhere else, and (unless it says
+        /// otherwise itself) that nothing may keep it.
+        func head() -> Data {
             var head = "HTTP/1.1 \(status) \(Self.reasons[status] ?? "OK")\r\n"
-            let fixed = [("Content-Type", type), ("Content-Length", String(body.count)), ("Connection", "close"),
+            let fixed = [("Content-Type", type), ("Content-Length", String(file?.length ?? UInt64(body.count))),
+                         ("Connection", "close"),
                          ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
                          ("X-Frame-Options", "DENY"), ("Referrer-Policy", "no-referrer"),
                          ("Content-Security-Policy",
-                          "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'")]
-            for (k, v) in fixed + headers { head += "\(k): \(v)\r\n" }
-            return Data((head + "\r\n").utf8) + body
+                          "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'none'")]
+            let own = Set(headers.map { $0.0.lowercased() })
+            for (k, v) in fixed.filter({ !own.contains($0.0.lowercased()) }) + headers { head += "\(k): \(v)\r\n" }
+            return Data((head + "\r\n").utf8)
         }
+
+        /// The bytes to send, for a response with no file.
+        func wire() -> Data { head() + body }
     }
 }
 
@@ -4572,6 +4737,10 @@ final class PhoneServer {
         let giveUp = DispatchWorkItem { connection.cancel() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: giveUp)
         func answer(_ response: HTTP.Response) {
+            if let slice = response.file {
+                giveUp.cancel()
+                return Self.stream(slice, after: response.head(), over: connection)
+            }
             connection.send(content: response.wire(), completion: .contentProcessed { _ in
                 giveUp.cancel()
                 connection.cancel()
@@ -4591,6 +4760,45 @@ final class PhoneServer {
         }
         connection.start(queue: .main)
         read()
+    }
+
+    /// How much of a file is read and sent at a time, and how long one piece may take
+    /// to leave before the phone is taken to have gone.
+    static let piece = 256 * 1024
+    static let stall: TimeInterval = 30
+
+    /// Send `head`, then the slice of the file a piece at a time, each read only once
+    /// the last has left: a video is never all in memory, and a phone that stops
+    /// listening stops the reading.
+    private static func stream(_ slice: HTTP.Response.Slice, after head: Data, over connection: NWConnection) {
+        guard let file = FileHandle(forReadingAtPath: slice.path), (try? file.seek(toOffset: slice.offset)) != nil else {
+            connection.send(content: HTTP.Response.json(["error": "that file isn't there any more"], status: 404).wire(),
+                            completion: .contentProcessed { _ in connection.cancel() })
+            return
+        }
+        var left = slice.length
+        var watch = DispatchWorkItem {}
+        func finish() {
+            watch.cancel()
+            try? file.close()
+            connection.cancel()
+        }
+        func send(_ data: Data, then next: @escaping () -> Void) {
+            watch.cancel()
+            watch = DispatchWorkItem { connection.cancel() }   // the send then fails, and finishes
+            DispatchQueue.main.asyncAfter(deadline: .now() + stall, execute: watch)
+            connection.send(content: data, completion: .contentProcessed { error in
+                if error == nil { next() } else { finish() }
+            })
+        }
+        func more() {
+            // A file that has shrunk since it was measured can't keep the length promised.
+            guard left > 0, let data = try? file.read(upToCount: Int(min(UInt64(piece), left))), !data.isEmpty
+            else { return finish() }
+            left -= UInt64(data.count)
+            send(data, then: more)
+        }
+        send(head, then: more)
     }
 }
 
@@ -4723,7 +4931,9 @@ final class Phone {
         guard away, first else { return }
         let key = asking ? String(item.key.dropLast(PhoneDesk.questionSuffix.count)) : item.key
         if asking, !firstAsk(key, now) { return }   // the screen already said so
-        push(title: asking ? "\(item.source) is asking" : item.source, message: item.text, key: key, name: item.source)
+        // What came with it is said in the title: the words are cut to length.
+        let with = PhoneMedia.said(item.media).map { " (\($0))" } ?? ""
+        push(title: (asking ? "\(item.source) is asking" : item.source) + with, message: item.text, key: key, name: item.source)
     }
 
     /// `text` as a push's body: one line, cut to length.
@@ -4797,8 +5007,30 @@ final class Phone {
              "box": t.box?.json as Any? ?? NSNull(),
              "busy": t.busy,
              "status": t.status as Any? ?? NSNull(),
-             "context": t.context as Any? ?? NSNull()]
+             "context": t.context as Any? ?? NSNull(),
+             // Each by its place in the turn's list, which is all the page ever asks by.
+             "media": t.media.enumerated().compactMap { i, path -> [String: Any]? in
+                PhoneMedia.file(path).map { ["i": i, "name": $0.name, "kind": $0.kind, "size": $0.size, "v": $0.version] }
+             }]
          }]
+    }
+
+    /// A file a turn made or named, for the page to show under it. Asked for by the
+    /// turn and its place in that turn's list, so nothing else on this Mac can be.
+    private func media(_ r: HTTP.Request) -> HTTP.Response {
+        guard let turn = desk.turn(r.query["key"] ?? ""), let i = Int(r.query["i"] ?? ""), turn.media.indices.contains(i),
+              let file = PhoneMedia.file(turn.media[i]) else {
+            return .json(["error": "that file isn't there any more"], status: 404)
+        }
+        let range = r.headers["range"]
+        if HTTP.range(range, of: file.size) != .none, range == nil || range?.hasPrefix("bytes=0-") == true {
+            log("phone shown \(file.name) (\(file.kind), \(file.size / 1024) KB) from \(turn.name)")
+        }
+        if PhoneMedia.sendsSmaller(file), let side = Int(r.query["w"] ?? ""),
+           let small = PhoneMedia.small(file.path, side: min(max(side, 64), 2400)) {
+            return HTTP.Response(type: small.type, headers: [("Cache-Control", "private, max-age=3600")], body: small.data)
+        }
+        return .file(file.path, size: file.size, type: file.type, range: range)
     }
 
     func respond(to r: HTTP.Request) -> HTTP.Response {
@@ -4825,6 +5057,7 @@ final class Phone {
             scan()
             return .json(state())
         }
+        if r.method == "GET", r.path == "/api/file" { return media(r) }
         if r.method == "GET", r.path == "/api/sessions" {
             let running = runningIDs()
             return .json(["sessions": oldSessions().map { s -> [String: Any] in

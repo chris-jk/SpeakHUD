@@ -390,4 +390,87 @@ let hookSuite = Suite("Hook") { t in
                       "a blank title is no title")
         sb.cleanup()
     }
+
+    // -- what the turn made goes with it, for the phone to show ----------------------
+    do {
+        let sb = Sandbox("media")
+        let work = sb.root + "/work", clips = work + "/My Clips"
+        try? fm.createDirectory(atPath: clips, withIntermediateDirectories: true)
+        let began = Date().addingTimeInterval(-60)
+        /// A file stamped `age` seconds after the turn began (before it, when negative).
+        func make(_ path: String, age: TimeInterval) {
+            fm.createFile(atPath: path, contents: Data("x".utf8))
+            let at = began.addingTimeInterval(age)
+            try? fm.setAttributes([.creationDate: at, .modificationDate: at], ofItemAtPath: path)
+        }
+        make(work + "/shot.png", age: 5)                // named bare in a command, found in its folder
+        make(clips + "/out one.mp4", age: 10)           // a path with spaces, quoted in a command
+        make(clips + "/voice over.m4a", age: 15)        // a path with spaces, said in a tool's output
+        make(work + "/escaped name.jpg", age: 20)       // spaces escaped the shell's way
+        make(work + "/old.png", age: -3600)             // there before the turn: only named, not made
+        make(work + "/before.gif", age: -3600)          // there before the turn, and named in its words
+        make(work + "/notes.txt", age: 5)               // not a kind the phone shows
+        make(work + "/earlier.png", age: -30)           // made by the turn before this one
+        let stamp = ISO8601DateFormatter()
+        func entry(_ type: String, _ content: Any, at: TimeInterval, meta: Bool = false) -> [String: Any] {
+            var e: [String: Any] = ["type": type, "message": ["content": content], "cwd": work,
+                                    "timestamp": stamp.string(from: began.addingTimeInterval(at))]
+            if meta { e["isMeta"] = true }
+            return e
+        }
+        func tool(_ command: String) -> [[String: Any]] { [["type": "tool_use", "name": "Bash", "input": ["command": command]]] }
+        func result(_ text: Any) -> [[String: Any]] { [["type": "tool_result", "tool_use_id": "t", "content": text]] }
+        let lines: [[String: Any]] = [
+            entry("user", "make the earlier one", at: -40),
+            entry("assistant", tool("render \(work)/earlier.png"), at: -35),
+            entry("user", result("ok"), at: -31),
+            entry("assistant", [["type": "text", "text": "Made."]], at: -30),
+            entry("user", "now the clip, the voice and a screenshot", at: 0),
+            entry("assistant", tool("screencapture shot.png && cat notes.txt && ls old.png \(work)/earlier.png"), at: 4),
+            entry("user", result("shot.png\nold.png"), at: 6),
+            entry("user", "a note Claude Code added by itself", at: 7, meta: true),
+            entry("assistant", tool("ffmpeg -i in.mov \"\(clips)/out one.mp4\" && convert a.png \(work)/escaped\\ name.jpg"), at: 9),
+            entry("user", result([["type": "text", "text": "wrote 1 file\nSaved to \(clips)/voice over.m4a (12 s). See https://example.com/a.png"]]), at: 16),
+            entry("assistant", [["type": "text", "text": "The clip is ready. The old loop is `\(work)/before.gif`."]], at: 21),
+        ]
+        let transcript = sb.root + "/t.jsonl"
+        let body = lines.map { String(data: try! JSONSerialization.data(withJSONObject: $0), encoding: .utf8)! }.joined(separator: "\n") + "\n"
+        fm.createFile(atPath: transcript, contents: Data(body.utf8))
+        Spool.beat(in: sb.queue)
+        clean(sb.exec([python, hookFile], stdin: "{\"transcript_path\": \"\(transcript)\", \"session_id\": \"s1\", \"cwd\": \"\(work)\"}"),
+              "a turn that made files")
+        let item = sb.queued.last.flatMap { fm.contents(atPath: sb.queue + "/" + $0) }
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let media = (item?["media"] as? [String] ?? []).map { $0.replacingOccurrences(of: work + "/", with: "") }
+        t.expectEqual(media, ["shot.png", "My Clips/out one.mp4", "My Clips/voice over.m4a", "escaped name.jpg", "before.gif"],
+                      "what the turn's tool calls made, oldest first, then what its words name: not what was only listed, what the turn before made, or a text file")
+        t.expectEqual(Spool.drain(in: sb.queue).items.first?.media.count ?? 0, 5, "and the agent reads the same list off the spool")
+
+        // The list is cut to the newest, and what the turn's words name is kept first.
+        let many = (0..<20).map { i -> String in
+            let path = work + "/frame\(String(format: "%02d", i)).png"
+            make(path, age: 30 + Double(i))
+            return path
+        }
+        let cut = sb.run("""
+        import json
+        named = [sys.argv[3] + "/before.gif", sys.argv[3] + "/missing.png", sys.argv[3] + "/notes.txt"]
+        print(json.dumps(hook.turn_media(sys.argv[2], named, sys.argv[3])), file=sys.stderr)
+        """, args: [transcript + ".many", work])
+        var more = lines
+        more.insert(entry("assistant", tool("render " + many.joined(separator: " ")), at: 18), at: lines.count - 1)
+        let longer = more.map { String(data: try! JSONSerialization.data(withJSONObject: $0), encoding: .utf8)! }.joined(separator: "\n") + "\n"
+        fm.createFile(atPath: transcript + ".many", contents: Data(longer.utf8))
+        let kept = sb.run("""
+        import json
+        named = [sys.argv[3] + "/before.gif", sys.argv[3] + "/missing.png", sys.argv[3] + "/notes.txt"]
+        print(json.dumps(hook.turn_media(sys.argv[2], named, sys.argv[3])), file=sys.stderr)
+        """, args: [transcript + ".many", work])
+        let list = (try? JSONSerialization.jsonObject(with: Data(kept.err.utf8)) as? [String]) ?? []
+        t.expect(cut.status == 0 && (try? JSONSerialization.jsonObject(with: Data(cut.err.utf8)) as? [String]) == [work + "/before.gif"],
+                 "a transcript that isn't there: only what the words name, if it's there and a kind the phone shows")
+        t.expect(list.count == 12 && list.last == work + "/before.gif" && list.first == work + "/frame09.png" && list[10] == work + "/frame19.png",
+                 "more than the phone takes: the newest are kept, and the one the turn named (got \(list.map { ($0 as NSString).lastPathComponent }))")
+        sb.cleanup()
+    }
 }

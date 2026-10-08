@@ -1,6 +1,7 @@
 // The phone page: each terminal's last turn, an answer box for it, and the Away switch.
 // It asks the Mac for /api/state every few seconds and redraws in place, so what you
 // are typing is never wiped. Turn text only ever goes in as text, never as markup.
+// Pictures, video and sound a turn made come from the Mac too, and show under the turn.
 // With Read aloud on, the phone's own voice reads turns as they arrive.
 'use strict';
 (() => {
@@ -356,6 +357,62 @@
     trouble.hidden = !problem;
   }
 
+  function bytes(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + ' GB';
+    if (n >= 1e6) return (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + ' MB';
+    return Math.max(1, Math.round(n / 1e3)) + ' KB';
+  }
+
+  // One thing a turn made, as the Mac lists it: a picture (a lighter copy; a tap opens
+  // the real one), a video or a recording to play here, or anything else as its name
+  // to open. The Mac is asked by the turn and the file's place in it, never by a path.
+  function piece(key, m) {
+    const src = '/api/file?key=' + encodeURIComponent(key) + '&i=' + m.i + '&v=' + encodeURIComponent(m.v);
+    const figure = document.createElement('figure');
+    figure.className = 'media is-' + m.kind;
+    const caption = document.createElement('figcaption');
+    const name = document.createElement('a');
+    name.href = src;
+    name.target = '_blank';
+    name.rel = 'noopener';
+    name.textContent = m.name;
+    const size = document.createElement('small');
+    size.textContent = bytes(m.size);
+    caption.append(name, size);
+    // Gone from the Mac since it was listed, or a kind this phone can't show.
+    const failed = () => {
+      figure.classList.add('is-gone');
+      size.textContent = bytes(m.size) + ". Can't be shown here: tap its name to open it.";
+    };
+    if (m.kind === 'image') {
+      const open = document.createElement('a');
+      open.href = src;
+      open.target = '_blank';
+      open.rel = 'noopener';
+      const img = document.createElement('img');
+      img.alt = m.name;
+      img.decoding = 'async';
+      img.addEventListener('error', failed);
+      img.src = src + '&w=1200';
+      open.append(img);
+      figure.append(open);
+    } else if (m.kind === 'video' || m.kind === 'audio') {
+      const player = document.createElement(m.kind);
+      player.controls = true;
+      player.preload = 'metadata';
+      if (m.kind === 'video') {
+        player.playsInline = true;
+        player.setAttribute('playsinline', '');
+      }
+      player.addEventListener('error', failed);
+      // A phone shows a video's first frame only once it has been taken a little way in.
+      player.src = src + (m.kind === 'video' ? '#t=0.001' : '');
+      figure.append(player);
+    }
+    figure.append(caption);
+    return figure;
+  }
+
   async function call(path, body) {
     const res = await fetch(path, body === undefined ? {} : {
       method: 'POST',
@@ -590,6 +647,18 @@
       }
     }
 
+    // What the turn made. Redrawn only when the list changes, so the next look at the
+    // Mac never restarts a video you're watching.
+    const media = Array.isArray(turn.media) ? turn.media : [];
+    const made = media.map((m) => m.i + ' ' + m.v).join('\n');
+    if (w.media !== made) {
+      w.media = made;
+      const strip = el.querySelector('.win-media');
+      strip.replaceChildren(...media.map((m) => piece(turn.key, m)));
+      strip.hidden = !media.length;
+      strip.classList.toggle('is-many', media.filter((m) => m.kind === 'image').length > 1);
+    }
+
     // What it's asking. The box read off its terminal's screen is the truth; the question
     // hook's words stand in only until the screen has been looked at.
     const asks = el.querySelector('.win-asks');
@@ -638,6 +707,9 @@
     const working = !asking && (turn.busy || !!turn.sent);
     el.classList.toggle('is-working', working);
     el.querySelector('.win-state').textContent = asking ? 'asking' : turn.busy ? 'working' : '';
+    // Said down by the buttons too, with a bar that keeps moving: that's where your
+    // thumb is when you're about to send it something more.
+    el.querySelector('.win-working').hidden = !working;
     const sent = el.querySelector('.win-sent');
     // A terminal that's open but hasn't finished a turn since it was first seen.
     const idle = !turn.text && !asking && !turn.sent;
