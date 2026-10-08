@@ -487,6 +487,41 @@ let replySuite = Suite("Reply") { t in
                  "nor a turn whose session already has a newer one waiting")
         t.expect(!opens(turn("a", key: "A")) { $0.playback.micChanged(busy: true) },
                  "nor while another app has the mic: you're already answering with a key held")
+        t.expect(!opens(turn("a", key: "A")) { $0.playback.togglePause() },
+                 "nor a turn you paused during its last word: the voice runs on to the end of it, and you asked for quiet")
+    }
+
+    do {  // paused during the last word, the voice finishes the turn anyway
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(turn("a", key: "A")); p.enqueue(turn("b", key: "B"))
+        p.togglePause()
+        t.expectEqual(r.voice.take(), [.speak("a", from: 0, rate: Playback.rateSteps[1]), .pause(immediately: false)],
+                      "a pause by key waits for the end of the word, which here is the end of the turn")
+        r.voice.finish()
+        t.expectEqual(r.ear.take(), [], "the turn ends under your pause: no mic opens")
+        t.expect(r.listened.isEmpty, "and nobody is told it's their turn")
+        t.expectEqual(p.state.status, "⏸ Paused", "the HUD still says paused")
+        t.expectEqual(p.state.pauseTitle, "▶ Resume", "and its button is still Resume, not Close")
+        t.expectEqual(p.current?.text, "b", "the next turn is up")
+        t.expectEqual(r.voice.take(), [], "and held")
+        p.togglePause()
+        t.expectEqual(r.voice.take(), [.speak("b", from: 0, rate: Playback.rateSteps[1])], "Resume reads it")
+        r.voice.finish()
+        t.expectEqual(r.ear.take(), [.listen(1)], "and that turn, read with nothing paused, is answered as usual")
+
+        let s = Rig(), q = s.playback!
+        s.playback.listens = true
+        q.enqueue(turn("a", key: "A"))
+        q.togglePause()
+        s.voice.finish()
+        t.expectEqual(s.ear.take(), [], "with nothing else waiting: still no mic")
+        t.expect(!q.state.isActive && q.state.status == "Done" && q.state.pauseTitle == "❚❚ Pause",
+                 "the turn is done, and with nothing left to hold the pause is over")
+        _ = s.voice.take()
+        q.replay()
+        s.voice.finish()
+        t.expectEqual(s.ear.take(), [.listen(1)], "Replay reads it again, and then you're asked")
     }
 
     // -- when something else happens meanwhile -----------------------------

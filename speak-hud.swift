@@ -2158,8 +2158,10 @@ final class Playback {
 
     private func shouldListen(after item: SpeechItem) -> Bool {
         // Not while another app has the mic: you're already answering with a key held.
+        // Not under your pause: caught on its last word, the voice ran on to the end of
+        // the turn, and a mic opening then is the opposite of the quiet you asked for.
         // Not when its session has more to say already: that turn gets the window.
-        listens && ear != nil && item.answerable && Reply.canReach(item.origin) && !micBusy
+        listens && ear != nil && item.answerable && Reply.canReach(item.origin) && !micBusy && !userPaused
             && !queue.contains { $0.key == item.key }
     }
 

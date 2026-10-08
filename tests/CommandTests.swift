@@ -216,6 +216,17 @@ let commandSuite = Suite("Commands") { t in
         t.expectEqual(s.ear.take(), [.stop], "paused again by key: the mic shuts, voice pause or not")
     }
 
+    do {  // "pause" said during the last word, with replies on
+        let r = Rig(), p = r.playback!
+        p.obeys = true; p.listens = true
+        p.enqueue(turn("a", key: "A", answerable: true))
+        _ = r.ear.take()
+        say(r, "pause")
+        r.voice.finish()   // the voice ran on to the end of the turn
+        t.expectEqual(r.ear.take(), [.stop], "paused by voice as the turn ends: the mic shuts with the reading, and isn't opened for a reply")
+        t.expect(r.listened.isEmpty, "nobody is told it's their turn")
+    }
+
     do {  // a voice pause that ends some other way leaves nothing behind
         for (ending, how) in [("pause skip", "skip"), ("pause later", "later"), ("pause go on", "go on")] {
             let r = reading("a", "b", "c")
