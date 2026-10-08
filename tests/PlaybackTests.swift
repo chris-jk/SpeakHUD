@@ -40,6 +40,9 @@ final class FakeEar: Ear {
     private(set) var window = 0   // the last window opened, still the one a stale report names
     /// A real mic takes a moment to open; tests that care set this false and call open().
     var opensAtOnce = true
+    /// How long this mic says opening may take, its own tries included (Ear.opensWithin).
+    var patience: (plain: TimeInterval, overSpeech: TimeInterval) = (7, 11)
+    func opensWithin(overSpeech: Bool) -> TimeInterval { overSpeech ? patience.overSpeech : patience.plain }
 
     func listen(window id: Int, overSpeech: Bool) {
         calls.append(overSpeech ? .attend(id) : .listen(id))

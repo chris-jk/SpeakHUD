@@ -1767,6 +1767,10 @@ protocol Ear: AnyObject {
     /// Replaces a window still open. `overSpeech`: the voice is talking meanwhile, so
     /// its sound has to be taken out of what the mic hears.
     func listen(window: Int, overSpeech: Bool)
+    /// The longest `listen` may take to say `earOpened` or `earFailed`, every try of
+    /// its own included. A reply window still not open after that is given up on: the
+    /// number is the mic's alone, so no limit of Playback's can cut its tries short.
+    func opensWithin(overSpeech: Bool) -> TimeInterval
     /// Close the mic. Nothing more is reported.
     func stop()
 }
@@ -2109,8 +2113,6 @@ final class Playback {
     static let replyPause: TimeInterval = 1.5
     /// How long "sending" shows before it goes: say more, or Skip, to take it back.
     static let replyGrace: TimeInterval = 1.5
-    /// How long the mic may take to open before the window is given up on.
-    static let micOpenLimit: TimeInterval = 6
     /// How long you have to start again after taking back what was heard.
     static let replyRetry: TimeInterval = 5
 
@@ -2171,17 +2173,18 @@ final class Playback {
     }
 
     /// Open the mic for the window just made. Your time to start runs from when the mic
-    /// says it's open (`earOpened`); one that never says is given up on.
+    /// says it's open (`earOpened`); one that never says is given up on, once the mic's
+    /// own tries have had the time it says they take (`Ear.opensWithin`).
     private func hearReply() {
-        guard let w = window else { return }
-        arm(Self.micOpenLimit) { [weak self] in
+        guard let w = window, let ear = ear else { return }
+        arm(ear.opensWithin(overSpeech: obeys)) { [weak self] in
             self?.closeWindow("the mic never opened")
             self?.moveOn()
         }
         // The same kind of mic the commands use, when they're on: going from the
         // echo-cancelling mic to the plain one failed to start 8 times in 8, and in use
         // it twice opened to silence (10-07). Staying on one kind opened 8 times in 8.
-        ear?.listen(window: w.id, overSpeech: obeys)
+        ear.listen(window: w.id, overSpeech: obeys)
     }
 
     /// The mic is open: your turn. (For commands while reading there's nothing to do.)
@@ -3072,13 +3075,13 @@ final class MicEar: Ear, @unchecked Sendable {
                         try self.openMic(for: id, overSpeech: overSpeech, feed: feed, as: format, analyzer: analyzer)
                     }
                     guard open else { feed.finish(); return }
-                    if try await soundArrives(for: id, within: overSpeech ? 2.0 : 1.2) { break }
+                    if try await soundArrives(for: id, within: Self.tryWait(overSpeech: overSpeech)) { break }
                     if tries >= Self.openTries { throw Failure("the microphone opened but gave no sound") }
                 } catch let failure as Failure {
                     if tries >= Self.openTries { throw failure }
                 }
                 await MainActor.run { self.shutEngine() }
-                try await Task.sleep(nanoseconds: 350_000_000)
+                try await Task.sleep(nanoseconds: UInt64(Self.tryGap * 1_000_000_000))
             }
             if tries > 1 {
                 let n = tries
@@ -3111,7 +3114,21 @@ final class MicEar: Ear, @unchecked Sendable {
         }
     }
 
+    /// A mic gets this many tries at starting. Each is given a while to hand sound on
+    /// (longer over speech), with a breath between one try and the next.
     static let openTries = 5
+    static func tryWait(overSpeech: Bool) -> TimeInterval { overSpeech ? 2.0 : 1.2 }
+    static let tryGap: TimeInterval = 0.35
+    /// Readying the transcriber before the first try and starting it after the last.
+    /// With its model cold that alone has taken 4 to 5 s (timed 10-08).
+    static let readying: TimeInterval = 6
+
+    /// Every try run to its end, and the readying: 13.4 s, or 17.4 s over speech. All
+    /// of it is worked out from the numbers the tries themselves run on.
+    func opensWithin(overSpeech: Bool) -> TimeInterval {
+        Self.readying + Double(Self.openTries) * Self.tryWait(overSpeech: overSpeech)
+            + Double(Self.openTries - 1) * Self.tryGap
+    }
 
     /// Whether the mic just opened for `id` is handing sound on, steadily. Throws if
     /// the window is shut meanwhile.

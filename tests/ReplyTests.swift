@@ -299,7 +299,8 @@ let replySuite = Suite("Reply") { t in
         t.expectEqual(r.ear.take(), [.listen(1)], "the mic is asked for")
         t.expectEqual(p.state.status, "🎙 Opening the mic…", "the HUD says it's opening")
         t.expectEqual(r.listened, [], "no \"your turn\" yet")
-        t.expectEqual(r.armed?.seconds, Playback.micOpenLimit, "only a limit on how long it may take: \(Int(Playback.micOpenLimit))s")
+        t.expectEqual(r.armed?.seconds, r.ear.patience.plain,
+                      "only a limit on how long it may take, and the mic says what that is: every try it makes gets its time")
         r.ear.open()
         t.expectEqual(r.listened, ["a"], "open: now it's your turn")
         t.expectEqual(p.state.status, "🎙 Listening: answer A, or say nothing", "and the HUD says so")
@@ -318,6 +319,14 @@ let replySuite = Suite("Reply") { t in
         t.expectEqual(s.ear.take(), [.stop], "a mic that never opens is given up on")
         t.expectEqual(q.current?.text, "b", "and the queue moves")
         t.expect(s.listened.isEmpty && s.sent.isEmpty, "with no turn offered and nothing sent")
+
+        let o = Rig(), w = o.playback!
+        o.ear.opensAtOnce = false
+        o.ear.patience = (plain: 3, overSpeech: 21)
+        w.listens = true; w.obeys = true
+        w.enqueue(turn("a", key: "A"))
+        o.voice.finish()
+        t.expectEqual(o.armed?.seconds, 21, "over the voice's kind of mic the limit is that mic's too, however long: no number of Playback's own cuts its tries short")
     }
 
     do {  // a reply: heard, settled, shown as sending, sent

@@ -107,6 +107,32 @@ let earSuite = Suite("Ear") { t in
     t.expect(again.sent.isEmpty, "a command isn't sent to Claude")
     t.expectEqual(again.voice, [.speak("the turn", from: 0, rate: Playback.rateSteps[1])], "it's done: the turn is read again")
 
+    // How long a reply window waits for the mic to open, against how long the mic's own
+    // tries can take: the real pair, with the window's timer caught instead of run. The
+    // two were set apart once (6 s against 7.4 s, or 11.4 s over speech) and the last
+    // tries could never finish.
+    for overSpeech in [false, true] {
+        var armed: [TimeInterval] = []
+        let ear = MicEar(source: .recording(dir + "/reply.aiff"))
+        let voice = FakeVoice()
+        let p = Playback(voice: voice, retire: { _ in }, later: { $0() }, ear: ear,
+                         timer: { seconds, _ in armed.append(seconds); return {} })
+        voice.playback = p
+        ear.listener = p
+        p.listens = true
+        p.obeys = overSpeech   // the reply window opens the kind of mic the commands use
+        p.enqueue(SpeechItem(text: "the turn", source: "Proj", key: "s1", created: Date(),
+                             origin: Origin(term: "iTerm.app", session: "1A2B3C4D-0000-4000-8000-00000000ABCD"),
+                             answerable: true))
+        voice.finish()
+        let tries = Double(MicEar.openTries) * MicEar.tryWait(overSpeech: overSpeech)
+            + Double(MicEar.openTries - 1) * MicEar.tryGap
+        t.expect((armed.last ?? 0) > tries,
+                 "a reply window\(overSpeech ? ", over speech," : "") gives the mic longer to open (\(armed.last ?? 0) s) than its \(MicEar.openTries) tries can take (\(tries) s)")
+        p.stop()
+        spin(0.2) { false }   // let the mic's own shutdown land
+    }
+
     // Dictation from the phone: a recording as the page sends one (a WAV, 16-bit, one
     // channel, 16,000 samples a second), through the real transcriber, comes back as words.
     do {
