@@ -665,14 +665,15 @@ enum Reply {
         return all[max(0, end - lines)..<end].joined(separator: "\n").trimmingCharacters(in: .newlines)
     }
 
-    /// Every pane iTerm2 has open, by id and title.
+    /// Every pane iTerm2 has open, by id and title. The separators are spelled as
+    /// character ids: inside iTerm2's `tell`, the word `tab` means one of its tabs.
     static let panesScript = """
         tell application id "\(Reveal.iTerm)"
             set out to "ok"
             repeat with w in windows
                 repeat with t in tabs of w
                     repeat with s in sessions of t
-                        set out to out & linefeed & (id of s) & tab & (name of s)
+                        set out to out & (character id 10) & (id of s) & (character id 9) & (name of s)
                     end repeat
                 end repeat
             end repeat
@@ -694,14 +695,14 @@ enum Reply {
     /// A pane's title as Claude Code sets it ("✳ Grow guide replies — ~/some/dir"), down
     /// to the name a turn from it goes by.
     static func paneName(_ title: String) -> String {
-        var name = title
+        var name = title.replacingOccurrences(of: "\u{00A0}", with: " ")   // it's set with no-break spaces
         if let dir = name.range(of: " — ", options: .backwards) { name = String(name[..<dir.lowerBound]) }
         if let first = name.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first),
            let space = name.firstIndex(of: " ") {
             name = String(name[name.index(after: space)...])
         }
         name = name.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? title : name
+        return name.isEmpty ? title.trimmingCharacters(in: .whitespaces) : name
     }
 
     /// Whether `screen` is Claude Code's: at its prompt, working, or showing a box that
@@ -4423,6 +4424,12 @@ final class Phone {
             guard let origin = turn.origin, Reply.canReach(origin) else {
                 return .json(["error": "its terminal can't be reached from here"], status: 409)
             }
+            // At Claude's prompt a key isn't an answer: it lands in the message being
+            // typed, and the next answer is pasted after it. Enter and Esc still mean
+            // something there (send what's typed; stop the turn).
+            if !["enter", "esc"].contains(name), let screen = look(origin), Reply.promptText(in: screen) != nil {
+                return .json(["sent": false, "outcome": "its terminal is at Claude's prompt, where that key would only type into your message"])
+            }
             let outcome = press(name, origin)
             log("phone key \(name) to \(turn.name): \(outcome)")
             return .json(["sent": outcome == .sent, "outcome": outcome.description])
@@ -4438,7 +4445,9 @@ final class Phone {
             let outcome = deliver(text, origin)
             desk.answered(key, with: text, outcome)
             log("phone reply to \(turn.name) (\(text.count) chars): \(outcome)")
-            return .json(["sent": outcome == .sent, "outcome": outcome.description, "state": state()])
+            // `pasted`: the words are in its prompt, unsent. Sending them again would double them.
+            return .json(["sent": outcome == .sent, "pasted": outcome == .unconfirmed,
+                          "outcome": outcome.description, "state": state()])
         default:
             return .json(["error": "not found"], status: 404)
         }

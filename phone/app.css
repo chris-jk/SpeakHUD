@@ -94,6 +94,18 @@ h1 {
   .switch input:checked::after { background: var(--desk); }
 }
 
+/* How fast the phone reads. One button: each tap is the next speed. */
+.speed {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 16px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+}
+
 .says {
   margin: 0 4px 6px;
   color: var(--quiet);

@@ -35,6 +35,11 @@
   let reading = null;        // the key being read
   let readId = 0;            // so a cancelled reading's end can't end the next one
   const line = [];           // [key, what] waiting their turn to be read
+  let now = null;            // what's being read: { key, what, parts, at }
+  // Each tap on the speed button is the next of these; the phone's voice takes a rate.
+  const SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.75];
+  const speedButton = document.getElementById('speed');
+  let speed = 1;
   const asked = new Map();   // key -> timer: a question's pieces settle before it's read
 
   function remembered() { try { return localStorage.getItem('speak') === '1'; } catch (e) { return false; } }
@@ -66,23 +71,34 @@
       : 'Tap anywhere once and this phone will read new turns aloud.';
   }
 
-  function read(key, what) {
+  function utter(words) {
+    const said = new window.SpeechSynthesisUtterance(words);
+    said.lang = navigator.language || 'en-US';
+    said.rate = speed;
+    return said;
+  }
+
+  // Read a window. `from` picks a reading back up where it was (a change of speed:
+  // a voice can't change rate mid-sentence, so the sentence starts again).
+  function read(key, what, from) {
     const w = shown.get(key);
     if (!canSpeak || !w || !w.turn) return next();
     voice.cancel();
     const mine = ++readId;
-    const parts = wordsFor(w.turn, what);
+    const parts = from ? from.parts : wordsFor(w.turn, what);
+    const start = from ? from.at : 0;
+    if (start >= parts.length) { reading = null; now = null; return next(); }
     reading = key;
     unlocked = true;
-    parts.forEach((part, i) => {
-      const said = new window.SpeechSynthesisUtterance(part);
-      said.lang = navigator.language || 'en-US';
-      if (i === parts.length - 1) {
-        said.onend = said.onerror = () => { if (mine === readId) { reading = null; next(); } };
+    now = { key, what, parts, at: start };
+    parts.slice(start).forEach((part, i) => {
+      const said = utter(part);
+      said.onstart = () => { if (mine === readId) now.at = start + i; };
+      if (start + i === parts.length - 1) {
+        said.onend = said.onerror = () => { if (mine === readId) { reading = null; now = null; next(); } };
       }
       voice.speak(said);
     });
-    if (!parts.length) { reading = null; return next(); }
     mark();
   }
 
@@ -95,8 +111,11 @@
     readId++;
     if (canSpeak) voice.cancel();
     reading = null;
+    now = null;
     mark();
   }
+
+  function showSpeed() { speedButton.textContent = 'Speed ' + speed + '\u00d7'; }
 
   // News for a window: read it now, or after what's being read.
   function announce(key, what) {
@@ -226,6 +245,15 @@
             box.style.height = 'auto';
             box.blur();
           }
+        } else if (data.pasted) {
+          // The words are sitting in its prompt, after something that was already
+          // there. Sending again would paste them twice: show the prompt instead.
+          box.value = '';
+          box.style.height = 'auto';
+          if (data.state) show(data.state);
+          note(el, 'Typed into its prompt but not sent: something was already there. Check its screen below, then Enter sends it.');
+          screen.open = true;
+          return;
         } else {
           note(el, 'Not sent: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');
         }
@@ -337,7 +365,7 @@
     sent.hidden = !turn.sent && !idle;
 
     const form = el.querySelector('.win-answer');
-    const words = turn.note ? 'Not sent: ' + turn.note + '.' : w.note;
+    const words = w.note || (turn.note ? 'Not sent: ' + turn.note + '.' : '');
     if (!turn.canReply) {
       form.hidden = true;
       note(el, "This terminal can't be answered from the phone. Only iTerm2 panes can.", true);
@@ -405,6 +433,15 @@
   }
 
   if (canSpeak) {
+    try { speed = SPEEDS.includes(Number(localStorage.getItem('speed'))) ? Number(localStorage.getItem('speed')) : 1; } catch (e) { /* private mode */ }
+    speedButton.hidden = false;
+    showSpeed();
+    speedButton.addEventListener('click', () => {
+      speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+      try { localStorage.setItem('speed', String(speed)); } catch (e) { /* private mode */ }
+      showSpeed();
+      if (reading && now) read(now.key, now.what, now);   // hear the new speed at once
+    });
     document.getElementById('speak-switch').hidden = false;
     speakOn = remembered();
     speakSwitch.checked = speakOn;
@@ -414,7 +451,7 @@
       if (speakOn) {
         // Said from this tap, which is also what lets the page speak from now on.
         unlocked = true;
-        voice.speak(new window.SpeechSynthesisUtterance('Reading aloud.'));
+        voice.speak(utter('Reading aloud.'));
       } else {
         line.length = 0;
         hush();

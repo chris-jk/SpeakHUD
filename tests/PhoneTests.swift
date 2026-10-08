@@ -156,6 +156,8 @@ let phoneSuite = Suite("Phone") { t in
     let other = "0A1B2C3D-0000-4000-8000-00000000000B", shell = "0A1B2C3D-0000-4000-8000-00000000000C"
     t.expectEqual(Reply.paneName("✳ Grow guide replies — ~/GitHub/grow-guide"), "Grow guide replies", "a pane's title, down to the name its turns go by")
     t.expectEqual(Reply.paneName("◐ Before — and after — ~/x"), "Before — and after", "only the folder on the end is cut")
+    t.expectEqual(Reply.paneName("◑ SpeakerHug crash logs\u{00A0}—\u{00A0}~/GitHub/mac-apps/speakhud"), "SpeakerHug crash logs",
+                  "as iTerm2 really gives it, with no-break spaces round the dash")
     t.expectEqual(Reply.paneName("zsh"), "zsh", "a plain title is left alone")
     let listed = Reply.panes(ask: { _ in Reply.Answer(reply: "ok\n\(other)\t✳ Review desk — ~\nnot-an-id\tx\nno tab here") })
     t.expect(listed?.count == 1 && listed?[0].session == other && listed?[0].name == "✳ Review desk — ~", "iTerm2's panes are read by id and title; a line that isn't one is skipped")
@@ -301,6 +303,15 @@ let phoneSuite = Suite("Phone") { t in
     let keyed = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "2"])))
     t.expect(keyed["sent"] as? Bool == true && b.pressed == ["2"] && b.logs.contains("phone key 2 to Grow guide replies: sent"), "a key goes to its pane")
     b.screen = "working…\n────────────────\n❯ \n────────────────\n  status"
+    let stray = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "1"])))
+    t.expect(stray["sent"] as? Bool == false && b.pressed == ["2"] && (stray["outcome"] as? String)?.contains("Claude's prompt") == true,
+             "at Claude's prompt a number isn't pressed: it would type into the message, and the next answer would be pasted after it")
+    _ = b.phone.respond(to: post("/api/key", ["key": "a", "press": "enter"]))
+    t.expectEqual(b.pressed, ["2", "enter"], "Enter still is: it sends what's typed there")
+    b.outcome = .unconfirmed
+    let half = json(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "and one more thing"])))
+    t.expect(half["sent"] as? Bool == false && half["pasted"] as? Bool == true, "words pasted but not sent are said to be in the prompt, so the page doesn't offer to send them twice")
+    b.outcome = .sent
     let after = json(b.phone.respond(to: get("/api/screen", query: ["key": "a"])))
     t.expect(turns(after["state"] as? [String: Any] ?? [:]).first?["question"] is NSNull, "back at Claude's prompt, the question is over")
     b.screen = nil
