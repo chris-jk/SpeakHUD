@@ -662,13 +662,15 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
   }
 
   // The dictation (further down) calls this as its mic opens, and says nothing when
-  // it's done with it, so that is watched for: `hearing` is the dictation going on.
+  // it's done with it, so that is watched for: `hearing` is the dictation going on,
+  // and it is `ending` from the moment its mic is let go. The voice doesn't wait for
+  // the words to land as well: on a bad line that can be a long time.
   let micWatch = null;
   function pause() {
     reader.micOpened();
     if (micWatch) return;
     micWatch = setInterval(() => {
-      if (hearing) return;
+      if (hearing && !hearing.ending) return;
       clearInterval(micWatch);
       micWatch = null;
       reader.micClosed();

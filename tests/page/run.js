@@ -435,6 +435,25 @@ scenario('nothing is read into an open mic: a turn that arrives is read when the
   assert.deepStrictEqual(w.voice.texts().slice(before), ['T-b.', 'Bee has finished.']);
 });
 
+scenario('the voice carries on once the mic is let go, even while the Mac is still turning the sound into words', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')], Object.assign({ mic: true }, SPEAK_ON));
+  w.mac.routes['/api/hear'] = () => ({ data: { text: 'hello there' } });
+  await firstTap(w);
+  const before = w.voice.said.length;
+  const mic = w.win('a').querySelector('.win-mic');
+  await w.tap(mic);
+  w.mac.state.turns = [turn('b', 'Bee has finished.'), turn('a', 'Alpha.')];
+  await w.mic.loud(3000);
+  const line = w.mac.hold('/api/hear');       // a bad patch of signal: the last piece gets no answer
+  await w.tap(mic);                           // done talking: the mic is off at once
+  await w.advance(3000);
+  assert.strictEqual(w.mic.stopped, 1);
+  assert.deepStrictEqual(w.voice.texts().slice(before), ['T-b.', 'Bee has finished.']);
+  line.release();
+  await w.advance(500);
+  assert.strictEqual(answerBox(w, 'a').value, 'hello there');
+});
+
 scenario('a reading the mic cuts into carries on from its word when the mic closes, then what arrived is read', async () => {
   const w = await open([turn('a', 'one two three four five six.'), turn('b', 'Bee.')],
     Object.assign({ mic: true, manner: speaks({ perWord: 100 }) }, SPEAK_ON));
