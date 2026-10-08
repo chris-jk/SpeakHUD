@@ -10,6 +10,9 @@
   --line: #d3d8e0;
   --field: #f1f3f6;
   --alarm: #a8261c;
+  --half: #866600;   /* a context half full, at 70%, at 80%: yellow, orange, red */
+  --high: #b24a00;
+  --full: #a8261c;
   --frame: #0a84ff;
   --on-frame: #ffffff;
 }
@@ -23,6 +26,9 @@
     --line: #2b3038;
     --field: #242830;
     --alarm: #ff9b8f;
+    --half: #f3cf4b;
+    --high: #ff9a3c;
+    --full: #ff6257;
   }
 }
 
@@ -332,7 +338,9 @@ main { margin-top: 14px; }
   font-size: 0.8125rem;
   overflow-wrap: anywhere;
 }
-.win-status.is-full { color: var(--alarm); font-weight: 600; }
+.win-status.is-half { color: var(--half); }
+.win-status.is-high { color: var(--high); font-weight: 600; }
+.win-status.is-full { color: var(--full); font-weight: 600; }
 
 .win-text {
   margin: 0;

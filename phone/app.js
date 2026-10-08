@@ -936,7 +936,11 @@
     const status = el.querySelector('.win-status');
     status.textContent = statusLine(turn);
     status.hidden = !turn.status;
-    status.classList.toggle('is-full', (turn.context || 0) >= 80);
+    // How full its context is, by colour. It's worth keeping low, so it starts to show at half.
+    const full = turn.context || 0;
+    status.classList.toggle('is-half', full >= 50 && full < 70);
+    status.classList.toggle('is-high', full >= 70 && full < 80);
+    status.classList.toggle('is-full', full >= 80);
 
     const text = el.querySelector('.win-text');
     const more = el.querySelector('.win-more');
