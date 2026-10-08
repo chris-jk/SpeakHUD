@@ -159,13 +159,16 @@
   // it. `why` is what started it, `end` what ended it, `page` which open copy of this page.
   // A reading the voice never began is told too (`parts 0`): a voice that takes what
   // it's handed and stays silent is the failure the log most needs to show.
+  // It is only ever written to: nothing the page does next is decided from it.
   const pageId = Math.random().toString(16).slice(2, 6).padEnd(4, '0');
   let heard = null;
+  let scrolls = 0;           // times the page had to move a long way to keep the word in view
   function tally(end) {
     if (!heard) return;
-    const report = Object.assign({}, heard, { seconds: Math.round((Date.now() - heard.began) / 1000), end, page: pageId });
-    delete report.began; delete report.last; delete report.lastAt;
+    const report = Object.assign({}, heard, { seconds: Math.round((Date.now() - heard.began) / 1000), end, scrolls, page: pageId });
+    delete report.began; delete report.lastAt;
     heard = null;
+    scrolls = 0;
     call('/api/heard', report).catch(() => {});
   }
 
@@ -188,7 +191,7 @@
     const most = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const want = Math.max(0, Math.min(most, window.scrollY + rect.top - window.innerHeight * ANCHOR));
     if (Math.abs(want - window.scrollY) < 8) return;
-    if (heard && (aim === null || Math.abs(want - aim) > window.innerHeight / 4)) heard.scrolls++;
+    if (aim === null || Math.abs(want - aim) > window.innerHeight / 4) scrolls++;
     aim = want;
     if (!easing) { easing = true; requestAnimationFrame(ease); }
   }
@@ -204,27 +207,15 @@
   // The voice has started `part`: mark its paragraph and bring its first words into view.
   function follow(part) {
     unmark();
-    if (heard) { heard.parts++; heard.last = -1; }
     if (!part.para) return;
     marked = part.para.span;
     marked.classList.add('is-speaking');
     keepInView(spot(part.para, 0, 1).getBoundingClientRect());
   }
 
-  // The voice has reached the word at `index` of what the part says. A word behind the
-  // last one is a late report: the mark only ever moves forward.
+  // The voice has reached the word at `index` of what the part says: put the block
+  // behind it and keep it in view.
   function point(part, index, length) {
-    if (heard) {
-      const at = Date.now();
-      heard.words++;
-      if (length) heard.sized++;
-      if (index < heard.last) heard.backwards++;
-      if (heard.lastAt) heard.gap = Math.max(heard.gap, at - heard.lastAt);
-      heard.lastAt = at;
-    }
-    if (heard && index < heard.last) return;
-    if (heard) heard.last = index;
-    if (now) now.word = index;
     if (!part.para) return;
     const size = length || (part.para.say.slice(index).match(/^\S+/) || [''])[0].length;
     keepInView(glideTo(part.para, spot(part.para, index, size)));
@@ -298,6 +289,7 @@
   const STALL_MS = 4000;
   const STALL_TRIES = 3;
   let pulse = 0;
+  let wordy = false;         // this reading's voice has reported a word, so it's one that does
   let stalled = null;        // what to do about it, for the reading in hand
   let watch = null;
   const beat = () => { pulse = Date.now(); };
@@ -326,12 +318,13 @@
     reading = key;
     paused = null;
     unlocked = true;
-    now = { key, what, parts, at: start, word };
+    now = { key, what, parts, at: start, word, last: word - 1 };
     if (!heard) {
-      heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, scrolls: 0, stalls: 0, last: -1, lastAt: 0,
+      heard = { began: Date.now(), parts: 0, words: 0, sized: 0, backwards: 0, gap: 0, stalls: 0, lastAt: 0,
                 speed, marks: canMark, voices: voice.getVoices ? voice.getVoices().length : 0, lang: navigator.language || '',
                 voice: chosen ? chosen.name : 'own',
                 why: why || 'tap' };
+      wordy = false;
     }
     // The whole turn is opened, so the words being read are there to see.
     w.el.querySelector('.win-text').classList.remove('is-clamped');
@@ -358,13 +351,29 @@
         beat();
         now.at = index;
         now.word = skip;
+        now.last = skip - 1;
+        heard.parts++;
         follow(part);
-        if (heard) heard.last = skip - 1;
       };
+      // The voice has reached a word. One behind the last is a late report: the place,
+      // and the mark on the page, only ever move forward.
       said.onboundary = (e) => {
         if (mine !== readId || done) return;
         beat();
-        if (!e.name || e.name === 'word') point(part, skip + (e.charIndex || 0), e.charLength || 0);
+        if (e.name && e.name !== 'word') return;
+        const at = skip + (e.charIndex || 0);
+        const length = e.charLength || 0;
+        const when = Date.now();
+        wordy = true;
+        heard.words++;
+        if (length) heard.sized++;
+        if (at < now.last) heard.backwards++;
+        if (heard.lastAt) heard.gap = Math.max(heard.gap, when - heard.lastAt);
+        heard.lastAt = when;
+        if (at < now.last) return;
+        now.last = at;
+        now.word = at;
+        point(part, at, length);
       };
       said.onend = () => { beat(); onward(); };
       said.onerror = (e) => {
@@ -373,6 +382,7 @@
       };
       now.at = index;
       now.word = skip;
+      now.last = skip - 1;
       beat();
       voice.speak(said);
       watchOver(() => {
@@ -386,8 +396,8 @@
         const rest = part.say.slice(now.word || 0).trim();
         const reachedEnd = (now.word || 0) > skip && !/\s/.test(rest);
         const limit = reachedEnd ? STALL_MS / 2 : STALL_MS;
-        if (!(quietFor > limit && (idle || (heard && heard.words > 0))) && !(idle && quietFor > 1500)) return;
-        if (heard) heard.stalls++;
+        if (!(quietFor > limit && (idle || wordy)) && !(idle && quietFor > 1500)) return;
+        heard.stalls++;
         done = true;
         if (++tries > STALL_TRIES) return over('stalled');
         quiet();

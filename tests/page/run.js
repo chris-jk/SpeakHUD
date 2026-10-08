@@ -203,6 +203,17 @@ scenario('Pause keeps the place and Resume goes on from the word it had reached'
   assert.deepStrictEqual(heard(w).map((h) => [h.why, h.end]), [['tap', 'paused'], ['resume', 'finished']]);
 });
 
+scenario('a word the voice reports late does not move the place back', async () => {
+  const w = await open([turn('a', 'one two three four five six.')], { manner: speaks({ perWord: 100 }) });
+  await w.tap(readButton(w, 'a'));
+  await w.advance(400);                       // as far as "three"
+  w.voice.said[1].onboundary({ name: 'word', charIndex: 4, charLength: 3 });   // "two", said again late
+  await w.tap(readButton(w, 'a'));            // Pause
+  await w.tap(readButton(w, 'a'));            // Resume
+  assert.deepStrictEqual(w.voice.texts().slice(2), ['three four five six.']);
+  assert.deepStrictEqual(heard(w).map((h) => [h.words, h.backwards, h.end]), [[5, 1, 'paused']]);   // the name, three words, the late one
+});
+
 scenario('Stop ends a reading, and a tap on another window\'s Read replaces it', async () => {
   const w = await open([turn('a', 'Alpha one.\nAlpha two.'), turn('b', 'Bee.')]);
   await w.tap(readButton(w, 'a'));
