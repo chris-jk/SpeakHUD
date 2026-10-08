@@ -4026,15 +4026,26 @@ enum ClaudeHook {
         return .ok(root)
     }
 
-    private static func stopGroups(_ root: [String: Any]) -> [[String: Any]] {
-        (root["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]] ?? []
+    /// The events we own an entry on, each with the script that entry runs: the Stop hook,
+    /// and the question hook before and after AskUserQuestion (hook/read-question.py).
+    private static let owned: [(event: String, script: String)] = [
+        ("Stop", "read-summary.py"), ("PreToolUse", "read-question.py"), ("PostToolUse", "read-question.py")]
+
+    /// The groups under one event, as written. Read loosely (`Any`), so a group or entry
+    /// of a shape we don't know is carried through a rewrite instead of dropped.
+    private static func groups(_ root: [String: Any], _ event: String) -> [Any] {
+        (root["hooks"] as? [String: Any])?[event] as? [Any] ?? []
     }
-    /// One hook entry (not a group) is ours if it runs read-summary.py.
-    private static func isOurs(_ entry: [String: Any]) -> Bool {
-        (entry["command"] as? String)?.contains("read-summary.py") == true
+    /// One hook entry (not a group) is ours if its command names our script, however the
+    /// path is spelt: `~/.claude/…`, absolute, quoted, or typed in by hand.
+    private static func runs(_ entry: Any, _ script: String) -> Bool {
+        ((entry as? [String: Any])?["command"] as? String)?.contains(script) == true
     }
-    private static func groupHasOurs(_ group: [String: Any]) -> Bool {
-        (group["hooks"] as? [[String: Any]])?.contains(where: isOurs) == true
+    private static func groupRuns(_ group: Any, _ script: String) -> Bool {
+        ((group as? [String: Any])?["hooks"] as? [Any])?.contains(where: { runs($0, script) }) == true
+    }
+    private static func stopRegistered(_ root: [String: Any]) -> Bool {
+        groups(root, "Stop").contains(where: { groupRuns($0, "read-summary.py") })
     }
 
     // MARK: files
@@ -4098,7 +4109,7 @@ enum ClaudeHook {
         case .invalid: return (.notInstalled, ["\(settingsPath) is not valid JSON"])
         case .ok(let r): root = r
         }
-        guard stopGroups(root).contains(where: groupHasOurs) else { return (.notInstalled, []) }
+        guard stopRegistered(root) else { return (.notInstalled, []) }
         let fm = FileManager.default
         var problems: [String] = []
         if !fm.fileExists(atPath: scriptPath) {
@@ -4170,8 +4181,8 @@ enum ClaudeHook {
         }
 
         var hooks = root["hooks"] as? [String: Any] ?? [:]
-        var stop = hooks["Stop"] as? [[String: Any]] ?? []
-        if !stop.contains(where: groupHasOurs) {
+        var stop = groups(root, "Stop")
+        if !stopRegistered(root) {
             stop.append(["hooks": [["type": "command", "command": hookCommand, "async": true]]])
             hooks["Stop"] = stop
             root["hooks"] = hooks
@@ -4180,8 +4191,10 @@ enum ClaudeHook {
         return problems.isEmpty ? "installed" : "error: " + problems.joined(separator: "; ")
     }
 
-    /// Remove only our entry. Sibling hooks in the same group stay; a group is dropped
-    /// only once it's empty. The script and binary are left in place.
+    /// Remove only our entries: the Stop hook's, and the question hook's two, so questions
+    /// stop being read along with turns. Sibling hooks in the same group stay; a group is
+    /// dropped only once it's empty, an event only once it has no groups. The scripts and
+    /// binary are left in place.
     @discardableResult
     static func remove() -> String {
         var root: [String: Any]
@@ -4190,20 +4203,23 @@ enum ClaudeHook {
         case .invalid: return "error: \(settingsPath) is not valid JSON — left it untouched"
         case .ok(let r): root = r
         }
-        guard var hooks = root["hooks"] as? [String: Any],
-              let stop = hooks["Stop"] as? [[String: Any]],
-              stop.contains(where: groupHasOurs)
-        else { return "nothing to remove" }
-        let kept: [[String: Any]] = stop.compactMap { group in
-            guard var inner = group["hooks"] as? [[String: Any]], inner.contains(where: isOurs)
-            else { return group }
-            inner.removeAll(where: isOurs)
-            if inner.isEmpty { return nil }
-            var g = group
-            g["hooks"] = inner
-            return g
+        guard var hooks = root["hooks"] as? [String: Any] else { return "nothing to remove" }
+        var found = false
+        for (event, script) in owned {
+            let all = groups(root, event)
+            guard all.contains(where: { groupRuns($0, script) }) else { continue }
+            found = true
+            let kept: [Any] = all.compactMap { group -> Any? in
+                guard groupRuns(group, script), var g = group as? [String: Any],
+                      var inner = g["hooks"] as? [Any] else { return group }
+                inner.removeAll(where: { runs($0, script) })
+                if inner.isEmpty { return nil }
+                g["hooks"] = inner
+                return g
+            }
+            if kept.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = kept }
         }
-        if kept.isEmpty { hooks.removeValue(forKey: "Stop") } else { hooks["Stop"] = kept }
+        guard found else { return "nothing to remove" }
         if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
         return write(root) ? "removed" : "error: couldn't write \(settingsPath)"
     }

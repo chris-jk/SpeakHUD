@@ -27,6 +27,49 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
     func stopGroups() -> [[String: Any]] {
         (settings()["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]] ?? []
     }
+    func put(_ root: [String: Any]) {
+        try? fm.createDirectory(atPath: ClaudeHook.dir, withIntermediateDirectories: true)
+        fm.createFile(atPath: ClaudeHook.settingsPath, contents: try! JSONSerialization.data(withJSONObject: root))
+    }
+    func same(_ a: [String: Any], _ b: [String: Any]) -> Bool { NSDictionary(dictionary: a).isEqual(to: b) }
+
+    // The shape of the `hooks` key on the author's Mac on 2026-10-08, the day the app took
+    // over the question hook (other tools' commands swapped for echoes): the Stop entry the
+    // app wrote, sharing its group with someone else's hook; the question hook's two entries
+    // added by hand, each alone in an AskUserQuestion group after other tools' groups; and
+    // events the app has nothing to do with. `ours: false` is the same file without our three.
+    func handInstalled(summary: String, question: String, ours: Bool = true) -> [String: Any] {
+        func hook(_ command: String, _ more: [String: Any] = [:]) -> [String: Any] {
+            more.merging(["type": "command", "command": command]) { a, _ in a }
+        }
+        let mine: (Any) -> [Any] = { ours ? [$0] : [] }
+        let stop = mine(hook("python3 \(summary)", ["async": true]))
+            + [hook("echo stop-sibling", ["async": true, "timeout": 30, "statusMessage": "Saving"])]
+        let pre: [Any] = [
+            ["matcher": "Bash", "hooks": [hook("echo pre-bash", ["statusMessage": "Checking"])]],
+            ["matcher": "Bash", "hooks": [hook("echo pre-bash-2", ["if": "Bash(git *)", "timeout": 5])]],
+            ["matcher": "Skill", "hooks": [hook("echo pre-skill", ["timeout": 5])]],
+        ] + mine(["matcher": "AskUserQuestion",
+                  "hooks": [hook("python3 \(question)", ["async": true, "timeout": 600])]])
+        let post: [Any] = [
+            ["matcher": "Edit|Write", "hooks": [hook("echo post-edit", ["async": true, "timeout": 10])]],
+        ] + mine(["matcher": "AskUserQuestion",
+                  "hooks": [hook("python3 \(question) --answered", ["timeout": 5])]])
+        return ["model": "opus", "hooks": [
+            "Stop": [["hooks": stop], ["hooks": [hook("echo stop-other", ["async": true, "timeout": 10])]]],
+            "PreToolUse": pre,
+            "PostToolUse": post,
+            "SessionStart": [["hooks": [hook("echo start", ["async": true])]],
+                             ["matcher": "startup|resume|clear", "hooks": [hook("echo start-2")]]],
+            "SessionEnd": [["hooks": [hook("echo end", ["async": true, "timeout": 10])]]],
+            "UserPromptSubmit": [["hooks": [hook("echo prompt", ["timeout": 5])]]],
+        ]]
+    }
+    // The two ways the commands are spelt: as that Mac has them, and pointed into the sandbox.
+    func spellings(_ dir: String) -> [(summary: String, question: String)] {
+        [("~/.claude/read-summary.py", "~/.claude/hooks/read-question.py"),
+         ("\(dir)/read-summary.py", "\(dir)/hooks/read-question.py")]
+    }
 
     // Fresh install writes all three pieces.
     sandbox { dir, script, binary in
@@ -106,6 +149,33 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
         t.expectEqual(stopGroups().count, 2, "non-empty groups kept")
         t.expectEqual(ClaudeHook.status(script: script, binary: binary), .notInstalled, "after remove")
         t.expectEqual(ClaudeHook.remove(), "nothing to remove", "second remove is a no-op")
+    }
+
+    // remove() takes out the question hook's two entries with the Stop entry, so unticking
+    // the menu item stops questions being read too, and leaves everyone else's hooks, on
+    // every event, exactly as they were.
+    sandbox { dir, _, _ in
+        for s in spellings(dir) {
+            put(handInstalled(summary: s.summary, question: s.question))
+            t.expectEqual(ClaudeHook.remove(), "removed", "remove over a hand install (\(s.question))")
+            t.expect(same(settings(), handInstalled(summary: s.summary, question: s.question, ours: false)),
+                     "our three entries gone, nothing else changed (\(s.question)), got \(settings())")
+            t.expectEqual(ClaudeHook.remove(), "nothing to remove", "second remove is a no-op")
+        }
+    }
+
+    // Someone else's hook sharing the question hook's group stays, matcher and all.
+    sandbox { _, _, _ in
+        let theirs: [String: Any] = ["type": "command", "command": "echo question-sibling"]
+        func group(_ ourCommand: String?) -> [String: Any] {
+            let ours: [Any] = ourCommand.map { [["type": "command", "command": $0, "timeout": 5]] } ?? []
+            return ["matcher": "AskUserQuestion", "hooks": ours + [theirs]]
+        }
+        put(["hooks": ["PreToolUse": [group("python3 ~/.claude/hooks/read-question.py")],
+                       "PostToolUse": [group("python3 ~/.claude/hooks/read-question.py --answered")]]])
+        t.expectEqual(ClaudeHook.remove(), "removed", "question entries alone are ours to remove")
+        t.expect(same(settings(), ["hooks": ["PreToolUse": [group(nil)], "PostToolUse": [group(nil)]]]),
+                 "the sibling keeps its group and matcher, got \(settings())")
     }
 
     // remove() drops our group once it's empty, and the hooks key with it.
