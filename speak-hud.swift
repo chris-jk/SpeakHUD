@@ -3974,7 +3974,7 @@ enum SetHotkey {
 enum ClaudeHook {
     enum Status: String {
         case installed
-        case stale                          // entry present, but a file is missing or out of date
+        case stale                          // partly there: an entry or a file is missing or out of date
         case notInstalled = "not installed"
     }
 
@@ -4078,7 +4078,6 @@ enum ClaudeHook {
     private static func registered(_ root: [String: Any], _ piece: Piece) -> Bool {
         groups(root, piece.event).contains(where: { groupRuns($0, piece.script) })
     }
-    private static func stopRegistered(_ root: [String: Any]) -> Bool { registered(root, pieces[0]) }
     /// Why we won't add to this settings.json: `hooks`, or one of our events under it,
     /// isn't the object or list Claude Code writes. Adding ours would mean replacing it.
     private static func unknownShape(_ root: [String: Any]) -> String? {
@@ -4143,9 +4142,12 @@ enum ClaudeHook {
 
     // MARK: public surface
 
-    /// Three-way status plus, when stale, what's wrong. `script`/`binary` are what an
-    /// install would copy from; a nil source can't be compared, so only presence counts.
-    static func check(script: URL? = bundledScript,
+    /// Three-way status plus, when stale, what's wrong. `script`/`question`/`binary` are
+    /// what an install would copy from; a nil source can't be compared, so only presence
+    /// counts. Not installed means none of our three entries is there; with some but not
+    /// all (an install from before the question hook was ours, or what unticking used to
+    /// leave behind) it is stale, and the install that repairs it adds the rest.
+    static func check(script: URL? = bundledScript, question: URL? = bundledQuestionScript,
                       binary: URL? = runningExecutable) -> (status: Status, problems: [String]) {
         let root: [String: Any]
         switch readSettings() {
@@ -4153,13 +4155,16 @@ enum ClaudeHook {
         case .invalid: return (.notInstalled, ["\(settingsPath) is not valid JSON"])
         case .ok(let r): root = r
         }
-        guard stopRegistered(root) else { return (.notInstalled, []) }
+        let missing = pieces.filter { !registered(root, $0) }
+        guard missing.count < pieces.count else { return (.notInstalled, []) }
         let fm = FileManager.default
-        var problems: [String] = []
-        if !fm.fileExists(atPath: scriptPath) {
-            problems.append("script missing")
-        } else if let s = script, !sameContents(s.path, scriptPath) {
-            problems.append("script differs from bundled copy")
+        var problems = missing.map { "\($0.event) hook not registered" }
+        for (what, source, path) in [("script", script, scriptPath), ("question script", question, questionPath)] {
+            if !fm.fileExists(atPath: path) {
+                problems.append("\(what) missing")
+            } else if let s = source, !sameContents(s.path, path) {
+                problems.append("\(what) differs from bundled copy")
+            }
         }
         if !fm.isExecutableFile(atPath: binPath) {
             problems.append("binary missing")
@@ -4169,8 +4174,9 @@ enum ClaudeHook {
         return (problems.isEmpty ? .installed : .stale, problems)
     }
 
-    static func status(script: URL? = bundledScript, binary: URL? = runningExecutable) -> Status {
-        check(script: script, binary: binary).status
+    static func status(script: URL? = bundledScript, question: URL? = bundledQuestionScript,
+                       binary: URL? = runningExecutable) -> Status {
+        check(script: script, question: question, binary: binary).status
     }
 
     /// Refresh the script and binary where copies already exist, without touching

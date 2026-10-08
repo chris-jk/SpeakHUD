@@ -85,7 +85,7 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
     // Fresh install writes every piece: both scripts, the binary, and the three entries.
     sandbox { dir, script, question, binary in
         t.expect(ClaudeHook.settingsPath.hasPrefix(dir), "override points settings at the temp dir")
-        t.expectEqual(ClaudeHook.status(script: script, binary: binary), .notInstalled, "empty dir")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .notInstalled, "empty dir")
         t.expectEqual(ClaudeHook.install(script: script, question: question, binary: binary), "installed", "fresh install")
         t.expect(fm.contentsEqual(atPath: ClaudeHook.scriptPath, andPath: script.path), "script written")
         t.expectEqual(ClaudeHook.questionPath, dir + "/hooks/read-question.py", "the question script goes in hooks/")
@@ -104,7 +104,7 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
                 ["type": "command", "command": q + " --answered", "timeout": 5]]]],
         ]]
         t.expect(same(settings(), wanted), "the three entries as written, got \(settings())")
-        t.expectEqual(ClaudeHook.status(script: script, binary: binary), .installed, "after install")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .installed, "after install")
         _ = ClaudeHook.install(script: script, question: question, binary: binary)
         t.expect(same(settings(), wanted), "reinstall doesn't add a second entry anywhere, got \(settings())")
     }
@@ -143,18 +143,64 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
     sandbox { _, script, question, binary in
         _ = ClaudeHook.install(script: script, question: question, binary: binary)
         try? "print('old')\n".write(toFile: ClaudeHook.scriptPath, atomically: true, encoding: .utf8)
-        let c = ClaudeHook.check(script: script, binary: binary)
+        let c = ClaudeHook.check(script: script, question: question, binary: binary)
         t.expectEqual(c.status, .stale, "tampered script")
         t.expect(!c.problems.isEmpty, "stale says why")
         t.expectEqual(ClaudeHook.install(script: script, question: question, binary: binary), "installed", "repair")
-        t.expectEqual(ClaudeHook.status(script: script, binary: binary), .installed, "after repair")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .installed, "after repair")
+    }
+
+    // The same for the question script: a different or missing copy is stale, and says which.
+    sandbox { _, script, question, binary in
+        _ = ClaudeHook.install(script: script, question: question, binary: binary)
+        try? "print('old')\n".write(toFile: ClaudeHook.questionPath, atomically: true, encoding: .utf8)
+        var c = ClaudeHook.check(script: script, question: question, binary: binary)
+        t.expectEqual(c.status, .stale, "tampered question script")
+        t.expectEqual(c.problems, ["question script differs from bundled copy"], "and only that is wrong")
+        t.expectEqual(ClaudeHook.status(script: script, question: nil, binary: binary), .installed,
+                      "with nothing to compare it to, being there is enough")
+        try? fm.removeItem(atPath: ClaudeHook.questionPath)
+        c = ClaudeHook.check(script: script, question: nil, binary: binary)
+        t.expectEqual(c.status, .stale, "missing question script")
+        t.expectEqual(c.problems, ["question script missing"], "and only that is wrong")
+        t.expectEqual(ClaudeHook.install(script: script, question: question, binary: binary), "installed", "repair")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .installed, "after repair")
+    }
+
+    // Some of our entries but not all is stale too, naming the ones to add; none is not
+    // installed, whatever else is on those events; and the hand install is installed.
+    sandbox { dir, script, question, binary in
+        func check(_ root: [String: Any]) -> (status: ClaudeHook.Status, problems: [String]) {
+            put(root)
+            return ClaudeHook.check(script: script, question: question, binary: binary)
+        }
+        _ = ClaudeHook.install(script: script, question: question, binary: binary)   // the files
+        let mine = spellings(dir)[1]
+        // From before the question hook was ours: a rebuild asks the status, and "stale" is
+        // what makes it run the install that adds the other two.
+        var c = check(handInstalled(summary: mine.summary, questions: false))
+        t.expectEqual(c.status, .stale, "Stop entry only")
+        t.expectEqual(c.problems, ["PreToolUse hook not registered", "PostToolUse hook not registered"], "…says which")
+        t.expectEqual(ClaudeHook.install(script: script, question: question, binary: binary), "installed", "upgrade")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .installed, "after upgrade")
+        // What unticking the menu item used to leave behind.
+        c = check(handInstalled(question: mine.question, stop: false))
+        t.expectEqual(c.status, .stale, "question entries only")
+        t.expectEqual(c.problems, ["Stop hook not registered"], "…says which")
+        c = check(handInstalled(stop: false, questions: false))
+        t.expectEqual(c.status, .notInstalled, "other tools' hooks on our events aren't ours")
+        t.expect(c.problems.isEmpty, "…and nothing is wrong with that")
+        for s in spellings(dir) {
+            c = check(handInstalled(summary: s.summary, question: s.question))
+            t.expectEqual(c.status, .installed, "the hand install is ours (\(s.question)), problems \(c.problems)")
+        }
     }
 
     // Missing binary -> stale.
     sandbox { _, script, question, binary in
         _ = ClaudeHook.install(script: script, question: question, binary: binary)
         try? fm.removeItem(atPath: ClaudeHook.binPath)
-        t.expectEqual(ClaudeHook.status(script: script, binary: binary), .stale, "missing binary")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .stale, "missing binary")
     }
 
     // Running `~/.claude/bin/speak-hud --setup-claude`: source IS the destination. The old
@@ -242,7 +288,7 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
         let cmds = stopGroups().flatMap { ($0["hooks"] as? [[String: Any]] ?? []).compactMap { $0["command"] as? String } }
         t.expectEqual(cmds, ["echo sibling", "echo other-group"], "sibling hooks kept, ours gone")
         t.expectEqual(stopGroups().count, 2, "non-empty groups kept")
-        t.expectEqual(ClaudeHook.status(script: script, binary: binary), .notInstalled, "after remove")
+        t.expectEqual(ClaudeHook.status(script: script, question: question, binary: binary), .notInstalled, "after remove")
         t.expectEqual(ClaudeHook.remove(), "nothing to remove", "second remove is a no-op")
     }
 
@@ -307,7 +353,7 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
         t.expect(!fm.fileExists(atPath: ClaudeHook.binPath), "binary not created")
         t.expect(!fm.fileExists(atPath: ClaudeHook.settingsPath), "nothing registered")
         try? "{ not json".write(toFile: ClaudeHook.settingsPath, atomically: true, encoding: .utf8)
-        let c = ClaudeHook.check(script: script, binary: binary)
+        let c = ClaudeHook.check(script: script, question: question, binary: binary)
         t.expectEqual(c.status, .notInstalled, "unparseable settings")
         t.expect(c.problems.first?.contains("not valid JSON") == true, "and says why")
     }
