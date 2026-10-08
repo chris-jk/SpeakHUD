@@ -251,6 +251,70 @@ scenario('with Read aloud off, a turn that arrives is not read', async () => {
   assert.deepStrictEqual(w.voice.texts(), []);
 });
 
+scenario('the Read aloud switch says so when it goes on, is remembered, and off stops the voice', async () => {
+  const w = await open([turn('a', 'Alpha.')], { manner: speaks({ lasts: 1500 }) });
+  const says = w.$('speak-says');
+  assert.strictEqual(says.hidden, true);
+  await w.tap(w.$('speak'));
+  assert.deepStrictEqual(w.voice.texts(), ['Reading aloud.']);
+  assert.strictEqual(w.store.get('speak'), '1');
+  assert.deepStrictEqual([says.hidden, says.textContent], [false, 'This phone reads new turns aloud while this page is open.']);
+  w.mac.state.turns = [turn('a', 'Alpha, a second turn.')];
+  await w.advance(3000);                      // read as it arrives, and still being read when:
+  assert.strictEqual(readButton(w, 'a').textContent, 'Pause');
+  await w.tap(w.$('speak'));
+  assert.strictEqual(w.voice.speaking, false);
+  assert.strictEqual(readButton(w, 'a').textContent, 'Read');
+  assert.strictEqual(w.store.get('speak'), '0');
+  assert.deepStrictEqual(heard(w).map((h) => [h.why, h.end]), [['arrival', 'off']]);
+});
+
+scenario('a push brings you to a window: the first tap of the visit reads that one, question and all', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.', { question: 'Shall I go on?' })], Object.assign({ hash: '#b' }, SPEAK_ON));
+  assert.deepStrictEqual(w.scrolledTo, ['b']);
+  assert.strictEqual(w.$('speak-says').textContent, 'Tap anywhere once and this phone will read new turns aloud.');
+  await firstTap(w);
+  await w.advance(3000);
+  assert.deepStrictEqual(w.voice.texts().filter((t) => t.trim()), ['T-b.', 'Bee.', 'It is asking.', 'Shall I go on?']);
+  assert.deepStrictEqual(heard(w).map((h) => [h.why, h.end]), [['visit', 'finished']]);
+});
+
+scenario('a turn that changes while it is being read is dropped, and the new one read in its place', async () => {
+  const w = await open([turn('a', 'Old words, first.\nOld words, second.')], Object.assign({ manner: speaks({ lasts: 2000 }) }, SPEAK_ON));
+  await w.tap(readButton(w, 'a'));
+  w.mac.state.turns = [turn('a', 'New words.')];
+  await w.advance(2500);                      // the name is said, "Old words, first." is under way
+  await w.advance(9000);
+  assert.deepStrictEqual(w.voice.texts(), ['T-a.', 'Old words, first.', 'T-a.', 'New words.']);
+  assert.deepStrictEqual(heard(w).map((h) => [h.why, h.end]), [['tap', 'changed'], ['arrival', 'finished']]);
+});
+
+scenario('a voice picked from the list says who it is, and a reading carries on in it from the same word', async () => {
+  const voices = [
+    { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.Samantha' },
+    { name: 'Daniel (Enhanced)', lang: 'en-GB', voiceURI: 'com.apple.voice.Daniel' },
+    { name: 'Amelie', lang: 'fr-CA', voiceURI: 'com.apple.voice.Amelie' },
+  ];
+  const w = await open([turn('a', 'one two three four five six.')], { voices, manner: speaks({ perWord: 100 }) });
+  const list = w.$('voice');
+  assert.strictEqual(w.$('voice-pick').hidden, false);
+  assert.deepStrictEqual(list.children.map((o) => o.textContent), ["Phone's own", 'Samantha', 'Daniel (Enhanced) (en-GB)']);   // its own language only
+  const pick = async (uri) => { list.value = uri; list.dispatchEvent({ type: 'change', bubbles: true }); await w.settle(); };
+
+  await pick('com.apple.voice.Daniel');
+  assert.strictEqual(w.store.get('voice'), 'com.apple.voice.Daniel');
+  assert.deepStrictEqual(w.voice.said.map((u) => [u.text, u.voice && u.voice.name]), [['This is Daniel.', 'Daniel (Enhanced)']]);
+  await w.advance(1000);
+
+  await w.tap(readButton(w, 'a'));
+  await w.advance(400);                       // the name, then as far as "three"
+  await pick('com.apple.voice.Samantha');
+  const last = w.voice.said[w.voice.said.length - 1];
+  assert.deepStrictEqual([last.text, last.voice.name, last.lang], ['three four five six.', 'Samantha', 'en-US']);
+  await w.advance(2000);
+  assert.deepStrictEqual(heard(w).map((h) => [h.voice, h.end]), [['Daniel (Enhanced)', 'finished']]);   // one reading, begun in Daniel
+});
+
 scenario('turns that arrive during a reading wait their turn and are read after it', async () => {
   const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')], Object.assign({ manner: speaks({ lasts: 1500 }) }, SPEAK_ON));
   await w.tap(readButton(w, 'a'));
