@@ -247,6 +247,70 @@ scenario('a reading stops when its window goes, and what waited behind it is rea
   assert.strictEqual(readButton(w, 'b').textContent, 'Read');
 });
 
+scenario('nothing is read into an open mic: a turn that arrives is read when the mic closes', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')], Object.assign({ mic: true }, SPEAK_ON));
+  w.mac.routes['/api/hear'] = () => ({ data: { text: 'hello there' } });
+  await firstTap(w);
+  const before = w.voice.said.length;
+  const mic = w.win('a').querySelector('.win-mic');
+  await w.tap(mic);
+  w.mac.state.turns = [turn('b', 'Bee has finished.'), turn('a', 'Alpha.')];
+  await w.mic.loud(4000);                     // four seconds of talking; b's turn lands meanwhile
+  assert.strictEqual(mic.classList.contains('is-listening'), true);
+  assert.deepStrictEqual(w.voice.texts().slice(before), []);
+  await w.tap(mic);                           // done talking
+  await w.advance(3000);
+  assert.strictEqual(answerBox(w, 'a').value, 'hello there');
+  assert.deepStrictEqual(w.voice.texts().slice(before), ['T-b.', 'Bee has finished.']);
+});
+
+scenario('a reading the mic cuts into carries on from its word when the mic closes, then what arrived is read', async () => {
+  const w = await open([turn('a', 'one two three four five six.'), turn('b', 'Bee.')],
+    Object.assign({ mic: true, manner: speaks({ perWord: 100 }) }, SPEAK_ON));
+  w.mac.routes['/api/hear'] = () => ({ data: { text: 'hello there' } });
+  await w.tap(readButton(w, 'a'));
+  await w.advance(400);                       // the name, then as far as "three"
+  const mic = w.win('b').querySelector('.win-mic');
+  await w.tap(mic);
+  assert.strictEqual(w.voice.speaking, false);
+  assert.strictEqual(readButton(w, 'a').textContent, 'Resume');
+  w.mac.state.turns = [turn('c', 'See.'), turn('a', 'one two three four five six.'), turn('b', 'Bee.')];
+  await w.mic.loud(3000);                     // a new terminal's turn lands while the mic is open
+  assert.deepStrictEqual(w.voice.texts(), ['T-a.', 'one two three four five six.']);
+  await w.tap(mic);
+  await w.advance(6000);
+  assert.deepStrictEqual(w.voice.texts().slice(2), ['three four five six.', 'T-c.', 'See.']);
+  assert.deepStrictEqual(heard(w).map((h) => [h.why, h.end]), [['tap', 'mic'], ['resume', 'finished'], ['arrival', 'finished']]);
+});
+
+scenario('a mic that closes on a page you have left starts nothing: the reading it cut into stays paused', async () => {
+  const w = await open([turn('a', 'one two three four five six.'), turn('b', 'Bee.')],
+    Object.assign({ mic: true, manner: speaks({ perWord: 100 }) }, SPEAK_ON));
+  await w.tap(readButton(w, 'a'));
+  await w.advance(400);
+  await w.tap(w.win('b').querySelector('.win-mic'));
+  await w.leave();                            // the dictation sends what it has and lets the mic go
+  await w.advance(1000);
+  await w.comeBack();
+  await w.advance(5000);
+  assert.strictEqual(readButton(w, 'a').textContent, 'Resume');
+  assert.deepStrictEqual(w.voice.texts(), ['T-a.', 'one two three four five six.']);
+});
+
+scenario('a pause of your own stays yours: a mic opening and closing does not end it', async () => {
+  const w = await open([turn('a', 'one two three four five six.'), turn('b', 'Bee.')], { mic: true, manner: speaks({ perWord: 100 }) });
+  await w.tap(readButton(w, 'a'));
+  await w.advance(400);
+  await w.tap(readButton(w, 'a'));            // Pause
+  const mic = w.win('b').querySelector('.win-mic');
+  await w.tap(mic);
+  await w.mic.loud(1000);
+  await w.tap(mic);
+  await w.advance(6000);
+  assert.strictEqual(readButton(w, 'a').textContent, 'Resume');
+  assert.deepStrictEqual(w.voice.texts(), ['T-a.', 'one two three four five six.']);
+});
+
 // -- one tab at a time ---------------------------------------------------------
 
 scenario('a newer tab takes over: this one stops reading and says so, and a tap takes it back', async () => {

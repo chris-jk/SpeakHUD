@@ -387,8 +387,9 @@
     mark();
   }
 
+  // On to whatever is waiting to be read. Not while a mic is open: it waits for that.
   function next() {
-    const waiting = line.shift();
+    const waiting = micOpen ? null : line.shift();
     if (waiting) read(waiting[0], waiting[1], null, waiting[2]); else mark();
   }
 
@@ -406,9 +407,9 @@
   }
 
   // Stop reading but keep the place, and its marks on the page: Resume goes on from
-  // the word it had reached.
-  function pause(end) {
-    if (!reading || !now) return;
+  // the word it had reached. Says whether there was a reading to stop.
+  function keepPlace(end) {
+    if (!reading || !now) return false;
     paused = { key: now.key, what: now.what, parts: now.parts, at: now.at, word: now.word || 0 };
     readId++;
     watchOff();
@@ -417,6 +418,7 @@
     now = null;
     tally(end || 'paused');
     mark();
+    return true;
   }
 
   function carryOn() {
@@ -424,6 +426,40 @@
     const from = paused;
     read(from.key, from.what, from, 'resume');
   }
+
+  // While a dictation mic is open the voice says nothing by itself: it would be heard
+  // as you. A reading the mic cuts into keeps its place and carries on when the mic
+  // closes, and turns that arrive meanwhile wait in line behind it. That pause is the
+  // mic's (`paused.mic`); one of your own stays yours, and the mic never ends it.
+  let micOpen = false;
+  let micWatch = null;
+  function micOpened() {
+    micOpen = true;
+    if (keepPlace('mic')) paused.mic = true;
+    // The dictation says when its mic opens (it calls `pause`) but not when it's done
+    // with it, so that is watched for: `hearing` is the dictation going on.
+    if (!micWatch) {
+      micWatch = setInterval(() => {
+        if (hearing) return;
+        clearInterval(micWatch);
+        micWatch = null;
+        micClosed();
+      }, 200);
+    }
+  }
+  function micClosed() {
+    micOpen = false;
+    // A page you've left, or one a newer tab took over from, starts nothing: what the
+    // mic cut into is left paused there, like any reading on a page you leave.
+    if (document.hidden || !active) {
+      line.length = 0;
+      if (paused) delete paused.mic;
+      return;
+    }
+    if (paused && paused.mic) carryOn(); else if (!reading && !paused) next();
+  }
+  // What the dictation calls as its mic opens.
+  function pause() { micOpened(); }
 
   // A window has left the page, its terminal closed: nothing of it waits to be read,
   // and a place kept in it is forgotten, or no new turn would ever be read over it.
@@ -437,12 +473,13 @@
 
   function showSpeed() { speedButton.textContent = 'Speed ' + speed + '\u00d7'; }
 
-  // News for a window: read it now, or after what's being read. Not over a reading
-  // you've paused, and not from a copy of the page that another tab has taken over from.
+  // News for a window: read it now, or after what's being read, or once an open mic has
+  // closed. Not over a reading you've paused, and not from a copy of the page that
+  // another tab has taken over from.
   function announce(key, what, why) {
-    if (!speakOn || !unlocked || document.hidden || !active || paused) return;
+    if (!speakOn || !unlocked || document.hidden || !active || (paused && !paused.mic)) return;
     if (line.some((l) => l[0] === key && l[1] === what)) return;
-    if (reading) line.push([key, what, why]); else read(key, what, null, why);
+    if (reading || micOpen || paused) line.push([key, what, why]); else read(key, what, null, why);
   }
 
   function accent(name) {
@@ -874,7 +911,7 @@
     readButton.hidden = !canSpeak;
     readButton.addEventListener('click', () => {
       touched = 0;   // this tap is a request to be shown the reading, not a hand on the page
-      if (reading === turn.key) return pause();
+      if (reading === turn.key) return keepPlace();
       if (paused && paused.key === turn.key) return carryOn();
       line.length = 0;
       if (reading) hush('replaced'); else { paused = null; unmark(); }
@@ -1629,7 +1666,7 @@
   // Leaving the page (another app, the lock button) stops a phone's voice anyway: keep
   // the place, so Resume carries on from there when you're back.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { line.length = 0; pause('hidden'); } else refresh();
+    if (document.hidden) { line.length = 0; keepPlace('hidden'); } else refresh();
   });
   setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
   refresh();

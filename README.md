@@ -257,7 +257,10 @@ What's on the page:
   lets it speak again (phones only let a page talk after a tap). **Speed** steps through
   1×, 1.25×, 1.5×, 1.75×, 2× and 0.75×, and is remembered too. **Voice** lists the
   phone's own voices in your language, the ones for your region first; pick one and it
-  says who it is, and it reads from then on (also remembered, on that phone). A locked phone or a
+  says who it is, and it reads from then on (also remembered, on that phone). While a
+  mic on the page is open the voice says nothing by itself: a reading it cut into carries
+  on from its word when the mic closes, and turns that arrived meanwhile are read after
+  it (a pause of your own stays paused). A locked phone or a
   closed page reads nothing: that's what the push is for.
 - **Away.** On: finished turns are pushed to your phone and not read aloud, no mic opens
   for a reply nobody is there to give, and the Mac is kept from idling to sleep (the
