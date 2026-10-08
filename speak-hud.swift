@@ -715,6 +715,10 @@ enum SpokenCommand: Equatable {
     case resume    // carry on
     case stopAll   // stop, and throw the queue away
 
+    /// Said at the end of anything, these throw away all of it: the mic heard something
+    /// it wasn't meant to (the room, a video, a thought you've dropped).
+    private static let takeBacks = ["clear that", "cancel that", "don't send that"]
+
     private static let phrases: [String: SpokenCommand] = {
         var table: [String: SpokenCommand] = [:]
         for p in ["say that again", "say it again", "read that again", "read it again", "repeat that",
@@ -727,6 +731,8 @@ enum SpokenCommand: Equatable {
         // for when they've nothing to say (Chris's first two tries, 10-07).
         for p in ["no reply", "no answer", "nothing to say", "skip", "skip it", "skip this", "skip that",
                   "skip this part"] { table[p] = .skip }
+        // …and the ways of saying "that wasn't meant for you": nothing is sent.
+        for p in takeBacks + ["clear", "clear it", "never mind", "nevermind", "don't send"] { table[words(p)] = .skip }
         for p in ["scratch that", "start over"] { table[p] = .scratch }
         return table
     }()
@@ -761,8 +767,10 @@ enum SpokenCommand: Equatable {
         let said = words(heard)
         guard whileReading else {
             if let c = phrases[said] { return c }
-            // "…no wait, scratch that" takes back everything before it.
-            return said.hasSuffix(" scratch that") ? .scratch : nil
+            // "…no wait, scratch that" takes back everything before it and listens again;
+            // "…clear that" takes it back and shuts the mic.
+            if said.hasSuffix(" scratch that") { return .scratch }
+            return takeBacks.contains { said.hasSuffix(" " + words($0)) } ? .skip : nil
         }
         if let c = reading[said] { return c }
         var bare = said.split(separator: " ").map(String.init)
@@ -1698,8 +1706,8 @@ final class Playback {
     /// hold back to the mic, which resumes on release.
     func togglePause() {
         pausedByVoice = false   // your hands are on it now: the mic isn't kept open for "go on"
-        if window != nil {   // the one key that works from anywhere: "not now"
-            closeWindow("dismissed")
+        if window != nil {   // the one key that works from anywhere, and the Clear button: "not that"
+            closeWindow("cleared")
             moveOn()
             return
         }
@@ -2221,11 +2229,12 @@ final class Playback {
         if let w = window {
             s.isActive = true   // you're mid-reply: the HUD stays up
             s.canSkip = true
+            s.pauseTitle = "✕ Clear"   // nothing to pause: the button (and its key) throws the reply away
             switch w.phase {
             case .opening: s.status = "🎙 Opening the mic…"
             case .waiting: s.status = "🎙 Listening: answer \(w.item.source), or say nothing"
-            case .hearing: s.status = "🎙 Listening…"
-            case .sending: s.status = "➤ Sending to \(w.item.source)… say more to add to it"
+            case .hearing: s.status = "🎙 Listening… “clear that” takes it back"
+            case .sending: s.status = "➤ Sending to \(w.item.source)… “clear that” stops it"
             }
         } else if !s.isActive {
             s.status = stopped ? "■ Stopped" : !note.isEmpty ? note : (lastItem == nil ? "" : "Done")

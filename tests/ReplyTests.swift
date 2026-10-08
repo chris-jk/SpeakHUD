@@ -119,6 +119,13 @@ let replySuite = Suite("Reply") { t in
     t.expectEqual(SpokenCommand.parse("No reply."), .skip, "no reply")
     t.expectEqual(SpokenCommand.parse("Skip."), .skip, "skip: the short way to say you've nothing to say")
     t.expectEqual(SpokenCommand.parse("skip this part"), .skip, "skip this part")
+    for said in ["Clear that.", "clear", "never mind", "Don't send that.", "cancel that",
+                 "and that's the weather for today, clear that", "uh run the, no, don't send that"] {
+        t.expectEqual(SpokenCommand.parse(said), .skip, "\"\(said)\" throws away what was heard")
+    }
+    for said in ["cancel", "clear the cache", "the sky is clear", "never mind the tests, ship it"] {
+        t.expect(SpokenCommand.parse(said) == nil, "\"\(said)\" is a reply")
+    }
     t.expectEqual(SpokenCommand.parse("Scratch that"), .scratch, "scratch that")
     t.expectEqual(SpokenCommand.parse("run the tests, no wait, scratch that"), .scratch, "scratch that takes back what came before it")
     for said in ["later", "again", "next", "stop", "skip the tests", "do it again", "put it off until the tests pass", ""] {
@@ -305,7 +312,7 @@ let replySuite = Suite("Reply") { t in
         let r = listening("a", "b"), p = r.playback!
         _ = r.ear.take()
         r.ear.hear("yes")
-        t.expectEqual(p.state.status, "🎙 Listening…", "words arriving")
+        t.expectEqual(p.state.status, "🎙 Listening… “clear that” takes it back", "words arriving, and the way out")
         t.expectEqual(p.state.heard, "yes", "the HUD shows what's been heard")
         let pause = r.armed
         t.expectEqual(pause?.seconds, Playback.replyPause, "a pause of \(Playback.replyPause)s ends it")
@@ -316,11 +323,11 @@ let replySuite = Suite("Reply") { t in
         t.expect(r.armed !== pause && pause?.cancelled == true, "more words do")
 
         r.fire()   // the pause runs out
-        t.expectEqual(p.state.status, "➤ Sending to A… say more to add to it", "it shows as sending first")
+        t.expectEqual(p.state.status, "➤ Sending to A… “clear that” stops it", "it shows as sending first")
         t.expectEqual(r.armed?.seconds, Playback.replyGrace, "for \(Playback.replyGrace)s")
         t.expect(r.sent.isEmpty, "nothing sent yet")
         r.ear.hear("Yes, go ahead and commit")
-        t.expectEqual(p.state.status, "🎙 Listening…", "saying more takes it back to listening")
+        t.expectEqual(p.state.status, "🎙 Listening… “clear that” takes it back", "saying more takes it back to listening")
         r.fire(); r.fire()   // pause, then grace
         t.expectEqual(r.sent.map(\.text), ["Yes, go ahead and commit"], "then what you said is sent")
         t.expectEqual(r.sent.map(\.to), ["A"], "to the terminal whose turn it was")
@@ -490,9 +497,23 @@ let replySuite = Suite("Reply") { t in
         t.expect(r.sent.isEmpty, "Skip while it shows as sending takes it back")
 
         r = listening("a", "b")
+        t.expectEqual(r.playback.state.pauseTitle, "✕ Clear", "while it listens, the Pause button is Clear")
+        r.ear.hear("something the room said"); r.fire()   // showing as "sending"
+        t.expectEqual(r.playback.state.pauseTitle, "✕ Clear", "right up until it's sent")
         r.playback.togglePause()
-        t.expectEqual(r.playback.current?.text, "b", "the pause key means not now: on to the next")
-        t.expectEqual(r.playback.state.pauseTitle, "❚❚ Pause", "and nothing is paused")
+        r.fire()
+        t.expect(r.sent.isEmpty && r.replied.isEmpty, "Clear (or its key) throws away what was heard: nothing is sent")
+        t.expectEqual(r.playback.current?.text, "b", "and it's on to the next")
+        t.expectEqual(r.playback.state.pauseTitle, "❚❚ Pause", "where the button is Pause again, and nothing is paused")
+        t.expect(r.playback.state.heard == nil, "nothing of it is left on screen")
+
+        r = listening("a", "b")
+        r.ear.hear("and that's the weather for today")
+        r.fire()   // "sending"
+        r.ear.hear("and that's the weather for today clear that")
+        r.fire(); r.fire()
+        t.expect(r.sent.isEmpty, "\"clear that\", said while it shows as sending, stops it")
+        t.expectEqual(r.playback.current?.text, "b", "and moves on")
 
         r = listening("a", "b")
         _ = r.ear.take(); _ = r.voice.take()
