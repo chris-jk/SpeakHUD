@@ -309,9 +309,60 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(boxOn(["done", longRule, "❯ 1. Yes", "  2. No", longRule, "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent"].joined(separator: "\n")) == nil,
              "numbered lines between the prompt's rules, with nothing that says keys answer them, are not a box either")
     t.expect(boxOn("  one\n❯ two\n  three\nmain · 3 files changed") == nil, "a line with a dot in the middle of it is not a box saying how to answer")
-    let unsaid = screenshot("permission").components(separatedBy: "\n").filter { !$0.contains("Esc to cancel") }.joined(separator: "\n")
-    t.expect(unsaid != screenshot("permission") && boxOn(unsaid) == nil, "a list of choices with nothing under it that says how to answer is not read as one")
     t.expect(boxOn(screenshot("permission") + "\nchris@mac project % ") == nil, "nor is a box left on the screen of a pane that has dropped to its shell")
+
+    // Not every box names its keys under its choices. Claude Code 2.1.294's plan approval
+    // has there only how to open the plan in an editor, or nothing at all, and a
+    // permission box may say "(esc)" in its last choice and no more (these three are
+    // built from its own code, not captured). What marks them is how Claude draws every
+    // dialog: a rule across the pane, what it asks, then its choices numbered from 1.
+    let wide = String(repeating: "─", count: 110), dashes = String(repeating: "╌", count: 110)
+    let plan = ["⏺ I have a plan for the migration.", "", wide, " Ready to code?", "", " Here is Claude's plan:", dashes,
+                " Move the old tables, then drop them.", dashes, "",
+                " Claude has written up a plan and is ready to execute. Would you like to proceed?", "",
+                " ❯ 1. Yes, and auto-accept edits", "   2. Yes, and manually approve edits", "   3. No, keep planning"].joined(separator: "\n")
+    let planInEditor = " ctrl+g to edit in Vim · ~/.claude/plans/happy-otter.md"
+    let escInRow = ["⏺ Bash(rm -rf build)", "  ⎿  Waiting…", "", wide, " Bash command", "", "   rm -rf build", "   Remove the build folder", "",
+                    " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in /Users/you/project",
+                    "   3. No, and tell Claude what to do differently (esc)"].joined(separator: "\n")
+    if let box = boxOn(plan) {
+        t.expect(box.ask.hasSuffix("Would you like to proceed?") && box.hints == nil && box.rows[0].cursor
+                 && box.rows.map { $0.label } == ["Yes, and auto-accept edits", "Yes, and manually approve edits", "No, keep planning"],
+                 "a plan waiting for its yes is a box, though nothing under its choices says so")
+    } else { t.expect(false, "a plan waiting for its yes is read as a box") }
+    t.expect(boxOn(plan + "\n\n" + planInEditor)?.rows.count == 3 && boxOn(plan + "\n\n" + planInEditor)?.hints == "ctrl+g to edit in Vim · ~/.claude/plans/happy-otter.md",
+             "and so it is with a line under them that names no key that answers it")
+    t.expect(boxOn(plan + "\n\n ctrl+g to edit in Vim ·\n ~/.claude/plans/happy-otter.md")?.hints == "ctrl+g to edit in Vim · ~/.claude/plans/happy-otter.md",
+             "or with that line wrapped onto a second by a narrow pane, set in like the first")
+    t.expect(boxOn(escInRow)?.rows.map { $0.number } == [1, 2, 3] && boxOn(escInRow)?.rows[2].label.hasSuffix("(esc)") == true
+             && boxOn(escInRow)?.ask.hasSuffix("Do you want to proceed?") == true, "a permission box whose one word about keys is in its last choice is a box")
+    let unsaid = screenshot("permission").components(separatedBy: "\n").filter { !$0.contains("Esc to cancel") }.joined(separator: "\n")
+    t.expect(unsaid != screenshot("permission") && boxOn(unsaid)?.rows.map { $0.label } == boxOn(screenshot("permission"))?.rows.map { $0.label },
+             "the captured permission box reads the same with the line of keys under it taken away")
+    // That makes a box of nothing else. The prompt's ❯ sits right under its rule, with
+    // nothing asked between; a shell's command line has no number, and its prompt
+    // starts at the edge of the pane, not set in with a box's choices.
+    for (left, what) in [(unsaid, "a permission box"), (plan, "a plan"), (escInRow, "a box that says (esc)"), (screenshot("ask-submit"), "a question's last step")] {
+        t.expect(boxOn(left) != nil && boxOn(left + "\nchris@mac project % ") == nil, "\(what) left on the screen of a pane that has dropped to its shell is not a box")
+    }
+    t.expect(boxOn([wide, " Notes from earlier", "", wide, "❯ 1. Yes", "  2. No", wide].joined(separator: "\n")) == nil
+             && boxOn([wide, " Notes from earlier", "  1. Yes", wide, "❯ 2. No", "  3. Maybe", wide].joined(separator: "\n")) == nil,
+             "numbered lines being written in the prompt are not a box whatever was said under a rule further up: nothing is asked between the prompt's own rule and them")
+    let lettered = String(repeating: "─", count: 40) + " plan mode " + String(repeating: "─", count: 40)
+    t.expect(boxOn([wide, " Notes from earlier", lettered, "❯ 1. Yes", "  2. No"].joined(separator: "\n")) == nil,
+             "nor when the prompt's rule has words set in it: a ❯ right under a rule is the prompt's")
+    t.expect(boxOn([wide, " Notes from earlier", "  1. Yes", wide, "  2. No", "❯ 3. Maybe"].joined(separator: "\n")) == nil,
+             "and a rule through numbered lines, with no line of keys under them, is the prompt's rule under a list Claude wrote, not a box")
+    t.expect(boxOn([wide, "Steps:", "  1. first", "  2. second", "❯ ls"].joined(separator: "\n")) == nil
+             && boxOn([wide, "  status", "", "~/project main", "❯ make build", "  compiling a", "  compiling b"].joined(separator: "\n")) == nil,
+             "nor is a shell under a rule Claude left behind: the line its ❯ is on has no number")
+    t.expect(boxOn(plan + "\n\n one\n two\n three") == nil, "more under its choices than a line and its wrap is not a box's own last line")
+    t.expect(boxOn([wide, " Pick one", "", " ❯ No", "   Yes"].joined(separator: "\n")) == nil,
+             "choices with no numbers and no line of keys under them are not read as a box: nothing tells them from a shell's output")
+    t.expect(boxOn("⏺ Which first?\n\n❯ 1. the header\n  2. the footer") == nil,
+             "a numbered list you sent, still at the foot of the screen, is not a box: no rule opens it")
+    t.expect(boxOn([wide, "", " ❯ 1. Yes", "   2. No"].joined(separator: "\n")) == nil,
+             "nor are numbered choices under a rule that asks nothing: a tap could not tell one such box from the next")
     var draftDesk = PhoneDesk()
     let draftAsked = draftDesk.met([Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)], now: t0)
     t.expect(draftAsked.isEmpty && draftDesk.turns.count == 1 && draftDesk.turns[0].box == nil && draftDesk.turns[0].context == 51,
@@ -420,6 +471,16 @@ let phoneSuite = Suite("Phone") { t in
                                                                     "box": ["ask": "", "tabs": NSNull(), "rows": ["fix the header", statusLine]]])))
     t.expect(writing.pushes.isEmpty, "away, a message being written that starts \"1. \" is not pushed as a question")
     t.expect(onDraft["sent"] as? Bool == false && writing.pressed.isEmpty, "and no tap presses Down and Enter on it, which would send it")
+    // A plan waiting for its yes in that terminal is asking, though no line under its choices names a key.
+    writing.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: plan)]
+    writing.phone.scan(now: Date().addingTimeInterval(Phone.scanEvery + 1))
+    writing.screen = plan
+    let planPush = String(decoding: writing.pushes.first?.httpBody ?? Data(), as: UTF8.self)
+    t.expect(writing.pushes.count == 1 && planPush.contains("Grow guide replies is asking") && planPush.contains("Ready to code?"),
+             "away, a plan waiting for its yes is pushed as asking, with what it says")
+    let approved = json(writing.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Yes, and manually approve edits",
+                                                                     "box": drew(writing.phone.state(), boxKey)])))
+    t.expect(approved["sent"] as? Bool == true && writing.pressed == ["2"], "and a tap on one of its choices presses that choice's digit")
 
     // -- a tap answers the box the page drew, and no other ----------------------
     // Every permission box has Yes first: a row and its label can't tell two of them apart.

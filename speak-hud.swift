@@ -673,7 +673,7 @@ enum Reply {
     }
 
     /// The box of choices at the foot of the screen, or nil: nothing there reads as a
-    /// list of choices with a cursor on one, or nothing says keys answer it.
+    /// list of choices with a cursor on one, or nothing says it is a box of Claude's.
     private static func box(in screen: [String]) -> TerminalBox? {
         var lines = screen
         while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
@@ -696,12 +696,11 @@ enum Reply {
         while top > 0, inList(top - 1) { top -= 1 }
         while bottom < lines.count - 1, inList(bottom + 1) { bottom += 1 }
         while top < at, ruled(top) { top += 1 }
-        // Under the list there's nothing but its hint line: anything more and that ❯ was
-        // a line of the conversation, not a cursor.
-        let under = (bottom + 1..<lines.count).filter { !blank($0) }.map { lines[$0].trimmingCharacters(in: .whitespaces) }
-        guard under.count <= 1 else { return nil }
-        let hints = under.first
-        if let h = hints, !saysKeys(h) { return nil }
+        // Under the list there's nothing but its hint line (two, if a narrow pane wrapped
+        // it): anything more and that ❯ was a line of the conversation, not a cursor.
+        let under = (bottom + 1..<lines.count).filter { !blank($0) }
+        guard under.count <= 2 else { return nil }
+        let hints = under.isEmpty ? nil : under.map { lines[$0].trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
 
         var rows: [TerminalBox.Row] = []
         var labelCol = c + 2
@@ -743,14 +742,25 @@ enum Reply {
                 said.append(text)
             }
         }
-        // A box says it is one, and nothing else is read as one: not being the prompt
-        // isn't enough (a shell isn't the prompt either). Under its choices it says which
-        // keys answer it. The one box that doesn't, the last step of several questions,
-        // opens under a rule with the strip of those questions, and numbers every choice.
+        // Something has to say this is a box of Claude's: not being the prompt isn't
+        // enough (a shell isn't the prompt either). One of two things does.
+        let box = TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
+        // The one line under its choices names the keys that answer it.
+        if under.count == 1, let h = hints, saysKeys(h) { return box }
+        // Or it is drawn the way Claude draws every dialog, whatever words it uses: a rule
+        // across the pane, what it asks, then its choices numbered from 1, with no rule
+        // through them, and under them nothing but a line set in from the edge as they are
+        // (the plan to approve has one that names no key; some permission boxes have none).
+        // The prompt box is never that: its ❯ sits right under its rule, with nothing
+        // asked between. Nor is a shell: the line its ❯ is on has no number, and its
+        // prompt starts at the edge of the pane.
         let opened = open > 0 && rule(lines[open - 1]) == .solid
+        let asks = tabs != nil || !said.isEmpty
         let counted = rows.enumerated().allSatisfy { $0.element.number == $0.offset + 1 }
-        guard hints != nil || (opened && tabs != nil && counted) else { return nil }
-        return TerminalBox(ask: said.joined(separator: "\n"), tabs: tabs, rows: rows, hints: hints)
+        let unruled = at > 0 && rule(lines[at - 1]) == nil && !(top...bottom).contains { rule(lines[$0]) != nil }
+        let footed = under.allSatisfy { c > 0 && col(lines[$0]) == c && rule(lines[$0]) == nil }
+        guard opened, asks, counted, unruled, footed else { return nil }
+        return box
     }
 
     /// Whether the prompt box now holds what was pasted and nothing ahead of it: it
