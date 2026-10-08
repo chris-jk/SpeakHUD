@@ -5,8 +5,9 @@ hook. When Claude finishes a turn it reads the transcript, extracts the latest a
 message, strips code blocks / markdown, and hands the text to SpeakHUD.
 
 The app installs it for you (menu bar, or `speak-hud --setup-claude` from the app
-bundle), copying this script to `~/.claude/read-summary.py`. To wire it up by hand, copy
-the script there and add this to `~/.claude/settings.json`:
+bundle), copying this script to `~/.claude/read-summary.py`, together with the question
+hook [below](#questions-read-questionpy). To wire it up by hand, copy the script there
+and add this to `~/.claude/settings.json`:
 
 ```json
 {
@@ -135,12 +136,19 @@ hasn't ended: it waits on the answer.
 
 It also stands down for a newer question from the session, for Stop (read from the
 agent log), and when a wait runs past 120s. No hook fires between answers inside one
-multi-question call, so Claude is told to ask one question per call. Installed by hand
-for now:
+multi-question call, so Claude is told to ask one question per call.
+
+The app installs it with the Stop hook and removes it with it (the same menu item and
+`--setup-claude` / `--remove-claude`): the script is copied to
+`~/.claude/hooks/read-question.py`, one folder below `read-summary.py`, which it imports
+from `~/.claude` when there is no copy beside it. These two entries are added, and an
+entry already running `read-question.py` on either event (say, one put in by hand) is
+kept as it is, not added again:
 
 ```json
 "PreToolUse":  [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/read-question.py", "async": true, "timeout": 600 }] }],
 "PostToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/read-question.py --answered", "timeout": 5 }] }]
 ```
 
-Tests: `tests/read_question_test.py` (run by `tests/run.sh`).
+Tests: `tests/read_question_test.py` (run by `tests/run.sh`), which also runs the script
+from a throwaway `~/.claude/hooks`; `tests/ClaudeHookTests.swift` for the install.

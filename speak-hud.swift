@@ -3962,14 +3962,17 @@ enum SetHotkey {
     }
 }
 
-// Installs/removes the Claude Code "Stop" hook that reads each response aloud, so
-// a downloaded copy can replicate the author's setup with one click. This is the one
-// install path: the menu item, --setup-claude, and build.sh (which shells out to
-// --setup-claude) all land here. An install is three pieces — read-summary.py, the
-// reader binary the hook falls back to, and the settings.json entry — and status()
-// checks all three, so a missing or out-of-date file shows up as `.stale` rather than
-// hiding behind a present settings entry. Edits to settings.json are merges: other keys,
-// groups and sibling hooks are preserved.
+// Installs/removes the Claude Code hooks that read aloud, so a downloaded copy can
+// replicate the author's setup with one click: the "Stop" hook that reads each response
+// (read-summary.py) and, with it, the AskUserQuestion hook that reads a question and its
+// options (read-question.py, on PreToolUse and PostToolUse). They go in and come out
+// together: the question hook runs on the Stop hook's code, and "off" has to mean
+// nothing is read. This is the one install path: the menu item, --setup-claude, and
+// build.sh (which shells out to --setup-claude) all land here. An install is the two
+// scripts, the reader binary the Stop hook falls back to, and the three settings.json
+// entries, and status() checks every one, so a missing or out-of-date piece shows up as
+// `.stale` rather than hiding behind a present settings entry. Edits to settings.json
+// are merges: other keys, groups and sibling hooks are preserved.
 // Set SPEAKHUD_CLAUDE_DIR to point at a different dir (used by tests).
 enum ClaudeHook {
     enum Status: String {
