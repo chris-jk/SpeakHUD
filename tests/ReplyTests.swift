@@ -10,6 +10,9 @@ private let rule = String(repeating: "─", count: 94)
 
 private func screen(_ lines: String...) -> String { lines.joined(separator: "\n") }
 
+/// What Claude's prompt box holds, if that is what `screen` is showing.
+private func promptText(_ screen: String) -> String? { Reply.showing(screen).prompt?.text }
+
 /// A session at its prompt, with whatever `box` lines the prompt holds, as iTerm2 reports
 /// it: trailing spaces, a status line and the mode line under the box.
 private func atPrompt(_ box: String...) -> String {
@@ -76,8 +79,8 @@ private final class FakeTerm {
         return Reply.Answer(reply: "ok")
     }
 
-    func send(_ heard: String, to origin: Origin = pane) -> Reply.Outcome {
-        Reply.send(heard, to: origin, ask: ask, wait: { _ in self.waits += 1 })
+    func send(_ heard: String, to origin: Origin = pane, pictures: [String] = []) -> Reply.Outcome {
+        Reply.send(heard, to: origin, pictures: pictures, via: Reply.Terminal(ask: ask, wait: { _ in self.waits += 1 }))
     }
 }
 
@@ -136,38 +139,62 @@ let replySuite = Suite("Reply") { t in
 
     // -- reading the screen ------------------------------------------------
 
-    t.expectEqual(Reply.promptText(in: atPrompt("❯  ")), "", "an empty prompt box, as iTerm2 reports it")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯ Try \"edit <filepath> to...\"")), "Try \"edit <filepath> to...\"",
+    t.expectEqual(promptText(atPrompt("❯  ")), "", "an empty prompt box, as iTerm2 reports it")
+    t.expectEqual(promptText(atPrompt("❯ Try \"edit <filepath> to...\"")), "Try \"edit <filepath> to...\"",
                   "the box's text (a placeholder reads the same as typing)")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯ word0 word1 word2", "  word3 word4", "  word5")),
+    t.expectEqual(promptText(atPrompt("❯ word0 word1 word2", "  word3 word4", "  word5")),
                   "word0 word1 word2 word3 word4 word5", "a wrapped message is joined up")
-    t.expectEqual(Reply.promptText(in: atPrompt("❯\u{00A0}hello")), "hello", "a no-break space after the mark is a space")
-    t.expect(Reply.promptText(in: questionBox) == nil, "a question box is not a prompt")
-    t.expect(Reply.promptText(in: trustBox) == nil, "the trust box is not a prompt")
-    t.expect(Reply.promptText(in: screen("Last login: Tue Oct  7", "❯ ls", "TODO.md", "❯ ")) == nil,
+    t.expectEqual(promptText(atPrompt("❯\u{00A0}hello")), "hello", "a no-break space after the mark is a space")
+    t.expect(promptText(questionBox) == nil, "a question box is not a prompt")
+    t.expect(promptText(trustBox) == nil, "the trust box is not a prompt")
+    t.expect(promptText(screen("Last login: Tue Oct  7", "❯ ls", "TODO.md", "❯ ")) == nil,
              "a shell prompt that happens to use ❯ is not Claude's")
-    t.expect(Reply.promptText(in: atPrompt("! ls -la")) == nil, "shell mode: what's pasted there would be run")
-    t.expect(Reply.promptText(in: atPrompt("❯ 1. Yes", "  2. No")) == nil, "options between two rules are still options")
-    t.expect(Reply.promptText(in: screen(rule, "❯ ", rule, "  status", "Esc to cancel")) == nil,
+    t.expect(promptText(atPrompt("! ls -la")) == nil, "shell mode: what's pasted there would be run")
+    t.expect(promptText(atPrompt("❯ 1. Yes", "  2. No")) == nil, "options between two rules are still options")
+    t.expect(promptText(screen(rule, "❯ ", rule, "  status", "Esc to cancel")) == nil,
              "a box that says how to answer it underneath takes keys as answers")
-    t.expect(Reply.promptText(in: screen(rule, "❯ quoted earlier", rule, "a", "b", "c", "d", "e", "f")) == nil,
+    t.expect(promptText(screen(rule, "❯ quoted earlier", rule, "a", "b", "c", "d", "e", "f")) == nil,
              "a rule with more than a status line or two under it isn't the prompt box")
-    t.expect(Reply.promptText(in: "") == nil, "no screen, no prompt")
+    t.expect(promptText("") == nil, "no screen, no prompt")
+    // A message you're writing may start with a number. Read as "not a prompt", it was
+    // taken for a list of choices, and a tap on the phone sent it.
+    t.expectEqual(promptText(screen("done", rule, "❯ 1. fix the header", rule, "  speakhud (main*) | Opus 5.5 ctx:51% used")),
+                  "1. fix the header", "a message that starts \"1. \" is still a message in the prompt box")
+    t.expectEqual(promptText(atPrompt("❯ 2. then the footer, which", "  wraps onto a second line")),
+                  "2. then the footer, which wraps onto a second line", "wrapped too")
+    t.expectEqual(promptText(atPrompt("❯ 10. Yes")), "10. Yes", "one numbered line is not a list of options")
 
     t.expect(Reply.shows("blue please", inPrompt: "blue please"), "the paste shows")
     t.expect(Reply.shows("word0 word1 word2 word3", inPrompt: "word0 word1 wo rd2 word3"), "however it wrapped")
     t.expect(Reply.shows(String(repeating: "word ", count: 400), inPrompt: "[Pasted text #1]"), "a long paste shows as Claude's marker")
     t.expect(!Reply.shows("blue please", inPrompt: "half a thought blue please"), "text you'd typed ahead of it: not confirmed")
     // As Claude Code 2.1.294 really showed these two pastes (captured from a scratch session).
-    t.expect(Reply.shows("Look at this picture from my phone: /Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg",
-                         inPrompt: "[Image #1]Look at this picture from my phone:"),
+    let fromPhone = "/Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg"
+    t.expect(Reply.shows("Look at this picture from my phone: " + fromPhone, inPrompt: "[Image #1]Look at this picture from my phone:", pictures: [fromPhone]),
              "a pasted picture's path becomes a marker at the front of the box: the words after it are the paste showing")
     t.expect(Reply.shows("which is it The pictures from my phone: /Users/you/a/one.jpg /Users/you/a/two.png",
-                         inPrompt: "[Image #2] [Image #3]which is it The pictures from my phone:"), "and so with two")
-    t.expect(!Reply.shows("which is it The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1]half a thought which is it The picture from my phone:")
+                         inPrompt: "[Image #2] [Image #3]which is it The pictures from my phone:", pictures: ["/Users/you/a/one.jpg", "/Users/you/a/two.png"]),
+             "and so with two")
+    t.expect(!Reply.shows("which is it The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1]half a thought which is it The picture from my phone:",
+                          pictures: ["/Users/you/a/one.jpg"])
              && !Reply.shows("blue please", inPrompt: "half a thought [Image #1]blue please"),
              "words typed ahead of the paste still aren't confirmed, picture or no picture")
+    t.expect(!Reply.shows("this one The picture from my phone: /Users/you/a/one.jpg", inPrompt: "[Image #1] [Image #2]this one The picture from my phone:",
+                          pictures: ["/Users/you/a/one.jpg"]),
+             "one marker more than the pictures sent is a picture of yours that was there first: not confirmed")
+    t.expect(Reply.shows("this one The picture from my phone: /Users/you/a/one.jpg", inPrompt: "this one The picture from my phone: /Users/you/a/one.jpg",
+                         pictures: ["/Users/you/a/one.jpg"]),
+             "a picture's path left in the words as it was pasted is the paste showing all the same")
+    t.expect(!Reply.shows("Look at this picture from my phone: " + fromPhone, inPrompt: "[Image #1]Look at this picture from my phone:"),
+             "a path nobody said was a picture being sent is looked for like any other word")
     t.expect(Reply.shows("open /tmp/notes.txt and fix it", inPrompt: "open /tmp/notes.txt and fix it"), "a path that isn't a picture's stays in the words")
+    // What a reply says itself stays in the prompt as it was said, a picture's link or path included.
+    t.expect(Reply.shows("Use https://x.com/logo.png for the header", inPrompt: "Use https://x.com/logo.png for the header"),
+             "a link to a picture, named in a reply, is part of its words and is looked for")
+    t.expect(Reply.shows("compare docs/a.png with docs/b.png please", inPrompt: "compare docs/a.png with docs/b.png please"),
+             "and so is a picture's path")
+    t.expect(!Reply.shows("blue please", inPrompt: "[Image #1]blue please"),
+             "a picture already in the prompt was put there ahead of the paste, like words typed ahead of it: not confirmed")
     t.expect(!Reply.shows("blue please", inPrompt: ""), "an empty box hasn't taken it")
     t.expect(!Reply.shows("blue please", inPrompt: "Try \"edit <filepath> to...\""), "nor has one still showing its placeholder")
 
@@ -222,19 +249,38 @@ let replySuite = Suite("Reply") { t in
         let term = FakeTerm(atPrompt("❯  "))
         term.onPaste = { _, _ in }
         var looks = 0
-        let outcome = Reply.send("blue please", to: pane, ask: { source in
+        let outcome = Reply.send("blue please", to: pane, via: Reply.Terminal(ask: { source in
             if source.contains("contents of s") {
                 looks += 1
                 if looks == 4 { term.screen = atPrompt("❯ blue please") }
             }
             return term.ask(source)
-        }, wait: { _ in })
+        }, wait: { _ in }))
         t.expectEqual(outcome, .sent, "a paste that takes a moment to show is still sent")
     }
     do {  // you'd typed something there already
         let term = FakeTerm(atPrompt("❯ half a thought"))
         term.onPaste = { term, text in term.screen = atPrompt("❯ half a thought" + text) }
         t.expectEqual(term.send("blue please"), .unconfirmed, "a reply that landed after your own typing isn't sent for you")
+        t.expect(!term.calls.contains(.enter), "no Return")
+    }
+    do {  // a reply that names a picture itself, by link or by path
+        t.expectEqual(FakeTerm(atPrompt("❯  ")).send("Use https://x.com/logo.png for the header"), .sent,
+                      "a reply that names a link to a picture is sent, not left in the prompt")
+        t.expectEqual(FakeTerm(atPrompt("❯  ")).send("compare docs/a.png with docs/b.png please"), .sent, "and so is one that names a picture's path")
+    }
+    do {  // pictures sent with it: Claude Code swaps each path for a marker at the front of the box
+        let one = "/Users/you/.local/state/speakhud/from-phone/2026-10-08-005542-1.jpg"
+        let term = FakeTerm(atPrompt("❯  "))
+        term.onPaste = { term, text in term.screen = atPrompt("❯ [Image #1]" + text.replacingOccurrences(of: " " + one, with: "")) }
+        t.expectEqual(term.send("this one The picture from my phone: " + one, pictures: [one]), .sent,
+                      "an answer with a picture is sent once its words show after the picture's marker")
+        t.expect(term.calls.contains(.enter), "with Return")
+    }
+    do {  // a picture of your own was already in the prompt
+        let term = FakeTerm(atPrompt("❯ [Image #1]"))
+        term.onPaste = { term, text in term.screen = atPrompt("❯ [Image #1]" + text) }
+        t.expectEqual(term.send("blue please"), .unconfirmed, "a reply that landed after a picture you'd put in the prompt isn't sent for you")
         t.expect(!term.calls.contains(.enter), "no Return")
     }
     do {  // the question box opens between the look and the paste

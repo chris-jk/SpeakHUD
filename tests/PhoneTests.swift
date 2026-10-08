@@ -34,25 +34,108 @@ private func json(_ r: HTTP.Response) -> [String: Any] {
 
 private func turns(_ state: [String: Any]) -> [[String: Any]] { state["turns"] as? [[String: Any]] ?? [] }
 
+/// The box of choices `screen` is showing, if it is showing one.
+private func boxOn(_ screen: String) -> TerminalBox? { Reply.showing(screen).box }
+
+/// What the page sends back with a tap: the box it has drawn for `key`, as app.js builds
+/// it from the state the Mac gave it (what it asks, its strip, each choice's label).
+private func drew(_ state: [String: Any], _ key: String) -> [String: Any] {
+    guard let box = turns(state).first(where: { $0["key"] as? String == key })?["box"] as? [String: Any] else { return [:] }
+    return ["ask": box["ask"] ?? NSNull(), "tabs": box["tabs"] ?? NSNull(),
+            "rows": (box["rows"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "" }]
+}
+
 /// A real Claude Code screen, captured from a scratch session (tests/fixtures/screens).
 private func screenshot(_ name: String) -> String {
     String(decoding: fm.contents(atPath: "tests/fixtures/screens/\(name).txt") ?? Data(), as: UTF8.self)
 }
 
-/// A Phone on throwaway settings, with what it sent to iTerm2 and to the push server.
+/// iTerm2, as Phone reaches it through Reply: each script it's asked is taken for what it
+/// does (the survey, a look at a pane's screen, a paste, Return, a key, typed words, a
+/// close), noted, and answered the way iTerm2 would. One screen stands for whichever
+/// pane is asked about. A paste lands the way Claude Code's prompt takes one (seen in
+/// 2.1.294): the words show in the box until Return, with a marker at the front in place
+/// of each picture's path.
+private final class FakeITerm {
+    static let promptScreen = "some output\n────────────────\n❯ \n────────────────\n  status"
+
+    var screen: String? = FakeITerm.promptScreen { didSet { held = nil } }   // nil: the pane has gone
+    var open: [Reply.Pane]? = nil     // what a survey says is open and showing; nil: iTerm2 isn't saying
+    var takesPaste = true             // false: a paste never shows in the prompt box
+    var pictureFiles: [String] = []   // the paths Claude Code would find to be pictures
+    private(set) var pasted: [(text: String, session: String?)] = []
+    private(set) var pressed: [String] = []
+    private(set) var typed: [String] = []
+    private(set) var closed: [String?] = []
+    private var held: String?         // what the prompt box holds since a paste, until Return
+
+    func ask(_ source: String) -> Reply.Answer {
+        if source == Reply.surveyScript {
+            guard let open = open else { return Reply.Answer(reply: "missing") }
+            return Reply.Answer(reply: "ok" + open.map { "\u{1E}\($0.session)\u{1F}\($0.name)\u{1F}\($0.screen)" }.joined())
+        }
+        let session = source.components(separatedBy: "(id of s) is \"").dropFirst().first?.components(separatedBy: "\"").first
+        guard let screen = screen else { return Reply.Answer(reply: "missing") }
+        if source.contains("contents of s") {
+            let shown = held.map { "some output\n────────────────\n❯ \($0)\n────────────────\n  status" } ?? screen
+            return Reply.Answer(reply: "ok\n" + shown)
+        }
+        if source.contains("tell s to close") {
+            closed.append(session)
+        } else if source.contains("\"[200~\"") {
+            // The pasted line: what sits between the paste brackets, un-escaped.
+            let text = unquoted(source.components(separatedBy: "\"[200~\" & \"").last?
+                .components(separatedBy: "\" & (character id 27) & \"[201~\"").first ?? "")
+            pasted.append((text, session))
+            if takesPaste {
+                var words = text, markers: [String] = []
+                for path in pictureFiles where words.contains(path) {
+                    words = words.replacingOccurrences(of: " " + path, with: "").replacingOccurrences(of: path, with: "")
+                    markers.append("[Image #\(markers.count + 1)]")
+                }
+                held = markers.joined(separator: " ") + words
+            }
+        } else if source == Reply.returnScript(session ?? "") {
+            held = nil   // the Return that follows a paste: the message goes
+        } else if source.contains("tell s to write text ((character id") {
+            let codes = Self.ids(in: source)
+            let name = Reply.keys.first { $0.value == codes }?.key ?? "?"
+            pressed.append(name)
+            if name == "enter" { held = nil }
+        } else if let line = source.components(separatedBy: "tell s to write text \"").dropFirst().first?.components(separatedBy: "\" newline no").first {
+            typed.append(unquoted(line))
+        }
+        return Reply.Answer(reply: "ok")
+    }
+
+    private func unquoted(_ literal: String) -> String {
+        literal.replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\")
+    }
+
+    /// The character ids a script writes, in order.
+    private static func ids(in source: String) -> [Int] {
+        source.components(separatedBy: "(character id ").dropFirst().compactMap { Int($0.prefix { $0.isNumber }) }
+    }
+}
+
+/// A Phone on throwaway settings, over a fake iTerm2 and a stand-in for the push server:
+/// what the page asks runs the real reading and writing of terminals (Reply), and what
+/// reached iTerm2 is kept here.
 private final class Bench {
     let suite = "speakhud-phone-tests-\(UUID().uuidString)"
     let defaults: UserDefaults
     let phone: Phone
-    var delivered: [(text: String, session: String?)] = []
-    var pressed: [String] = []
+    let term = FakeITerm()
+    var delivered: [(text: String, session: String?)] { term.pasted }   // each paste that reached a pane
+    var pressed: [String] { term.pressed }                              // each key, by name
+    var typed: [String] { term.typed }
+    var shutPanes: [String?] { term.closed }
+    var screen: String? { get { term.screen } set { term.screen = newValue } }
+    var open: [Reply.Pane]? { get { term.open } set { term.open = newValue } }
     var pushes: [URLRequest] = []
     var logs: [String] = []
     var awayChanges: [Bool] = []
-    var outcome = Reply.Outcome.sent
-    var open: [Reply.Pane]? = nil   // what iTerm2 says is open and showing; nil: it isn't saying
-    var typed: [String] = []
-    var shutPanes: [String?] = []
+    var outcome = Reply.Outcome.sent   // how resuming an old session goes
     var old: [OldSessions.Session] = []
     var running: Set<String> = []
     var reopened: [String] = []
@@ -62,7 +145,6 @@ private final class Bench {
     var hearDone: ((Result<String, Dictation.Failure>) -> Void)?
     var livePieces: [String] = []    // each piece of a word-for-word dictation: "id rate bytes last"
     var liveAnswer: Result<String, Dictation.Failure> = .success("Yes, go")
-    var screen: String? = "some output\n────────────────\n❯ \n────────────────\n  status"
 
     init(url: String? = "https://my-mac.example.ts.net", ntfy: String? = "https://push.example.com/terminals") {
         defaults = UserDefaults(suiteName: suite)!
@@ -71,13 +153,7 @@ private final class Bench {
         config.ntfy = ntfy
         config.ntfyToken = ntfy == nil ? nil : "tk_secret"
         phone = Phone(config: config, defaults: defaults)
-        phone.deliver = { [unowned self] text, origin in self.delivered.append((text, origin.session)); return self.outcome }
-        phone.press = { [unowned self] key, _ in self.pressed.append(key); return self.outcome }
-        phone.look = { [unowned self] _ in self.screen }
-        phone.survey = { [unowned self] in self.open }
-        phone.type = { [unowned self] text, _ in self.typed.append(text); return self.outcome }
-        phone.wait = { _ in }
-        phone.shut = { [unowned self] origin in self.shutPanes.append(origin.session); return self.outcome }
+        phone.terminal = Reply.Terminal(ask: term.ask, wait: { _ in })
         phone.oldSessions = { [unowned self] in self.old }
         phone.runningIDs = { [unowned self] in self.running }
         phone.reopen = { [unowned self] session in self.reopened.append(session.id + " in " + session.cwd); return self.outcome }
@@ -184,8 +260,8 @@ let phoneSuite = Suite("Phone") { t in
 
     // -- a box, read off the terminal's own screen ----------------------------
     let atPrompt = "done\n────────────────\n❯ \n────────────────\n  status"
-    t.expect(TerminalBox.read(screenshot("prompt")) == nil && TerminalBox.read(atPrompt) == nil, "Claude's prompt is not a box")
-    if let box = TerminalBox.read(screenshot("ask-single")) {
+    t.expect(boxOn(screenshot("prompt")) == nil && boxOn(atPrompt) == nil, "Claude's prompt is not a box")
+    if let box = boxOn(screenshot("ask-single")) {
         t.expect(box.ask == "Which colour for the bar?" && box.tabs == "☐ Colour", "a question: what it asks, under its heading")
         t.expectEqual(box.rows.map { $0.label }, ["Forest", "Navy", "Type something.", "Chat about this"], "its choices, the one under the rule too")
         t.expect(box.rows[0].detail == "Like Grow Guide" && box.rows[0].number == 1 && box.rows[0].cursor && !box.rows[1].cursor && box.rows[2].types,
@@ -193,34 +269,53 @@ let phoneSuite = Suite("Phone") { t in
         t.expect(box.keys(toPick: 1) ?? [] == ["2"] && box.keys(toPick: 9) == nil, "a numbered choice is picked by its digit")
         t.expect(box.hints?.contains("Esc to cancel") == true, "and what the box says its keys are")
     } else { t.expect(false, "a one-question box is read") }
-    if let box = TerminalBox.read(screenshot("ask-first")) {
+    if let box = boxOn(screenshot("ask-first")) {
         t.expect(box.ask == "Which route do you want?" && box.tabs == "☐ Route ☐ Extras ✔ Submit" && box.rows.count == 4,
                  "the first of several questions, with the strip that says where you are")
     } else { t.expect(false, "a several-question box is read") }
-    if let box = TerminalBox.read(screenshot("ask-multi-checked")) {
+    if let box = boxOn(screenshot("ask-multi-checked")) {
         t.expectEqual(box.rows.map { $0.checked.map { $0 ? "x" : "o" } ?? "-" }, ["x", "o", "x", "o", "-", "-"], "pick-any-that-apply: which are ticked")
         t.expect(box.rows[0].label == "Speech" && box.rows[0].detail == "Phone reads aloud" && box.rows[4].label == "Submit" && box.rows[4].number == nil,
                  "labels without their tick boxes, and Submit as a row of its own")
         t.expect(box.keys(toPick: 4) ?? [] == ["down", "down", "down", "down", "enter"] && box.keys(toPick: 2) ?? [] == ["3"],
                  "a row with no number is reached by arrows from the cursor, then Enter")
     } else { t.expect(false, "a pick-any box is read") }
-    if let box = TerminalBox.read(screenshot("ask-submit")) {
+    if let box = boxOn(screenshot("ask-submit")) {
         t.expect(box.ask.hasPrefix("Review your answers") && box.ask.contains("→ Speech, Screen") && box.rows.map { $0.label } == ["Submit answers", "Cancel"],
                  "the last step shows the answers and asks to submit them")
     } else { t.expect(false, "the submit step is read") }
-    if let box = TerminalBox.read(screenshot("permission")) {
+    if let box = boxOn(screenshot("permission")) {
         t.expect(box.ask.contains("touch made-by-test.txt") && box.ask.hasSuffix("Do you want to proceed?"), "a permission box: the command and the question")
         t.expect(box.rows.count == 4 && box.rows[0].label == "Yes" && box.rows[3].label == "No"
                  && box.rows[1].label == "Yes, and always allow access to" && box.rows[1].detail?.contains("/Users/you/project") == true,
                  "its four choices, a wrapped one kept whole")
     } else { t.expect(false, "a permission box is read") }
-    if let box = TerminalBox.read(screenshot("trust")) {
+    if let box = boxOn(screenshot("trust")) {
         t.expect(box.rows.map { $0.label } == ["No, exit", "Yes, I trust this folder"] && box.rows.allSatisfy { $0.number == nil } && box.rows[0].cursor,
                  "a box with no numbers at all")
         t.expect(box.keys(toPick: 1) ?? [] == ["down", "enter"] && box.keys(toPick: 0) ?? [] == ["enter"], "is answered by arrows and Enter")
     } else { t.expect(false, "the trust box is read") }
-    t.expect(TerminalBox.read("❯ what I typed earlier\n  and its second line\n\n⏺ Claude's answer, at length.\n  More of it.\n\n✻ Working… (esc to interrupt)") == nil,
+    t.expect(boxOn("❯ what I typed earlier\n  and its second line\n\n⏺ Claude's answer, at length.\n  More of it.\n\n✻ Working… (esc to interrupt)") == nil,
              "a ❯ in the conversation is not a cursor: nothing is invented from a turn in progress")
+
+    // A box is read only where Claude says it has one up. "It isn't the prompt" is not
+    // that: a message being written and a shell were both read as lists of choices.
+    let longRule = String(repeating: "─", count: 60)
+    let draft = ["done", longRule, "❯ 1. fix the header", longRule, "  speakhud (main*) | Opus 5.5 ctx:51% used"].joined(separator: "\n")
+    let shellPrompt = "  build ok\n  2 warnings\n❯ rm -rf build"
+    t.expect(boxOn(draft) == nil, "a message being written that starts \"1. \" is not a box, and its status line is not a choice")
+    t.expect(boxOn(shellPrompt) == nil, "a shell whose prompt is ❯, under indented output, is not a box")
+    t.expect(boxOn("  1. first\n  2. second\n❯ git status") == nil, "nor is one under a numbered list it printed")
+    t.expect(boxOn(["done", longRule, "❯ 1. Yes", "  2. No", longRule, "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent"].joined(separator: "\n")) == nil,
+             "numbered lines between the prompt's rules, with nothing that says keys answer them, are not a box either")
+    t.expect(boxOn("  one\n❯ two\n  three\nmain · 3 files changed") == nil, "a line with a dot in the middle of it is not a box saying how to answer")
+    let unsaid = screenshot("permission").components(separatedBy: "\n").filter { !$0.contains("Esc to cancel") }.joined(separator: "\n")
+    t.expect(unsaid != screenshot("permission") && boxOn(unsaid) == nil, "a list of choices with nothing under it that says how to answer is not read as one")
+    t.expect(boxOn(screenshot("permission") + "\nchris@mac project % ") == nil, "nor is a box left on the screen of a pane that has dropped to its shell")
+    var draftDesk = PhoneDesk()
+    let draftAsked = draftDesk.met([Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)], now: t0)
+    t.expect(draftAsked.isEmpty && draftDesk.turns.count == 1 && draftDesk.turns[0].box == nil && draftDesk.turns[0].context == 51,
+             "so a terminal with such a message in its prompt is not asking anything, and its status line is read as one")
 
     // -- every open terminal, and none that has closed ----------------------
     let other = "0A1B2C3D-0000-4000-8000-00000000000B", shell = "0A1B2C3D-0000-4000-8000-00000000000C"
@@ -229,17 +324,25 @@ let phoneSuite = Suite("Phone") { t in
     t.expectEqual(Reply.paneName("◑ SpeakerHug crash logs\u{00A0}—\u{00A0}~/GitHub/mac-apps/speakhud"), "SpeakerHug crash logs",
                   "as iTerm2 really gives it, with no-break spaces round the dash")
     t.expectEqual(Reply.paneName("zsh"), "zsh", "a plain title is left alone")
-    let surveyed = Reply.survey(ask: { _ in Reply.Answer(reply: "ok\u{1E}\(other)\u{1F}✳ Review desk — ~\u{1F}line one\nline\ttwo\n\n\u{1E}not-an-id\u{1F}x\u{1F}y\u{1E}only two\u{1F}fields") })
+    /// A terminal that answers every script the same way.
+    func saying(_ answer: Reply.Answer) -> Reply.Terminal { Reply.Terminal(ask: { _ in answer }, wait: { _ in }) }
+    let surveyed = Reply.survey(via: saying(Reply.Answer(reply: "ok\u{1E}\(other)\u{1F}✳ Review desk — ~\u{1F}line one\nline\ttwo\n\n\u{1E}not-an-id\u{1F}x\u{1F}y\u{1E}only two\u{1F}fields")))
     t.expect(surveyed?.count == 1 && surveyed?[0] == Reply.Pane(session: other, name: "✳ Review desk — ~", screen: "line one\nline\ttwo"),
              "iTerm2's panes are read by id, title and screen, whatever the screen holds; a record that isn't one is skipped")
-    t.expect(Reply.survey(ask: { _ in Reply.Answer(reply: "missing") }) == nil, "iTerm2 not running: nothing known, which isn't nothing open")
+    t.expect(Reply.survey(via: saying(Reply.Answer(reply: "missing"))) == nil, "iTerm2 not running: nothing known, which isn't nothing open")
     t.expect(Reply.surveyScript.contains("(character id 31)") && !Reply.surveyScript.contains("& tab &"),
              "the separators are spelled as character ids: inside iTerm2's tell, tab is one of its tabs")
-    t.expect(Reply.showsClaude(atPrompt) && Reply.showsClaude("Thinking… (esc to interrupt)") && Reply.showsClaude("❯ 1. Yes\nEnter to select · Esc to cancel")
-             && !Reply.showsClaude("chris@mac ~ % ls\nnotes.txt"), "Claude Code's screen is told from a shell's")
-    t.expect(Reply.working(title: "◐ Grow guide replies — ~", screen: atPrompt) && !Reply.working(title: "✳ Grow guide replies — ~", screen: atPrompt)
-             && !Reply.working(title: "zsh", screen: "% ") && Reply.working(title: "✳ x", screen: "✻ Crunching… (esc to interrupt)"),
+    t.expect(Reply.showing(atPrompt).isClaude && Reply.showing("Thinking… (esc to interrupt)").isClaude && Reply.showing("❯ 1. Yes\nEnter to select · Esc to cancel").isClaude
+             && !Reply.showing("chris@mac ~ % ls\nnotes.txt").isClaude, "Claude Code's screen is told from a shell's")
+    t.expect(Reply.showing(atPrompt, title: "◐ Grow guide replies — ~").busy && !Reply.showing(atPrompt, title: "✳ Grow guide replies — ~").busy
+             && !Reply.showing("% ", title: "zsh").busy && Reply.showing("✻ Crunching… (esc to interrupt)", title: "✳ x").busy,
              "a spinning glyph on the title, or its screen saying so, is a terminal at work; ✳ is one waiting for you")
+    t.expect(Reply.showing("chris@mac ~ % ", title: "~ — zsh") == .working(onScreen: false) && !Reply.showing("chris@mac ~ % ", title: "~ — zsh").isClaude
+             && Reply.showing("⏺ A long answer, with no prompt box in sight.", title: "◐ Review desk — ~").busy,
+             "a glyph on the title alone says a turn may be running, never that the screen is Claude Code's: a shell's title can start with one")
+    t.expect(Reply.showing("how to answer: Esc to cancel\nchris@mac ~ % ") == .notClaude("nothing at the foot of its screen is Claude's prompt or a box of its")
+             && Reply.showing(" \n ") == .notClaude("its screen is blank") && Reply.showing("Paste the code:\n > \n Enter to confirm · Esc to cancel") == .keys("Enter to confirm · Esc to cancel"),
+             "what says it takes keys counts at the foot of the screen, not further up it; and what is none of Claude's says why")
 
     var openDesk = PhoneDesk()
     openDesk.took(turn("a", "done"), now: t0)
@@ -288,29 +391,130 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(drawn?["ask"] as? String == "Which colour for the bar?" && drawnRows.count == 4 && drawnRows[1]["label"] as? String == "Navy"
              && drawnRows[1]["number"] as? Int == 2 && drawnRows[2]["types"] as? Bool == true, "the page is given the box as its terminal shows it")
     o.screen = screenshot("ask-single")
-    let picked = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Navy"])))
+    let colours = drew(o.phone.state(), boxKey)   // a tap says which box the page had drawn
+    let picked = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Navy", "box": colours])))
     t.expect(picked["sent"] as? Bool == true && o.pressed == ["2"] && o.logs.contains("phone pick 2 of 4 in Grow guide replies: sent"), "a tap on a choice presses its digit")
-    let stale = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Forest"])))
+    let stale = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Forest", "box": colours])))
     t.expect(stale["sent"] as? Bool == false && o.pressed == ["2"] && (stale["outcome"] as? String)?.contains("changed") == true,
              "a choice that isn't where the page drew it presses nothing")
-    let own = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 2, "label": "Type something.", "text": " teal,\nplease "])))
+    let own = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 2, "label": "Type something.", "text": " teal,\nplease ", "box": colours])))
     t.expect(own["sent"] as? Bool == true && o.pressed == ["2", "3", "enter"] && o.typed == ["teal, please"],
              "your own answer: its row's digit, the words typed on one line, Enter")
-    t.expectEqual(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest", "text": "x"])).status, 400, "a choice that takes no words refuses them")
+    t.expectEqual(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest", "text": "x", "box": colours])).status, 400, "a choice that takes no words refuses them")
     o.screen = screenshot("trust")
-    _ = o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Yes, I trust this folder"]))
+    let trusting = drew(json(o.phone.respond(to: get("/api/screen", query: ["key": boxKey])))["state"] as? [String: Any] ?? [:], boxKey)
+    _ = o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": "Yes, I trust this folder", "box": trusting]))
     t.expectEqual(o.pressed, ["2", "3", "enter", "down", "enter"], "a choice with no number is reached with arrows and Enter")
     o.screen = atPrompt
-    let gone = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "Forest"])))
+    let gone = json(o.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 0, "label": "No, exit", "box": trusting])))
     t.expect(gone["sent"] as? Bool == false && turns(gone["state"] as? [String: Any] ?? [:]).first?["box"] is NSNull, "a box that has gone is said to have, and leaves the page")
+
+    // A message being written in the prompt: nothing to push as asking, nothing a tap can send.
+    let writing = Bench()
+    writing.phone.setAway(true)
+    writing.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: draft)]
+    writing.phone.scan()
+    writing.screen = draft
+    let statusLine = "speakhud (main*) | Opus 5.5 ctx:51% used"
+    let onDraft = json(writing.phone.respond(to: post("/api/pick", ["key": boxKey, "row": 1, "label": statusLine,
+                                                                    "box": ["ask": "", "tabs": NSNull(), "rows": ["fix the header", statusLine]]])))
+    t.expect(writing.pushes.isEmpty, "away, a message being written that starts \"1. \" is not pushed as a question")
+    t.expect(onDraft["sent"] as? Bool == false && writing.pressed.isEmpty, "and no tap presses Down and Enter on it, which would send it")
+
+    // -- a tap answers the box the page drew, and no other ----------------------
+    // Every permission box has Yes first: a row and its label can't tell two of them apart.
+    let k = Bench()
+    k.phone.took(turn("a", "Shall I?"))
+    /// The page looks at a's screen: what it has drawn after that.
+    func looked(_ bench: Bench) -> [String: Any] {
+        drew(json(bench.phone.respond(to: get("/api/screen", query: ["key": "a"])))["state"] as? [String: Any] ?? [:], "a")
+    }
+    let toTouch = screenshot("permission"), toRemove = toTouch.replacingOccurrences(of: "touch made-by-test.txt", with: "rm -rf build")
+    k.screen = toTouch
+    let yes: [String: Any] = ["key": "a", "row": 0, "label": "Yes", "box": looked(k)]
+    t.expect(json(k.phone.respond(to: post("/api/pick", yes)))["sent"] as? Bool == true && k.pressed == ["1"], "Yes, tapped on the box the page drew, is pressed")
+    k.screen = toRemove
+    let doubled = json(k.phone.respond(to: post("/api/pick", yes)))
+    t.expect(doubled["sent"] as? Bool == false && (doubled["outcome"] as? String)?.contains("changed") == true,
+             "the same tap again, with a different permission box now up, is not sent")
+    t.expectEqual(k.pressed, ["1"], "and presses nothing: that box's Yes is not the Yes the page showed")
+    t.expect(((turns(doubled["state"] as? [String: Any] ?? [:]).first?["box"] as? [String: Any])?["ask"] as? String)?.contains("rm -rf build") == true,
+             "the page is given the box that is up now instead")
+    // The same box, moved on: its cursor elsewhere, a tick made in it. It is still the box that was drawn.
+    k.screen = screenshot("trust")
+    let trusted = looked(k)
+    k.screen = screenshot("trust").replacingOccurrences(of: " ❯ No, exit", with: "   No, exit").replacingOccurrences(of: "   Yes, I trust", with: " ❯ Yes, I trust")
+    _ = k.phone.respond(to: post("/api/pick", ["key": "a", "row": 0, "label": "No, exit", "box": trusted]))
+    t.expectEqual(k.pressed, ["1", "up", "enter"], "a box whose cursor has moved since it was drawn is still that box, and the arrows are counted from where the cursor is now")
+    k.screen = screenshot("ask-multi")
+    let extras = looked(k)
+    k.screen = screenshot("ask-multi-checked")
+    _ = k.phone.respond(to: post("/api/pick", ["key": "a", "row": 1, "label": "Keys", "box": extras]))
+    t.expectEqual(k.pressed, ["1", "up", "enter", "2"], "and so is one with a tick made in it, which also marks its question as answered in the strip")
+    t.expect(k.phone.respond(to: post("/api/pick", ["key": "a", "row": 0, "label": "Speech"])).status == 400 && k.pressed.count == 4,
+             "a tap that doesn't say which box it was drawn in presses nothing")
+
+    // -- a key goes only where Claude is showing something that takes it ---------
+    let q = Bench()
+    q.phone.took(turn("a", "Shall I?"))
+    /// A key under a's screen, with whatever the page says it had drawn.
+    func key(_ name: String, _ drawn: [String: Any] = [:]) -> [String: Any] {
+        json(q.phone.respond(to: post("/api/key", ["key": "a", "press": name].merging(drawn) { $1 })))
+    }
+    func went(_ answer: [String: Any]) -> Bool { answer["sent"] as? Bool == true }
+    // A box: the one the page has drawn, and no other.
+    q.screen = toTouch
+    let touching = ["box": looked(q)]
+    t.expect(went(key("1", touching)) && q.pressed == ["1"], "a key goes to the box the page has drawn")
+    q.screen = toRemove
+    let tooLate = key("1", touching)
+    t.expect(!went(tooLate) && (tooLate["outcome"] as? String)?.contains("changed") == true && tooLate["state"] != nil,
+             "the same key again, with a different box now up, is not sent, and the page is given what's there")
+    t.expect(!went(key("enter")) && !went(key("esc")) && !went(key("down")),
+             "nor is a key from a page that had drawn no box: Enter would take whichever choice the cursor is on")
+    t.expectEqual(q.pressed, ["1"], "none of those pressed anything")
+    // The hook's words stand in until the screen is read: the numbers beside them are keys too.
+    q.screen = screenshot("ask-single")
+    let navy = ["asked": "Which colour for the bar?", "option": "Navy. Like the factory"]
+    t.expect(went(key("2", navy)) && q.pressed == ["1", "2"], "a number tapped beside a question's words is pressed when the box up is that question and that its choice")
+    t.expect(!went(key("1", navy)) && !went(key("2", ["asked": "Which route do you want?", "option": "Navy. Like the factory"])),
+             "not when that number is another choice's, or the question another one")
+    q.screen = toTouch
+    t.expect(!went(key("1", ["asked": "Shall I go ahead?", "option": "Yes. Go ahead"])) && q.pressed == ["1", "2"],
+             "and never in a permission box that came up since, though its first choice is Yes too")
+    // Claude's prompt: Enter and Esc, and only from a page that knows the box has gone.
+    q.screen = atPrompt
+    t.expect(!went(key("enter", touching)) && !went(key("esc", touching)) && !went(key("enter", navy)) && q.pressed == ["1", "2"],
+             "a key tapped for a box that has since gone is not pressed at the prompt: Enter there would send whatever is typed")
+    t.expect(went(key("esc")) && went(key("enter")) && !went(key("down")) && !went(key("3")) && q.pressed == ["1", "2", "esc", "enter"],
+             "with no box drawn, Esc and Enter are pressed at the prompt and nothing else is")
+    // A turn running with no prompt in sight: Esc stops it. Nothing else means anything.
+    q.screen = "⏺ Reading the files.\n\n✻ Working… (esc to interrupt)"
+    t.expect(went(key("esc")) && !went(key("enter")) && !went(key("1")) && q.pressed.count == 5, "mid-turn with no prompt in sight, only Esc is pressed")
+    // Something else of Claude's that says it takes keys: yours to press, by what its screen shows.
+    q.screen = "Paste the code from your browser:\n\n > \n\n Enter to confirm · Esc to cancel"
+    t.expect(went(key("enter")) && !went(key("enter", touching)) && q.pressed.count == 6,
+             "a box that says it takes keys, though not as choices this can read, takes them")
+    // Not Claude at all: nothing is pressed. Up and Enter in a shell run its last command again.
+    for (shell, what) in [("chris@mac ~ % ", "a shell"), (shellPrompt, "a shell with ❯ for its prompt"),
+                          ("how to answer: Enter to select · Esc to cancel\n" + toTouch + "\nchris@mac project % ", "a shell under what Claude left on the screen"),
+                          ("", "a blank screen")] {
+        q.screen = shell
+        let answers = ["up", "enter", "esc", "1"].map { key($0) }
+        t.expect(answers.allSatisfy { !went($0) } && q.pressed.count == 6, "\(what) is not Claude Code: no key is pressed there")
+        t.expect((answers[0]["outcome"] as? String)?.contains("Claude") == true, "and the page is told so (\(what))")
+    }
+    let pageScript = String(decoding: fm.contents(atPath: "phone/app.js") ?? Data(), as: UTF8.self)
+    t.expect(pageScript.contains("box: w.box") && pageScript.contains("body.box = w.box") && pageScript.contains("body.option = "),
+             "the page's taps and keys say what they were drawn in")
 
     // -- its status line: the folder, the model, how full the context is -------
     let mine = "⏺ Done.\n\n────────────────\n❯ \n────────────────\n  speakhud (main*)  |  Opus 5.5  ctx:51% used         ✔ Update installed · Restart to update\n  ⏵⏵ auto mode on · ← 1 agent"
-    t.expect(Reply.status(in: mine)?.line == "speakhud (main*) | Opus 5.5 ctx:51% used" && Reply.status(in: mine)?.context == 51,
+    t.expect(Reply.showing(mine).prompt?.status == "speakhud (main*) | Opus 5.5 ctx:51% used" && Reply.showing(mine).prompt?.context == 51,
              "the line under the prompt box, without the notice off to its right, and the context figure in it")
-    t.expect(Reply.status(in: screenshot("prompt"))?.line.hasPrefix("⏸ manual mode on") == true && Reply.status(in: screenshot("prompt"))?.context == nil,
+    t.expect(Reply.showing(screenshot("prompt")).prompt?.status?.hasPrefix("⏸ manual mode on") == true && Reply.showing(screenshot("prompt")).prompt?.context == nil,
              "whatever line a terminal has, with no figure when it gives none")
-    t.expect(Reply.status(in: screenshot("permission")) == nil, "a box has no status line to read")
+    t.expect(Reply.showing(screenshot("permission")).prompt == nil, "a box has no status line to read")
     o.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: mine)]
     o.phone.scan(now: Date().addingTimeInterval(3 * Phone.scanEvery + 3))
     let lined = turns(o.phone.state()).first
@@ -345,9 +549,15 @@ let phoneSuite = Suite("Phone") { t in
              "a picture is kept under a plain name of its kind")
     t.expect(fm.contents(atPath: firstPath) == Data(jpegBytes) && (try? fm.attributesOfItem(atPath: firstPath))?[.posixPermissions] as? Int == 0o600,
              "as it came, for you alone")
+    // Claude Code takes a picture's path out of the prompt and puts a marker at the front
+    // of it: the answer is sent only because the Mac knows which of its words those are.
+    p.term.pictureFiles = [firstPath, secondPath]
     let withPics = json(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "this one", "pictures": [firstID, secondID]])))
     t.expect(withPics["sent"] as? Bool == true && p.delivered.last?.text == "this one The pictures from my phone: \(firstPath) \(secondPath)",
              "an answer with pictures says where they are on the Mac, for the terminal's Claude to read")
+    let named = json(p.phone.respond(to: post("/api/reply", ["key": "a", "text": "use /tmp/logo.png and https://x.com/logo.png"])))
+    t.expect(named["sent"] as? Bool == true && p.delivered.last?.text == "use /tmp/logo.png and https://x.com/logo.png",
+             "an answer that names a picture in its own words is sent too: those are words, and stay in the prompt as said")
     t.expect(turns(withPics["state"] as? [String: Any] ?? [:]).first?["sent"] as? String == "this one [2 pictures]"
              && p.logs.contains("phone reply to Grow guide replies (8 chars, 2 pictures): sent") && !p.logs.contains { $0.contains("from phone") },
              "the page and the log say there were pictures, not where they are")
@@ -392,15 +602,17 @@ let phoneSuite = Suite("Phone") { t in
                       : source.contains("tell s to close") ? "close" : "?")
         return Reply.Answer(reply: source.contains("contents of s") ? "ok\n" + atPrompt : "ok")
     }
-    t.expect(Reply.close(pane, ask: promptPane, wait: { _ in }) == .sent && script == ["look", "type /exit", "enter", "close"],
+    t.expect(Reply.close(pane, via: Reply.Terminal(ask: promptPane, wait: { _ in })) == .sent && script == ["look", "type /exit", "enter", "close"],
              "closing a terminal at Claude's prompt asks Claude to exit first, then closes the pane")
     script = []
     let boxPane: (String) -> Reply.Answer = { source in
         script.append(source.contains("contents of s") ? "look" : source.contains("tell s to close") ? "close" : "other")
         return Reply.Answer(reply: source.contains("contents of s") ? "ok\n" + screenshot("permission") : "ok")
     }
-    t.expect(Reply.close(pane, ask: boxPane, wait: { _ in }) == .sent && script == ["look", "close"], "one that isn't at its prompt is just closed: nothing is typed into a box")
-    t.expect(Reply.close(Origin(term: "Apple_Terminal", tty: "/dev/ttys004"), ask: { _ in Reply.Answer(reply: "ok") }) == .gone, "a pane that isn't iTerm2's can't be")
+    t.expect(Reply.close(pane, via: Reply.Terminal(ask: boxPane, wait: { _ in })) == .sent && script == ["look", "close"], "one that isn't at its prompt is just closed: nothing is typed into a box")
+    t.expect(Reply.close(Origin(term: "Apple_Terminal", tty: "/dev/ttys004"), via: saying(Reply.Answer(reply: "ok"))) == .gone, "a pane that isn't iTerm2's can't be")
+    t.expect(Reply.close(pane, via: saying(Reply.Answer(reply: "missing"))) == .sent && Reply.close(pane, via: saying(Reply.Answer(errorCode: -1743))) == .denied,
+             "one that had already gone is closed all the same; a refused permission is said")
     let closing = json(o.phone.respond(to: post("/api/close", ["key": "real"])))
     t.expect(closing["sent"] as? Bool == true && o.shutPanes == [pane.session] && o.phone.desk.turn("real") == nil
              && o.logs.contains("phone closed Grow guide replies: sent"), "closed from the page, its window goes")
@@ -560,15 +772,15 @@ let phoneSuite = Suite("Phone") { t in
              "and the page is told it went")
     t.expect(b.logs.contains("phone reply to Grow guide replies (19 chars): sent") && !b.logs.contains { $0.contains("post all three") },
              "the log has who and how long, never the words")
-    b.outcome = .notAtPrompt
+    b.screen = screenshot("permission")   // a box is up, which takes no paste
     let refused = json(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "again"])))
     t.expect(refused["sent"] as? Bool == false && refused["outcome"] as? String == Reply.Outcome.notAtPrompt.description,
              "one that didn't go says why")
-    b.outcome = .sent
+    b.screen = FakeITerm.promptScreen
     t.expectEqual(b.phone.respond(to: post("/api/reply", ["key": "gone", "text": "hi"])).status, 404, "a terminal off the list: not found")
     t.expectEqual(b.phone.respond(to: post("/api/reply", ["key": "b", "text": "hi"])).status, 409, "a pane that can't be reached: said")
     t.expectEqual(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "  \n "])).status, 400, "nothing to send: refused")
-    t.expectEqual(b.delivered.count, 2, "and none of those typed anything")
+    t.expectEqual(b.delivered.count, 1, "and none of those, nor the one a box turned away, typed anything")
 
     // -- a question box -----------------------------------------------------
     b.phone.took(turn("a:question", "Which route?"))
@@ -579,7 +791,7 @@ let phoneSuite = Suite("Phone") { t in
              && turns(asking["state"] as? [String: Any] ?? [:]).first?["question"] as? String == "Which route?\n\n- 1. Try Claude's first.\n- 2. Build our own.",
              "its screen can be read, and the question stays up while the box does")
     t.expectEqual(b.phone.respond(to: post("/api/key", ["key": "a", "press": "rm -rf"])).status, 400, "only the named keys can be pressed")
-    let keyed = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "2"])))
+    let keyed = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "2", "box": drew(asking["state"] as? [String: Any] ?? [:], "a")])))
     t.expect(keyed["sent"] as? Bool == true && b.pressed == ["2"] && b.logs.contains("phone key 2 to Grow guide replies: sent"), "a key goes to its pane")
     b.screen = "working…\n────────────────\n❯ \n────────────────\n  status"
     let stray = json(b.phone.respond(to: post("/api/key", ["key": "a", "press": "1"])))
@@ -587,10 +799,10 @@ let phoneSuite = Suite("Phone") { t in
              "at Claude's prompt a number isn't pressed: it would type into the message, and the next answer would be pasted after it")
     _ = b.phone.respond(to: post("/api/key", ["key": "a", "press": "enter"]))
     t.expectEqual(b.pressed, ["2", "enter"], "Enter still is: it sends what's typed there")
-    b.outcome = .unconfirmed
+    b.term.takesPaste = false   // the paste never shows in the prompt box, so Return isn't pressed
     let half = json(b.phone.respond(to: post("/api/reply", ["key": "a", "text": "and one more thing"])))
     t.expect(half["sent"] as? Bool == false && half["pasted"] as? Bool == true, "words pasted but not sent are said to be in the prompt, so the page doesn't offer to send them twice")
-    b.outcome = .sent
+    b.term.takesPaste = true
     let after = json(b.phone.respond(to: get("/api/screen", query: ["key": "a"])))
     t.expect(turns(after["state"] as? [String: Any] ?? [:]).first?["question"] is NSNull, "back at Claude's prompt, the question is over")
     b.screen = nil
@@ -600,15 +812,28 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(Reply.keyScript(pane.session!, Reply.keys["down"]!).contains("(character id 27) & (character id 91) & (character id 66)"),
              "Down is the bytes the key sends")
     var asked: [String] = []
-    t.expect(Reply.press("enter", in: pane, ask: { asked.append($0); return Reply.Answer(reply: "ok") }) == .sent
-             && asked.count == 1 && asked[0].contains("(character id 13)") && asked[0].contains("newline no"),
-             "a key is written to the pane, with no Return of its own")
-    t.expect(Reply.press("f13", in: pane, ask: { _ in Reply.Answer(reply: "ok") }) == .failed("no such key"), "an unknown key is never written")
-    t.expect(Reply.press("enter", in: pane, ask: { _ in Reply.Answer(reply: "missing") }) == .gone
-             && Reply.press("enter", in: pane, ask: { _ in Reply.Answer(errorCode: -1743) }) == .denied, "a closed pane and a refused permission say so")
-    t.expectEqual(Reply.screen(of: pane, lines: 2, ask: { _ in Reply.Answer(reply: "ok\none\ntwo\nthree\n\n   \n") }) ?? "", "two\nthree",
+    let atItsPrompt = Reply.Terminal(ask: { source in
+        asked.append(source)
+        return Reply.Answer(reply: source.contains("contents of s") ? "ok\n" + atPrompt : "ok")
+    }, wait: { _ in })
+    t.expect(Reply.press("enter", on: .noBox, in: pane, via: atItsPrompt) == .sent
+             && asked.count == 2 && asked[0].contains("contents of s") && asked[1].contains("(character id 13)") && asked[1].contains("newline no"),
+             "a key is written to the pane only after a look at it, and with no Return of its own")
+    asked = []
+    t.expect(Reply.press("f13", on: .noBox, in: pane, via: atItsPrompt) == .failed("no such key") && Reply.press("3", on: .noBox, in: pane, via: atItsPrompt) != .sent
+             && asked.allSatisfy { $0.contains("contents of s") }, "an unknown key is never written, nor one the pane wouldn't take as an answer")
+    t.expect(Reply.press("enter", on: .noBox, in: pane, via: saying(Reply.Answer(reply: "missing"))) == .gone
+             && Reply.press("enter", on: .noBox, in: pane, via: saying(Reply.Answer(errorCode: -1743))) == .denied, "a closed pane and a refused permission say so")
+    let writeFails = Reply.Terminal(ask: { source in
+        source.contains("contents of s") ? Reply.Answer(reply: "ok\n" + atPrompt) : Reply.Answer(errorCode: -1728, errorMessage: "Can't get session.")
+    }, wait: { _ in })
+    t.expect(Reply.press("enter", on: .noBox, in: pane, via: writeFails) == .failed("Can't get session.")
+             && Reply.pick(0, of: TerminalBox.Drawn(ask: "", rows: []), in: pane, via: saying(Reply.Answer(errorCode: -1743))) == .denied
+             && Reply.press("enter", on: .noBox, in: Origin(term: "Apple_Terminal", tty: "/dev/ttys004"), via: atItsPrompt) == .gone,
+             "an error from iTerm2 comes back in its own words, whichever script met it; a pane that isn't iTerm2's can't be pressed in")
+    t.expectEqual(Reply.screen(of: pane, lines: 2, via: saying(Reply.Answer(reply: "ok\none\ntwo\nthree\n\n   \n"))) ?? "", "two\nthree",
                   "the screen is its last lines, without the blank foot")
-    t.expect(Reply.screen(of: pane, ask: { _ in Reply.Answer(reply: "missing") }) == nil, "and nil once the pane is gone")
+    t.expect(Reply.screen(of: pane, via: saying(Reply.Answer(reply: "missing"))) == nil, "and nil once the pane is gone")
 
     // -- away and its pushes ------------------------------------------------
     t.expect(b.pushes.isEmpty, "at the Mac, nothing is pushed")

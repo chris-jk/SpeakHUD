@@ -205,9 +205,11 @@ What's on the page:
 - **Whatever it's asking, as buttons.** A question, a permission prompt, the
   folder-trust check: the box is read off the terminal's own screen, so its choices show
   as they stand, ticks and all, and a tap picks one (its number, or arrows and Enter
-  for a choice without one). The choice that takes your own words is a field. The Mac
-  reads the box again before it presses anything, so a box that has moved on is never
-  answered blind.
+  for a choice without one). The choice that takes your own words is a field. A tap
+  says which box it was drawn in, and the Mac reads the box again before it presses
+  anything: if a different box is up by then, even one with the same choices (every
+  permission box starts with Yes), nothing is pressed and the page shows the one that's
+  there. A box that has moved on is never answered blind.
 - **Working, asking, or waiting on you.** A window in full colour is waiting on you; one
   that has stepped back to a stripe says "working", and its Send becomes Queue; one
   with a box up says "asking". A working window also runs a bar down by its answer
@@ -242,8 +244,13 @@ What's on the page:
   and age. Resume opens a new iTerm2 window on the Mac in the folder the session was
   started in and runs `claude --resume` for it.
 - **Its screen**: the foot of the terminal as text, with keys (1 to 4, up, down, Enter,
-  Esc) for anything that wants a key, or Esc to stop a turn. At Claude's prompt only
-  Enter and Esc are pressed; a number there would just type into your message.
+  Esc) for anything that wants a key, or Esc to stop a turn. A key goes only where
+  Claude Code is showing something that takes it. Into a box, only the box the page is
+  showing you: if another has come up since, nothing is pressed and the page catches
+  up. At Claude's prompt only Enter and Esc are pressed (a number there would just type
+  into your message), and mid-turn with no prompt in sight only Esc. In a pane that has
+  dropped back to its shell, or shows anything else that isn't Claude Code's, no key is
+  pressed at all: Up and Enter there would run its last command again.
   **Close this terminal** is under there too, and takes two taps: Claude is asked to
   exit if it's at its prompt, then the pane is closed.
 - **Read aloud.** A **Read** button on each window has the phone read that turn in its

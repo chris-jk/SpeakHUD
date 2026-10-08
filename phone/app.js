@@ -981,6 +981,10 @@
     const drawn = box ? JSON.stringify(box) : (turn.question || '');
     if (w.question !== drawn) {
       w.question = drawn;
+      // What every tap on these buttons says it was drawn in: the Mac presses nothing
+      // unless its terminal still shows this box. What it asks and its choices, not the
+      // cursor or the ticks, which move while it's the same box.
+      w.box = box ? { ask: box.ask, tabs: box.tabs, rows: box.rows.map((row) => row.label) } : null;
       const options = el.querySelector('.win-options');
       options.replaceChildren();
       const tabs = el.querySelector('.win-tabs');
@@ -997,6 +1001,7 @@
           const button = document.createElement('button');
           button.type = 'button';
           button.dataset.press = m[1];
+          button.dataset.option = m[2];   // the choice this number was drawn beside
           const number = document.createElement('b');
           number.textContent = m[1];
           const label = document.createElement('span');
@@ -1006,6 +1011,8 @@
         }
         el.querySelector('.win-question').textContent = said.join('\n');
       }
+      // The hook's question as drawn, for a number tapped beside it to say what it answers.
+      w.said = box ? '' : el.querySelector('.win-question').textContent;
       // Read a question once, whole: the hook's comes in two pieces a few seconds apart,
       // and a box's ticks changing isn't a new question.
       const what = box ? box.ask : (turn.question || '');
@@ -1101,14 +1108,15 @@
     return button;
   }
 
-  // Tap a choice. The Mac reads the box again before pressing anything, so a box that
-  // has moved on is never answered blind; then the screen is read back.
+  // Tap a choice. The tap says which box it was drawn in, and the Mac reads the box again
+  // before pressing anything, so a box that has moved on is never answered blind; then
+  // the screen is read back.
   async function pick(key, row, label, button, text) {
     const w = shown.get(key);
     if (!w) return;
     button.disabled = true;
     try {
-      const body = { key, row, label };
+      const body = { key, row, label, box: w.box };
       if (text !== undefined) body.text = text;
       const { data } = await call('/api/pick', body);
       note(w.el, data.sent ? '' : 'Not chosen: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');
@@ -1152,7 +1160,13 @@
     if (!w || !name) return;
     button.disabled = true;
     try {
-      const { data } = await call('/api/key', { key, press: name });
+      // What the key was tapped on: the box drawn here, or a number beside the hook's
+      // words for a question. The Mac presses nothing if its terminal shows another
+      // box by now, and nothing at all in a terminal that isn't showing Claude Code.
+      const body = { key, press: name };
+      if (w.box) body.box = w.box;
+      else if (button.dataset.option) { body.asked = w.said; body.option = button.dataset.option; }
+      const { data } = await call('/api/key', body);
       note(w.el, data.sent ? '' : 'Key not pressed: ' + (data.outcome || data.error || 'the Mac did not say why') + '.');
       // Give the terminal a moment to redraw before reading it back.
       setTimeout(() => look(key), 700);
