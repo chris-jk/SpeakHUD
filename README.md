@@ -111,18 +111,20 @@ When a Claude Code turn has been read to its end, the mic opens for that turn an
   more and it goes back to listening; **Skip** or `⌃⌥P` takes it back), then it's pasted
   into the prompt of the terminal that spoke and sent. A *pop* means it went.
 - **Say nothing** and the mic closes after 8 s; the next turn in the queue is read.
-- **Clear.** While it's listening the HUD's Pause button reads **✕ Clear**: it (or `⌃⌥P`
-  from anywhere) throws away what was heard and closes the mic, right up until it's sent.
+- **Clear.** Once it has heard something the HUD's Pause button reads **✕ Clear**: it (or
+  `⌃⌥P` from anywhere) throws that away, right up until it's sent, and listens again for
+  5 s. With nothing heard the button reads **✕ Close** and shuts the mic, so Clear twice
+  is "not now".
 - **Say one of these**, alone, and it's for the HUD instead of Claude:
   - *"say that again"*, *"repeat that"*, *"remind me again"*: reads the turn again, then asks again
   - *"put it off"*, *"put it off to the end"*, *"ask me later"*: the turn goes to the back
     of the queue (or, with nothing queued, waits for the next turn to arrive) and you're
     asked then
   - *"skip"* or *"no reply"*: closes the mic now and moves on
-  - *"clear that"*, *"never mind"*, *"don't send that"* (also at the end of whatever was
-    heard): throws it away, closes the mic and moves on. For when it heard something that
-    wasn't meant for it
-  - *"scratch that"* (also at the end of whatever you said): forgets it and listens again
+  - *"clear that"*, *"scratch that"*, *"never mind"*, *"don't send that"* (also at the end
+    of whatever was heard): throws it away and listens again for 5 s, in case you want to
+    say it properly; say nothing and it closes. For when it heard something that wasn't
+    meant for it
 
   Apart from "skip" they're whole phrases you wouldn't say to Claude, on purpose: plain
   "later" or "again" is a reply, and is sent.

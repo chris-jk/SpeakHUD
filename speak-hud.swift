@@ -710,14 +710,15 @@ enum SpokenCommand: Equatable {
     case again     // read it to me once more
     case later     // put it at the end of the line and ask me then
     case skip      // after a turn: no reply, move on now. During one: drop it and move on
-    case scratch   // forget what I just said and listen again (reply window only)
+    case scratch   // forget what was just heard and listen again a little while (reply window only)
     case pause     // stop talking (this and the two below: while reading only)
     case resume    // carry on
     case stopAll   // stop, and throw the queue away
 
     /// Said at the end of anything, these throw away all of it: the mic heard something
-    /// it wasn't meant to (the room, a video, a thought you've dropped).
-    private static let takeBacks = ["clear that", "cancel that", "don't send that"]
+    /// it wasn't meant to (the room, a video, a thought you've dropped). It then listens
+    /// again for a little while, in case you want to say it properly.
+    private static let takeBacks = ["scratch that", "clear that", "cancel that", "don't send that"]
 
     private static let phrases: [String: SpokenCommand] = {
         var table: [String: SpokenCommand] = [:]
@@ -731,9 +732,9 @@ enum SpokenCommand: Equatable {
         // for when they've nothing to say (Chris's first two tries, 10-07).
         for p in ["no reply", "no answer", "nothing to say", "skip", "skip it", "skip this", "skip that",
                   "skip this part"] { table[p] = .skip }
-        // …and the ways of saying "that wasn't meant for you": nothing is sent.
-        for p in takeBacks + ["clear", "clear it", "never mind", "nevermind", "don't send"] { table[words(p)] = .skip }
-        for p in ["scratch that", "start over"] { table[p] = .scratch }
+        for p in takeBacks + ["start over", "clear", "clear it", "never mind", "nevermind", "don't send"] {
+            table[words(p)] = .scratch
+        }
         return table
     }()
 
@@ -767,10 +768,8 @@ enum SpokenCommand: Equatable {
         let said = words(heard)
         guard whileReading else {
             if let c = phrases[said] { return c }
-            // "…no wait, scratch that" takes back everything before it and listens again;
-            // "…clear that" takes it back and shuts the mic.
-            if said.hasSuffix(" scratch that") { return .scratch }
-            return takeBacks.contains { said.hasSuffix(" " + words($0)) } ? .skip : nil
+            // "…no wait, scratch that" takes back everything before it.
+            return takeBacks.contains { said.hasSuffix(" " + words($0)) } ? .scratch : nil
         }
         if let c = reading[said] { return c }
         var bare = said.split(separator: " ").map(String.init)
@@ -1706,9 +1705,13 @@ final class Playback {
     /// hold back to the mic, which resumes on release.
     func togglePause() {
         pausedByVoice = false   // your hands are on it now: the mic isn't kept open for "go on"
-        if window != nil {   // the one key that works from anywhere, and the Clear button: "not that"
-            closeWindow("cleared")
-            moveOn()
+        if let w = window {   // the Clear button, and the one key that works from anywhere
+            if SpokenCommand.words(w.heard).isEmpty {
+                closeWindow("closed")   // nothing to clear: you didn't mean it to listen
+                moveOn()
+            } else {
+                hearAgain("cleared")    // "not that": wiped, and a few seconds to say it again
+            }
             return
         }
         guard current != nil || !queue.isEmpty else { return }
@@ -1807,6 +1810,8 @@ final class Playback {
     static let replyGrace: TimeInterval = 1.5
     /// How long the mic may take to open before the window is given up on.
     static let micOpenLimit: TimeInterval = 6
+    /// How long you have to start again after taking back what was heard.
+    static let replyRetry: TimeInterval = 5
 
     private struct Listening {
         enum Phase { case opening, waiting, hearing, sending }
@@ -1814,6 +1819,7 @@ final class Playback {
         let id: Int
         var heard = ""
         var phase = Phase.opening
+        var again = false   // reopened after a take-back: a shorter wait to start
     }
 
     /// The setting. Turning it off shuts a window that's open.
@@ -1891,7 +1897,7 @@ final class Playback {
     }
 
     private func armWait() {
-        arm(Self.replyWait) { [weak self] in
+        arm(window?.again == true ? Self.replyRetry : Self.replyWait) { [weak self] in
             self?.closeWindow("nothing said")
             self?.moveOn()
         }
@@ -1980,18 +1986,27 @@ final class Playback {
             closeWindow("no reply")
             moveOn()
         case .scratch?:
-            // A fresh window: the mic would go on reporting the words taken back.
-            log("scratched; listening again")
-            windowID += 1
-            window = Listening(item: w.item, id: windowID)
-            hearReply()
-            publish()
+            hearAgain("scratched")
         case nil, .pause?, .resume?, .stopAll?:   // those three are only ever heard mid-turn
             w.phase = .sending
             window = w
             arm(Self.replyGrace) { [weak self] in self?.sendReply() }
             publish()
         }
+    }
+
+    /// Throw away what's been heard and listen afresh for a little while: you may want
+    /// to say it again, or nothing. A fresh window, because the mic would go on
+    /// reporting the words taken back.
+    private func hearAgain(_ why: String) {
+        guard let w = window else { return }
+        log("\(why); listening again")
+        windowID += 1
+        var fresh = Listening(item: w.item, id: windowID)
+        fresh.again = true
+        window = fresh
+        hearReply()
+        publish()
     }
 
     private func sendReply() {
@@ -2229,10 +2244,13 @@ final class Playback {
         if let w = window {
             s.isActive = true   // you're mid-reply: the HUD stays up
             s.canSkip = true
-            s.pauseTitle = "✕ Clear"   // nothing to pause: the button (and its key) throws the reply away
+            // Nothing to pause: the button (and its key) wipes what's been heard, or with
+            // nothing heard shuts the mic.
+            s.pauseTitle = SpokenCommand.words(w.heard).isEmpty ? "✕ Close" : "✕ Clear"
             switch w.phase {
             case .opening: s.status = "🎙 Opening the mic…"
-            case .waiting: s.status = "🎙 Listening: answer \(w.item.source), or say nothing"
+            case .waiting: s.status = w.again ? "🎙 Cleared. Say it again, or say nothing"
+                                              : "🎙 Listening: answer \(w.item.source), or say nothing"
             case .hearing: s.status = "🎙 Listening… “clear that” takes it back"
             case .sending: s.status = "➤ Sending to \(w.item.source)… “clear that” stops it"
             }
