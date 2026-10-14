@@ -4874,9 +4874,9 @@ enum OldSessions {
 
 /// A fresh Claude Code, started from the phone: a new iTerm2 window in one of your
 /// folders, running `claude`, with your first message if you wrote one. The folders on
-/// offer are the ones you pinned, your home folder, then the ones this Mac's own
-/// transcripts were started in, most used first. The page picks one of those and never
-/// names a path of its own.
+/// offer are the ones you pinned, your home folder, the ones this Mac's own transcripts
+/// were started in, most used first, then the project folders Claude Code remembers.
+/// The page picks one of those and never names a path of its own.
 enum NewTerminal {
     struct Project: Equatable {
         var folder: String
@@ -4891,8 +4891,26 @@ enum NewTerminal {
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
 
-    /// `sessions` newest first, as `OldSessions.recent` gives them.
-    static func projects(pinned: [String], sessions: [OldSessions.Session], home: String,
+    static var config: String { NSString(string: "~/.claude.json").expandingTildeInPath }
+    static var roots: [String] { ["~/GitHub", "~/Desktop/Projects"].map { NSString(string: $0).expandingTildeInPath } }
+
+    /// The folders Claude Code itself remembers being opened in (`projects` in
+    /// ~/.claude.json, kept long after their transcripts are cleaned away), newest first.
+    /// Only those under `roots`: the rest is mostly scratch folders.
+    static func known(in path: String = NewTerminal.config, roots: [String] = NewTerminal.roots) -> [String] {
+        guard let data = FileManager.default.contents(atPath: path),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let projects = o["projects"] as? [String: Any] else { return [] }
+        func at(_ folder: String) -> Double {
+            let p = projects[folder] as? [String: Any] ?? [:]
+            return ["lastStartTime", "lastSessionModified"].compactMap { (p[$0] as? NSNumber)?.doubleValue }.max() ?? 0
+        }
+        return projects.keys.filter { folder in roots.contains { folder.hasPrefix($0 + "/") } }
+            .sorted { at($0) != at($1) ? at($0) > at($1) : $0 < $1 }
+    }
+
+    /// `sessions` newest first, as `OldSessions.recent` gives them; `known` as `known()` does.
+    static func projects(pinned: [String], sessions: [OldSessions.Session], known: [String] = [], home: String,
                          isFolder: (String) -> Bool = NewTerminal.isFolder) -> [Project] {
         var uses: [String: Int] = [:], order: [String] = []
         for s in sessions {
@@ -4903,7 +4921,7 @@ enum NewTerminal {
             uses[a.element]! != uses[b.element]! ? uses[a.element]! > uses[b.element]! : a.offset < b.offset
         }.map { $0.element }
         var found: [Project] = []
-        for (folder, pin) in pinned.map({ ($0, true) }) + ([home] + suggested).map({ ($0, false) }) {
+        for (folder, pin) in pinned.map({ ($0, true) }) + ([home] + suggested + known).map({ ($0, false) }) {
             guard pin || found.count < limit, !found.contains(where: { $0.folder == folder }),
                   folder.hasPrefix("/"), LoadCommand.isLoadable(folder), isFolder(folder) else { continue }
             found.append(Project(folder: folder, name: "", pinned: pin))
@@ -5694,12 +5712,13 @@ final class Phone {
     var startNew: (String, String?) -> Reply.Outcome = { NewTerminal.start(folder: $0, message: $1) }
     var home = NSHomeDirectory()
     var isFolder: (String) -> Bool = NewTerminal.isFolder
+    var knownFolders: () -> [String] = { NewTerminal.known() }
 
     var pinned: [String] { defaults.stringArray(forKey: Self.pinnedKey) ?? [] }
 
     /// The folders a new terminal can start in, as the page is offered them.
     func projects() -> [NewTerminal.Project] {
-        NewTerminal.projects(pinned: pinned, sessions: oldSessions(), home: home, isFolder: isFolder)
+        NewTerminal.projects(pinned: pinned, sessions: oldSessions(), known: knownFolders(), home: home, isFolder: isFolder)
     }
 
     private func projectsJSON() -> [String: Any] {

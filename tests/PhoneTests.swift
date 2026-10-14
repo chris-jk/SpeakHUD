@@ -141,6 +141,7 @@ private final class Bench {
     var reopened: [String] = []
     var started: [String] = []       // each new terminal: "folder" or "folder: message"
     var folders: Set<String> = []    // the folders that are there
+    var known: [String] = []         // the folders Claude Code remembers
     var saves = 0
     var heardSizes: [Int] = []       // each recording the page sent to be turned into words
     var hearAnswer: Result<String, Dictation.Failure>? = .success("Yes, go ahead.")   // nil: still hearing it
@@ -162,6 +163,7 @@ private final class Bench {
         phone.startNew = { [unowned self] folder, message in self.started.append(folder + (message.map { ": " + $0 } ?? "")); return self.outcome }
         phone.home = "/Users/you"
         phone.isFolder = { [unowned self] in self.folders.contains($0) }
+        phone.knownFolders = { [unowned self] in self.known }
         phone.save = { [unowned self] _ in self.saves += 1 }
         phone.hear = { [unowned self] data, done in
             self.heardSizes.append(data.count)
@@ -811,6 +813,17 @@ let phoneSuite = Suite("Phone") { t in
     t.expectEqual(offers.map { $0.name }, ["sheet", "Home", "grow-guide", "vera/app", "strain-guide/app"],
                   "by the folder's name, with its parent's where two would read the same")
     t.expectEqual(offers.map { $0.pinned }, [true, false, false, false, false], "and which you pinned")
+    let config = dir + "/claude.json"
+    fm.createFile(atPath: config, contents: Data(#"""
+    {"projects": {"/r/old": {"lastStartTime": 1000}, "/r/new": {"lastStartTime": 1000, "lastSessionModified": 3000},
+                  "/r/mid": {"lastStartTime": 2000}, "/tmp/scratch": {"lastStartTime": 9000}, "/r": {"lastStartTime": 9000}}}
+    """#.utf8))
+    t.expectEqual(NewTerminal.known(in: config, roots: ["/r"]), ["/r/new", "/r/mid", "/r/old"],
+                  "the folders Claude Code remembers, under the roots only, newest first")
+    t.expectEqual(NewTerminal.known(in: dir + "/none.json"), [], "no such file: none")
+    t.expectEqual(NewTerminal.projects(pinned: [], sessions: [session("/g/sheet", 5)], known: ["/g/vera/app", "/g/sheet"], home: "/Users/you",
+                                       isFolder: { there.contains($0) }).map { $0.folder }, ["/Users/you", "/g/sheet", "/g/vera/app"],
+                  "and they come after the ones recent sessions ran in, once each")
     let many = (0..<30).map { session("/many/\($0)", Double($0)) }
     t.expectEqual(NewTerminal.projects(pinned: [], sessions: many, home: "/Users/you", isFolder: { _ in true }).count, NewTerminal.limit,
                   "suggestions stop at the limit")

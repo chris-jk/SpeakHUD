@@ -241,7 +241,8 @@ What's on the page:
   window. Add and remove your own under **Quick answers** at the top; they're kept on
   the Mac.
 - **Start a new terminal**, at the foot of the page: your pinned folders, your home
-  folder, then the folders your recent sessions ran in, most used first. Write a first
+  folder, the folders your recent sessions ran in, most used first, then the project
+  folders Claude Code remembers (under ~/GitHub and ~/Desktop/Projects). Write a first
   message if you like and tap Start beside a folder: a new iTerm2 window opens on the
   Mac there and runs `claude` with that message. Pin keeps a folder on the list.
 - **Resume an old session**, at the foot of the page: recent sessions by name, folder
