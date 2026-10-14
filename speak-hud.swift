@@ -4884,7 +4884,7 @@ enum NewTerminal {
         var pinned: Bool
     }
 
-    static let limit = 12   // suggestions; pinned folders are always offered
+    static let limit = 20   // suggestions; pinned folders are always offered
 
     static func isFolder(_ path: String) -> Bool {
         var isDir: ObjCBool = false
