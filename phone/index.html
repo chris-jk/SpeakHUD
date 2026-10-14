@@ -48,7 +48,14 @@
 
 <main id="windows"></main>
 
-<p class="empty" id="empty" hidden>No terminals open. Start Claude Code in iTerm2 on your Mac, or resume a session below.</p>
+<p class="empty" id="empty" hidden>No terminals open. Start a new one below, or resume an old session.</p>
+
+<details class="fold" id="new">
+  <summary>Start a new terminal</summary>
+  <p class="says" id="new-says">Opens a fresh Claude Code on the Mac in the folder you pick, with your first message if you write one.</p>
+  <input type="text" class="new-text" id="new-text" placeholder="First message (optional)" aria-label="First message" maxlength="800" enterkeyhint="done">
+  <ul class="old-list" id="new-list"></ul>
+</details>
 
 <details class="fold" id="old">
   <summary>Resume an old session</summary>

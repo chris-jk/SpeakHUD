@@ -1851,6 +1851,75 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
 
   old.addEventListener('toggle', () => { if (old.open) loadOld(); });
 
+  // -- new terminals ---------------------------------------------------------
+  const fresh = document.getElementById('new');
+  const freshList = document.getElementById('new-list');
+  const freshSays = document.getElementById('new-says');
+  const freshText = document.getElementById('new-text');
+
+  function showProjects(projects) {
+    freshList.replaceChildren(...projects.map((project) => {
+      const row = document.createElement('li');
+      const said = document.createElement('span');
+      said.textContent = project.name;
+      const where = document.createElement('small');
+      where.textContent = project.where;
+      said.append(where);
+      const pin = document.createElement('button');
+      pin.type = 'button';
+      pin.className = 'pin';
+      pin.textContent = project.pinned ? 'Unpin' : 'Pin';
+      pin.addEventListener('click', () => pinProject(project, pin));
+      const go = document.createElement('button');
+      go.type = 'button';
+      go.className = 'start';
+      go.textContent = 'Start';
+      go.addEventListener('click', () => startIn(project, go));
+      row.append(said, pin, go);
+      return row;
+    }));
+    if (!projects.length) freshSays.textContent = 'No folders to offer: none of your sessions on this Mac says where it ran.';
+  }
+
+  async function loadProjects() {
+    try {
+      const { ok, data } = await call('/api/projects');
+      if (ok) showProjects(data.projects); else freshSays.textContent = "The Mac wouldn't list its folders.";
+    } catch (e) {
+      freshSays.textContent = "Can't reach the Mac.";
+    }
+  }
+
+  async function pinProject(project, button) {
+    button.disabled = true;
+    try {
+      const { ok, data } = await call('/api/pin', { folder: project.folder, on: !project.pinned });
+      if (ok) showProjects(data.projects); else freshSays.textContent = "Not changed: the Mac refused.";
+    } catch (e) {
+      freshSays.textContent = "Not changed: can't reach the Mac.";
+    }
+    button.disabled = false;
+  }
+
+  async function startIn(project, button) {
+    button.disabled = true;
+    button.textContent = 'Opening';
+    const text = freshText.value.trim();
+    try {
+      const { data } = await call('/api/new', text ? { folder: project.folder, text } : { folder: project.folder });
+      freshSays.textContent = data.sent
+        ? 'A new terminal is opening in ' + project.name + ' on the Mac. Its window shows up above in a few seconds.'
+        : 'Not started: ' + (data.outcome || data.error || 'the Mac did not say why') + '.';
+      if (data.sent) { freshText.value = ''; setTimeout(refresh, 4000); }
+    } catch (e) {
+      freshSays.textContent = "Not started: can't reach the Mac.";
+    }
+    button.disabled = false;
+    button.textContent = 'Start';
+  }
+
+  fresh.addEventListener('toggle', () => { if (fresh.open) loadProjects(); });
+
   awaySwitch.addEventListener('change', async () => {
     const on = awaySwitch.checked;
     try {

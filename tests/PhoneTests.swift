@@ -139,6 +139,8 @@ private final class Bench {
     var old: [OldSessions.Session] = []
     var running: Set<String> = []
     var reopened: [String] = []
+    var started: [String] = []       // each new terminal: "folder" or "folder: message"
+    var folders: Set<String> = []    // the folders that are there
     var saves = 0
     var heardSizes: [Int] = []       // each recording the page sent to be turned into words
     var hearAnswer: Result<String, Dictation.Failure>? = .success("Yes, go ahead.")   // nil: still hearing it
@@ -157,6 +159,9 @@ private final class Bench {
         phone.oldSessions = { [unowned self] in self.old }
         phone.runningIDs = { [unowned self] in self.running }
         phone.reopen = { [unowned self] session in self.reopened.append(session.id + " in " + session.cwd); return self.outcome }
+        phone.startNew = { [unowned self] folder, message in self.started.append(folder + (message.map { ": " + $0 } ?? "")); return self.outcome }
+        phone.home = "/Users/you"
+        phone.isFolder = { [unowned self] in self.folders.contains($0) }
         phone.save = { [unowned self] _ in self.saves += 1 }
         phone.hear = { [unowned self] data, done in
             self.heardSizes.append(data.count)
@@ -791,6 +796,65 @@ let phoneSuite = Suite("Phone") { t in
              "one that isn't is, from the folder this Mac's own record gives")
     t.expect(o.phone.respond(to: post("/api/resume", ["id": "../../etc"])).status == 404 && o.reopened.count == 1,
              "the page names a session by its id and nothing else: an id that isn't listed opens nothing")
+
+    // -- a new terminal --------------------------------------------------------
+    func session(_ cwd: String, _ age: TimeInterval) -> OldSessions.Session {
+        OldSessions.Session(id: idA, title: "x", cwd: cwd, at: Date().addingTimeInterval(-age))
+    }
+    let there: Set<String> = ["/Users/you", "/g/grow-guide", "/g/strain-guide/app", "/g/vera/app", "/g/sheet"]
+    let offers = NewTerminal.projects(pinned: ["/g/sheet", "/g/gone"], sessions: [
+        session("/g/vera/app", 10), session("/g/grow-guide", 20), session("/Users/you", 30),
+        session("/g/strain-guide/app", 40), session("/g/grow-guide", 50), session("/g/gone", 60),
+    ], home: "/Users/you", isFolder: { there.contains($0) })
+    t.expectEqual(offers.map { $0.folder }, ["/g/sheet", "/Users/you", "/g/grow-guide", "/g/vera/app", "/g/strain-guide/app"],
+                  "pinned first, then home, then the folders sessions started in, most used first, then newest; one that's gone is never offered")
+    t.expectEqual(offers.map { $0.name }, ["sheet", "Home", "grow-guide", "vera/app", "strain-guide/app"],
+                  "by the folder's name, with its parent's where two would read the same")
+    t.expectEqual(offers.map { $0.pinned }, [true, false, false, false, false], "and which you pinned")
+    let many = (0..<30).map { session("/many/\($0)", Double($0)) }
+    t.expectEqual(NewTerminal.projects(pinned: [], sessions: many, home: "/Users/you", isFolder: { _ in true }).count, NewTerminal.limit,
+                  "suggestions stop at the limit")
+
+    t.expectEqual(NewTerminal.line(folder: "/Users/you/it's here", message: nil) ?? "", #"cd '/Users/you/it'\''s here' && claude"#,
+                  "no message: plain claude, in that folder however it's spelled")
+    t.expectEqual(NewTerminal.line(folder: "/g/x", message: "don't stop; rm -rf ~ $(boom)") ?? "", #"cd '/g/x' && claude 'don'\''t stop; rm -rf ~ $(boom)'"#,
+                  "a message goes in as claude's prompt, quoted, so nothing in it runs")
+    t.expectEqual(NewTerminal.line(folder: "/g/x", message: "purge") ?? "", "cd '/g/x' && claude 'purge '",
+                  "a one-word message keeps a space on the end, so claude never takes it as one of its commands")
+    t.expect(NewTerminal.line(folder: "/g/x", message: "two\nlines") == nil && NewTerminal.line(folder: "g/x", message: nil) == nil
+             && NewTerminal.line(folder: "/g/x", message: String(repeating: "word ", count: 300)) == nil,
+             "a line break, a folder that isn't a full path, or a line too long to type is never put in a command")
+    ran = []
+    t.expect(NewTerminal.start(folder: dir, message: "hello there", run: { ran.append($0); return Reply.Answer(reply: "ok") }) == .sent
+             && ran.count == 1 && ran[0].contains("create window with default profile") && ran[0].contains("claude 'hello there'"),
+             "starting one opens a new iTerm2 window and runs claude there")
+    t.expect(NewTerminal.start(folder: dir + "/gone", message: nil, run: { ran.append($0); return Reply.Answer(reply: "ok") }) != .sent && ran.count == 1,
+             "a folder that has gone opens nothing, and says so")
+
+    o.old = [session("/g/grow-guide", 10), session("/g/grow-guide", 20), session("/g/vera/app", 30)]
+    o.folders = ["/Users/you", "/g/grow-guide", "/g/vera/app"]
+    let folderList = json(o.phone.respond(to: get("/api/projects")))["projects"] as? [[String: Any]] ?? []
+    t.expectEqual(folderList.compactMap { $0["name"] as? String }, ["Home", "grow-guide", "app"], "the page is offered the folders")
+    t.expectEqual(o.phone.respond(to: post("/api/new", ["folder": "/etc"])).status, 404, "a folder the Mac didn't offer is refused")
+    t.expectEqual(o.phone.respond(to: post("/api/new", ["folder": "/g/grow-guide", "text": "!!"])).status, 400,
+                  "so is a message with nothing a terminal can take")
+    t.expect(o.started.isEmpty, "and neither opens anything")
+    let begun = json(o.phone.respond(to: post("/api/new", ["folder": "/g/grow-guide", "text": "  /check\nreplies  "])))
+    t.expect(begun["sent"] as? Bool == true && o.started == ["/g/grow-guide: check replies"],
+             "one it offered starts, with the message cleaned as a reply is (one line, no slash command)")
+    t.expect(o.logs.contains("phone started a new terminal in grow-guide with a first message: sent") && !o.logs.contains { $0.contains("check replies") },
+             "the log says where, never what the message said")
+    _ = o.phone.respond(to: post("/api/new", ["folder": "/Users/you"]))
+    t.expectEqual(o.started.last ?? "", "/Users/you", "no message: just claude")
+
+    let pinnedNow = json(o.phone.respond(to: post("/api/pin", ["folder": "/g/vera/app", "on": true])))["projects"] as? [[String: Any]] ?? []
+    t.expect(pinnedNow.first?["folder"] as? String == "/g/vera/app" && pinnedNow.first?["pinned"] as? Bool == true
+             && o.phone.pinned == ["/g/vera/app"], "a pinned folder is kept, and offered first")
+    o.old = []
+    t.expect(o.phone.projects().map { $0.folder } == ["/g/vera/app", "/Users/you"], "even once no session from it is left on the Mac")
+    t.expectEqual(o.phone.respond(to: post("/api/pin", ["folder": "/etc", "on": true])).status, 404, "a folder it never offered can't be pinned")
+    _ = o.phone.respond(to: post("/api/pin", ["folder": "/g/vera/app", "on": false]))
+    t.expect(o.phone.pinned.isEmpty, "and unpinning lets it go")
 
     // -- a box coming up while you're away is pushed ---------------------------
     o.phone.setAway(true)

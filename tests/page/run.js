@@ -739,6 +739,41 @@ scenario('Reader: with no voice to speak with, it reads nothing and nothing trip
   assert.deepStrictEqual([r.state().reading, r.state().paused, r.reports.length], [null, null, 0]);
 });
 
+// -- a new terminal ------------------------------------------------------------
+
+scenario('a new terminal starts in the folder tapped, with the first message if there is one, and folders pin', async () => {
+  const w = await open([turn('a', 'Alpha.')]);
+  const home = { folder: '/Users/you', name: 'Home', where: '~', pinned: false };
+  const gg = { folder: '/Users/you/GitHub/grow-guide', name: 'grow-guide', where: '~/GitHub/grow-guide', pinned: false };
+  w.mac.routes['/api/projects'] = () => ({ data: { projects: [home, gg] } });
+  w.mac.routes['/api/new'] = () => ({ data: { sent: true, outcome: 'opening on the Mac' } });
+  await w.tap(w.$('new').querySelector('summary'));
+  let rows = w.$('new-list').querySelectorAll('li');
+  assert.deepStrictEqual(rows.map((r) => r.querySelector('span').textContent), ['Home~', 'grow-guide~/GitHub/grow-guide']);
+
+  await w.type(w.$('new-text'), '  check replies ');
+  await w.tap(rows[1].querySelector('button.start'));
+  assert.deepStrictEqual(w.mac.posts('/api/new').map((r) => r.body), [{ folder: gg.folder, text: 'check replies' }]);
+  assert.strictEqual(w.$('new-text').value, '');
+  assert.ok(w.$('new-says').textContent.startsWith('A new terminal is opening in grow-guide'));
+  assert.strictEqual(rows[1].querySelector('button.start').textContent, 'Start');
+
+  await w.tap(rows[0].querySelector('button.start'));
+  assert.deepStrictEqual(w.mac.posts('/api/new')[1].body, { folder: home.folder }, 'no message: none is sent');
+
+  w.mac.routes['/api/new'] = () => ({ status: 404, data: { error: "that folder isn't offered any more" } });
+  await w.type(w.$('new-text'), 'keep me');
+  await w.tap(rows[0].querySelector('button.start'));
+  assert.strictEqual(w.$('new-says').textContent, "Not started: that folder isn't offered any more.");
+  assert.strictEqual(w.$('new-text').value, 'keep me', 'a message that went nowhere stays to try again');
+
+  w.mac.routes['/api/pin'] = () => ({ data: { projects: [Object.assign({}, gg, { pinned: true }), home] } });
+  await w.tap(rows[1].querySelector('button.pin'));
+  assert.deepStrictEqual(w.mac.posts('/api/pin').map((r) => r.body), [{ folder: gg.folder, on: true }]);
+  rows = w.$('new-list').querySelectorAll('li');
+  assert.deepStrictEqual(rows.map((r) => r.querySelector('button.pin').textContent), ['Unpin', 'Pin']);
+});
+
 // -- run them ------------------------------------------------------------------
 
 (async () => {

@@ -240,6 +240,10 @@ What's on the page:
 - **Quick answers.** The things you always send ("Wrap up") as one-tap buttons on every
   window. Add and remove your own under **Quick answers** at the top; they're kept on
   the Mac.
+- **Start a new terminal**, at the foot of the page: your pinned folders, your home
+  folder, then the folders your recent sessions ran in, most used first. Write a first
+  message if you like and tap Start beside a folder: a new iTerm2 window opens on the
+  Mac there and runs `claude` with that message. Pin keeps a folder on the list.
 - **Resume an old session**, at the foot of the page: recent sessions by name, folder
   and age. Resume opens a new iTerm2 window on the Mac in the folder the session was
   started in and runs `claude --resume` for it.
