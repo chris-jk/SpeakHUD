@@ -54,6 +54,7 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>NSAppleEventsUsageDescription</key><string>Clicking a project name in the HUD switches to the terminal it came from.</string>
   <key>NSMicrophoneUsageDescription</key><string>With Listen After Reading on, SpeakHUD hears your reply to a Claude Code turn and types it into that terminal. It is transcribed on this Mac.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>SpeakHUD listens to whether other apps are making sound, so it waits instead of talking over them. Nothing is recorded or kept.</string>
 </dict>
 </plist>
 PLIST
@@ -97,6 +98,15 @@ else
   echo "  NOTE: macOS will drop SpeakHUD's Accessibility grant on every rebuild."
 fi
 codesign --verify "$STAGE" && echo "  signature valid"
+
+# SPEAKHUD_BUILD_ONLY=<folder>: leave the signed .app in that folder and stop. Nothing is
+# installed, the agent isn't touched, the hook isn't refreshed (for checking a branch).
+if [ -n "${SPEAKHUD_BUILD_ONLY:-}" ]; then
+  mkdir -p "$SPEAKHUD_BUILD_ONLY"; rm -rf "$SPEAKHUD_BUILD_ONLY/$APPNAME.app"
+  cp -R "$STAGE" "$SPEAKHUD_BUILD_ONLY/$APPNAME.app"
+  echo "  built only -> $SPEAKHUD_BUILD_ONLY/$APPNAME.app (not installed)"
+  exit 0
+fi
 
 echo "== Install .app =="
 DEST="/Applications/$APPNAME.app"

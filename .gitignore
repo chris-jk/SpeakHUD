@@ -11,3 +11,4 @@
 # Temp icon staging
 icon_master.png
 *.iconset/
+build-out/
