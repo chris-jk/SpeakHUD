@@ -13,9 +13,12 @@ final class FakeVoice: Voice {
     weak var playback: Playback?
     private(set) var calls: [Call] = []
     private(set) var lastUtterance = 0
+    var speaker: String?
+    private(set) var speakers: [String?] = []   // whose turn each speak was for
 
     func speak(_ text: String, from offset: Int, rate: Float, utterance: Int) {
         calls.append(.speak(text, from: offset, rate: rate))
+        speakers.append(speaker)
         lastUtterance = utterance
     }
     func pause(immediately: Bool) { calls.append(.pause(immediately: immediately)) }

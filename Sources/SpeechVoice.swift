@@ -4,6 +4,20 @@ import AVFoundation
 /// The app's voice: AVSpeechSynthesizer behind the `Voice` seam.
 final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
     weak var listener: Playback?
+    var speaker: String?
+
+    /// The voices a Voice per Project casts from, read once: asking is slow.
+    static let pool: [String] = {
+        let mine = AVSpeechSynthesisVoice(language: nil)
+        func novelty(_ v: AVSpeechSynthesisVoice) -> Bool {
+            if #available(macOS 14.0, *) { return v.voiceTraits.contains(.isNoveltyVoice) }
+            return false   // and they're not among Apple's current voices anyway
+        }
+        let all = AVSpeechSynthesisVoice.speechVoices().map {
+            (id: $0.identifier, name: $0.name, language: $0.language, quality: $0.quality.rawValue, novelty: novelty($0))
+        }
+        return VoiceCast.pool(all, default: mine.map { (name: $0.name, language: $0.language) })
+    }()
 
     // Replaced on every (re)start: stopSpeaking(.immediate) poisons an instance so
     // the next utterance silently finishes with no audio. A fresh synth avoids that.
@@ -25,6 +39,12 @@ final class SpeechVoice: NSObject, Voice, AVSpeechSynthesizerDelegate {
             // Accept either a voice identifier or a name; fall back gracefully.
             if let voice = AVSpeechSynthesisVoice(identifier: v) { u.voice = voice }
             else if let voice = AVSpeechSynthesisVoice.speechVoices().first(where: { $0.name == v }) { u.voice = voice }
+        } else if let name = speaker, VoiceCast.enabled(in: prefs) {
+            var cast = VoiceCast.load(from: prefs)
+            if let id = cast.voice(for: name, from: Self.pool, now: Date()) {
+                cast.save(to: prefs)
+                u.voice = AVSpeechSynthesisVoice(identifier: id)
+            }
         }
         u.rate = rate
         let s = AVSpeechSynthesizer()

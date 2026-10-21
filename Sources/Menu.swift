@@ -15,6 +15,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     var hotkeyWarning: NSMenuItem!
     var micItem: NSMenuItem!
     var audioItem: NSMenuItem!
+    var voicesItem: NSMenuItem!
     var listenItem: NSMenuItem!
     var obeyItem: NSMenuItem!
     var awayItem: NSMenuItem!
@@ -65,6 +66,10 @@ final class MenuController: NSObject, NSMenuDelegate {
             audioItem.toolTip = "Needs macOS 14.2 or later"
         }
         menu.addItem(audioItem)
+
+        voicesItem = item("A Voice per Project", #selector(toggleVoices))
+        voicesItem.toolTip = "Read each terminal's turns in a voice of its own, so you can tell them apart by ear"
+        menu.addItem(voicesItem)
 
         listenItem = item("Listen After Reading", #selector(toggleListen))
         if agent.hud.canListen {
@@ -146,6 +151,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         hotkeyWarning.toolTip = loaded.problem.map { "\(HotkeyConfig.path) \($0)" }
         micItem.state = micItem.isEnabled && agent.hud.pauseWhileRecording ? .on : .off
         audioItem.state = audioItem.isEnabled && agent.hud.waitWhileAudioPlays ? .on : .off
+        voicesItem.state = agent.hud.voicePerProject ? .on : .off
         listenItem.state = agent.hud.listenAfterReading ? .on : .off
         obeyItem.state = agent.hud.listenWhileReading ? .on : .off
         let phone = agent.phone
@@ -259,6 +265,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
     @objc private func toggleAudioHold() {
         agent.hud.waitWhileAudioPlays.toggle()
+        refresh()
+    }
+    @objc private func toggleVoices() {
+        agent.hud.voicePerProject.toggle()
         refresh()
     }
     @objc private func toggleListen() {

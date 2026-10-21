@@ -492,6 +492,12 @@ The background agent shows a small **speaker icon** in the menu bar:
   shows a dash and "— Repair"; clicking reinstalls.
 - **Pause While Recording** — on by default: speech holds while another app uses the
   mic. Turning it off releases a hold at once. Shared with the standalone reader.
+- **A Voice per Project** — on by default: each terminal's turns are read in a voice of
+  their own, so you can tell who's talking before the words say. The voices are the Mac's
+  own in its language (Samantha, Daniel, Karen, Moira and so on, at their best installed
+  quality); the first terminal gets the voice you had, and a new one gets the voice heard
+  longest ago. A terminal keeps its voice across restarts, and gives it back after two
+  weeks unheard. `SPEAK_VOICE` overrides it.
 - **Listen After Reading** — off by default: answer a Claude Code turn out loud
   (see [Listen After Reading](#listen-after-reading)). Needs macOS 26.
 - **Listen While Reading** — off by default: say "skip", "later", "again", "pause" while

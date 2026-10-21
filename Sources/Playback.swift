@@ -13,6 +13,8 @@ import Foundation
 protocol Voice: AnyObject {
     /// Say `text` from `offset` at `rate`, replacing whatever was going.
     func speak(_ text: String, from offset: Int, rate: Float, utterance: Int)
+    /// Whose turn is being read: a Voice per Project speaks each in a voice of its own.
+    var speaker: String? { get set }
     /// Hold mid-utterance: `immediately` cuts off mid-word (the mic is opening);
     /// otherwise at the next word boundary.
     func pause(immediately: Bool)
@@ -798,6 +800,7 @@ final class Playback {
             case .silent:
                 utterance += 1
                 sound = .speaking
+                voice.speaker = c.source
                 voice.speak(c.text, from: resumeAt, rate: Self.rateSteps[rateIndex], utterance: utterance)
             case .paused:
                 sound = .speaking

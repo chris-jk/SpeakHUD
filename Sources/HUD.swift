@@ -68,6 +68,15 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         }
     }
 
+    /// "A Voice per Project". Takes effect from the next turn read. Persisted in the shared suite.
+    var voicePerProject: Bool {
+        get { VoiceCast.enabled(in: prefs) }
+        set {
+            prefs.set(newValue, forKey: VoiceCast.prefKey)
+            log("a voice per project: \(newValue ? "on" : "off")")
+        }
+    }
+
     /// "Pause While Recording". Off releases any hold now; on while something's
     /// recording holds now. Persisted in the shared suite.
     var pauseWhileRecording: Bool {
