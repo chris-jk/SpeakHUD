@@ -104,6 +104,34 @@ class InstallTests(unittest.TestCase):
             self.run_setup("install")
         self.assertEqual(self.config.read_text(), text)
 
+    def test_block_below_a_key_codex_added_stays_ours(self):
+        # Codex writes its own settings into config.toml, and one landed above the block
+        # (10-21: project_doc_fallback_filenames). The block is still ours, where it is.
+        original = b'model = "test"\n'
+        self.config.write_bytes(original)
+        self.assertEqual(self.run_setup("install"), "installed")
+        added = b'project_doc_fallback_filenames = ["CLAUDE.md"]\n\n'
+        self.config.write_bytes(added + self.config.read_bytes())
+        self.assertEqual(self.run_setup("status"), "installed")
+        self.binary.write_bytes(b"new build")
+        self.assertIn("binary differs", self.run_setup("status"))
+        self.assertEqual(self.run_setup("install"), "installed")
+        repaired = self.config.read_text()
+        self.assertEqual(repaired.count(setup.BEGIN), 1, "a repair replaces the block in place")
+        self.assertTrue(repaired.startswith(added.decode()))
+        self.assertEqual(setup.tomllib.loads(repaired)["project_doc_fallback_filenames"], ["CLAUDE.md"])
+        self.assertEqual(self.run_setup("remove"), "removed")
+        self.assertEqual(self.config.read_bytes(), added + original)
+
+    def test_block_under_a_table_is_not_ours(self):
+        # The same lines under a [table] set that table's notify, not Codex's.
+        self.run_setup("install")
+        moved = "[tools]\nx = 1\n" + self.config.read_text()
+        self.config.write_text(moved)
+        self.assertEqual(self.run_setup("status"), "not installed")
+        self.assertEqual(self.run_setup("remove"), "nothing to remove")
+        self.assertEqual(self.config.read_text(), moved)
+
     def test_missing_source_does_not_register(self):
         with self.assertRaises(OSError):
             setup.run("install", str(self.binary), self.home / "absent")
@@ -146,7 +174,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([item["key"] for item in items], ["codex:one", "codex:two", "codex:one"])
         item = items[0]
         self.assertEqual(item["v"], 1)
-        self.assertEqual(item["source"], "Codex · speakhud")
+        self.assertEqual(item["source"], "Codex · " + REPO.name)  # the folder, whatever a worktree calls it
         self.assertIn("Done. Run git status.", item["text"])
         self.assertNotIn("```", item["text"])
         self.assertTrue(any(link.get("run") == "git status" for link in item["links"]))
@@ -177,15 +205,16 @@ adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
 adapter.reader.agent_running = lambda: False
 adapter.reader.origin = lambda: {}
+expected = "Codex · " + sys.argv[3]
 def direct(text, source, where, hud):
     assert hud.endswith("/hook/speak-hud"), hud
-    assert source == "Codex · speakhud", source
+    assert source == expected, source
 adapter.reader.speak_directly = direct
 sys.argv = [sys.argv[1], sys.argv[2]]
 adapter.main()
 '''
         result = subprocess.run([sys.executable, "-c", code, str(REPO / "hook/read-codex.py"),
-                                 json.dumps(self.payload())], env=self.env, capture_output=True, text=True)
+                                 json.dumps(self.payload()), REPO.name], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.items(), [])
 

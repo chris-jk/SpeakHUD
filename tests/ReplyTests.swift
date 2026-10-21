@@ -283,6 +283,12 @@ let replySuite = Suite("Reply") { t in
         t.expectEqual(term.send("blue please"), .unconfirmed, "a reply that landed after a picture you'd put in the prompt isn't sent for you")
         t.expect(!term.calls.contains(.enter), "no Return")
     }
+    do {  // a long paste of your own was already in the prompt, folded into Claude's marker
+        let term = FakeTerm(atPrompt("❯ [Pasted text #1 +12 lines]"))
+        term.onPaste = { term, text in term.screen = atPrompt("❯ [Pasted text #1 +12 lines]" + text) }
+        t.expectEqual(term.send("blue please"), .unconfirmed, "a reply that landed after your own folded paste isn't sent for you")
+        t.expect(!term.calls.contains(.enter), "no Return: it would send your paste along with it")
+    }
     do {  // the question box opens between the look and the paste
         let term = FakeTerm(atPrompt("❯  "))
         term.onPaste = { term, _ in term.screen = questionBox }

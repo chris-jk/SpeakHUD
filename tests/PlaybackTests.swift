@@ -527,6 +527,36 @@ let playbackSuite = Suite("Playback") { t in
         t.expectEqual(r.retired, ["a", "b"], "it's let go with the rest")
     }
 
+    do {  // …but a reply you'd finished saying, in its moment of "Sending", is sent
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(answerable("a", key: "A"), onPhone: true); p.enqueue(answerable("b", key: "B"), onPhone: true)
+        r.voice.finish()
+        r.ear.hear("ship it")
+        r.fire(Playback.replyPause)   // you've stopped talking: it shows as sending
+        _ = r.ear.take(); _ = r.voice.take()
+        p.awayChanged(on: true)
+        t.expectEqual(r.sent.map(\.text), ["ship it"], "away: what you said and was on its way goes, not dropped")
+        t.expectEqual(r.replied, [.sent], "and the HUD hears how it went")
+        t.expectEqual(r.ear.take(), [.stop], "the mic shuts")
+        t.expect(r.armed == nil, "nothing is left waiting to send it again")
+        t.expectEqual(r.voice.take(), [], "the turn behind it isn't read")
+        t.expectEqual(r.shown, ["a"], "nor put up on the HUD")
+        t.expectEqual(r.retired, ["a", "b"], "it's let go with the rest")
+    }
+
+    do {  // no reply mic opens while another app is making sound: it would hear that as your answer
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(answerable("a", key: "A"))
+        _ = r.voice.take()
+        p.audioChanged(busy: true)   // the voice stops at the next word…
+        r.voice.finish()             // …and that was its last
+        t.expectEqual(r.ear.take(), [], "no mic opens over the other app's sound")
+        t.expect(r.listened.isEmpty, "nobody is asked for a reply")
+        t.expect(p.current == nil, "the turn is done all the same")
+    }
+
     do {  // the mic open for commands shuts too, and stays shut
         let r = Rig(), p = r.playback!
         p.obeys = true

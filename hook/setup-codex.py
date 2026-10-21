@@ -37,6 +37,33 @@ def atomic_write(path, data, mode):
             os.unlink(tmp)
 
 
+def managed_span(text, root, script):
+    """(start, end) of our block in `text`, or None. Codex writes its own settings into
+    config.toml, so the block needn't be first. It is ours when both markers are lines
+    of their own, the one setting between them is a notify naming our exact script,
+    that is the root notify, and cutting the block out leaves everything else parsing
+    as it does now. Never remove a notifier just because its name looks ours."""
+    rest = {key: value for key, value in root.items() if key != "notify"}
+    start = text.find(BEGIN)
+    while start >= 0:
+        stop = text.find(END, start + len(BEGIN))
+        if stop < 0:
+            return None
+        end = stop + len(END)
+        if start == 0 or text[start - 1] == "\n":
+            try:
+                inside = tomllib.loads(text[start + len(BEGIN):stop])
+                outside = tomllib.loads(text[:start] + text[end:])
+            except tomllib.TOMLDecodeError:
+                inside, outside = {}, None
+            notify = inside.get("notify")
+            if (set(inside) == {"notify"} and isinstance(notify, list) and len(notify) == 2
+                    and notify[1] == script and root.get("notify") == notify and outside == rest):
+                return start, end
+        start = text.find(BEGIN, start + 1)
+    return None
+
+
 def run(action, binary=None, sources=None):
     home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser().absolute()
     config = home / "config.toml"
@@ -47,18 +74,7 @@ def run(action, binary=None, sources=None):
     root = tomllib.loads(text)
     command = [sys.executable, str(install / "read-codex.py")]
     block = BEGIN + "notify = " + json.dumps(command, ensure_ascii=False) + "\n" + END
-    # Ownership requires both markers at the start, one notify setting, and our
-    # exact script path. Never remove a notifier just because its name looks ours.
-    owned = None
-    if text.startswith(BEGIN) and END in text:
-        end = text.index(END) + len(END)
-        candidate = text[:end]
-        parsed = tomllib.loads(candidate[len(BEGIN):-len(END)])
-        notify = parsed.get("notify")
-        if (set(parsed) == {"notify"} and isinstance(notify, list)
-                and len(notify) == 2 and notify[1] == command[1]
-                and root.get("notify") == notify):
-            owned = candidate
+    owned = managed_span(text, root, command[1])
 
     if action == "status":
         if owned is None:
@@ -82,7 +98,7 @@ def run(action, binary=None, sources=None):
     if action == "remove":
         if owned is None:
             return "nothing to remove"
-        updated = text[len(owned):]
+        updated = text[:owned[0]] + text[owned[1]:]
     elif action == "install":
         if "notify" in root and owned is None:
             raise ValueError(f"{config} already has a notify command; left it untouched")
@@ -91,7 +107,8 @@ def run(action, binary=None, sources=None):
         # Validate all sources before copying any of them or registering the hook.
         payloads = [(install / name, (sources / name).read_bytes(), 0o644) for name in SCRIPTS]
         payloads.append((install / "speak-hud", Path(binary).read_bytes(), 0o755))
-        updated = block + (text[len(owned):] if owned else text)
+        # A repair puts the block back where it is; a fresh one goes first, above any table.
+        updated = text[:owned[0]] + block + text[owned[1]:] if owned else block + text
         tomllib.loads(updated)
         for path, data, mode in payloads:
             atomic_write(path, data, mode)

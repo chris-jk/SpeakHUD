@@ -33,8 +33,9 @@ private final class FakeMeter: AudioMeter {
     var peak: Float? = 0
     var canStart = true
     var started: [[AudioSource]] = []
+    var tries = 0   // every start asked for, made or not
     var stops = 0
-    func start(_ s: [AudioSource]) -> Bool { if canStart { started.append(s) }; return canStart }
+    func start(_ s: [AudioSource]) -> Bool { tries += 1; if canStart { started.append(s) }; return canStart }
     func stop() { stops += 1 }
     func takePeak() -> Float? { peak }
 }
@@ -180,5 +181,19 @@ let audioSuite = Suite("Audio") { t in
     w2.look(); w2.look()
     t.expectEqual(deniedSeen, [], "tap can't be made: never holds on the flag alone")
     t.expectEqual(warned, 1, "and says so once")
-    withExtendedLifetime((watch, w2)) {}
+    t.expectEqual(denied.tries, 1, "a tap refused for these apps isn't asked for again on every look (4 a second)")
+
+    // Refused, it's tried again only once something changes: another app, or quiet first.
+    let refusing = FakeMeter(); refusing.canStart = false
+    var outputs: [AudioSource] = [song]
+    let w3 = AudioWatch(outputs: { outputs }, meter: refusing, every: 3600) { _, _ in }
+    w3.look(); w3.look()
+    t.expectEqual(refusing.tries, 1, "the same apps: not tried again")
+    outputs = [song, AudioSource(id: 99, name: "Safari")]
+    w3.look()
+    t.expectEqual(refusing.tries, 2, "another app starts making sound: tried again")
+    outputs = []; w3.look()
+    outputs = [song]; refusing.canStart = true; w3.look()
+    t.expectEqual(refusing.started, [[song]], "after quiet, the same app is tried again (permission may have come since)")
+    withExtendedLifetime((watch, w2, w3)) {}
 }

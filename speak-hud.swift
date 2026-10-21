@@ -806,7 +806,10 @@ enum Reply {
     /// for, and that many markers at the front aren't something put there ahead. Only
     /// those: a link or a path the reply names in its own words stays where it was said,
     /// and a picture already in the box is yours.
-    static func shows(_ text: String, inPrompt box: String, pictures: [String] = []) -> Bool {
+    ///
+    /// `markerIsOurs` false: the box started with that marker before this paste, so it
+    /// is a long paste of yours, and it says nothing about this one.
+    static func shows(_ text: String, inPrompt box: String, pictures: [String] = [], markerIsOurs: Bool = true) -> Bool {
         func squash(_ s: String) -> String { String(s.unicodeScalars.filter { !CharacterSet.whitespaces.contains($0) }) }
         var words = text, held = box
         for path in pictures where !path.isEmpty {
@@ -815,7 +818,12 @@ enum Reply {
         }
         let want = squash(words), have = squash(held)
         guard !want.isEmpty else { return false }
-        return have.hasPrefix(String(want.prefix(40))) || have.hasPrefix("[Pastedtext#")
+        return have.hasPrefix(String(want.prefix(40))) || (markerIsOurs && folded(held))
+    }
+
+    /// Whether a prompt box starts with the marker Claude Code folds a long paste into.
+    static func folded(_ box: String) -> Bool {
+        String(box.unicodeScalars.filter { !CharacterSet.whitespaces.contains($0) }).hasPrefix("[Pastedtext#")
     }
 
     // -- iTerm2 ----------------------------------------------------------------
@@ -1155,13 +1163,16 @@ enum Reply {
         guard canReach(origin), let session = origin.session else { return .gone }
         guard let line = clean(heard) else { return .failed("nothing to send") }
 
-        /// Whether the prompt box is what's showing, holding the paste and nothing ahead of it.
-        func holdsIt(_ showing: Showing) -> Bool {
-            showing.prompt.map { shows(line, inPrompt: $0.text, pictures: pictures) } ?? false
-        }
+        let foldedBefore: Bool
         switch look(session, terminal) {
         case .failure(let stop): return stop
-        case .success(let before): guard before.prompt != nil else { return .notAtPrompt }
+        case .success(let before):
+            guard let box = before.prompt else { return .notAtPrompt }
+            foldedBefore = folded(box.text)
+        }
+        /// Whether the prompt box is what's showing, holding the paste and nothing ahead of it.
+        func holdsIt(_ showing: Showing) -> Bool {
+            showing.prompt.map { shows(line, inPrompt: $0.text, pictures: pictures, markerIsOurs: !foldedBefore) } ?? false
         }
         if let stop = wrote(terminal, pasteScript(session, line)) { return stop }
         for _ in 0..<looks {
@@ -1833,6 +1844,7 @@ final class AudioWatch {
     private let onUnavailable: () -> Void
     private var poll: Timer?
     private var tapped: [AudioSource] = []
+    private var refused: [AudioSource]?   // the apps a tap was last refused for: not asked again until they change
     private var warned = false
     private var trigger: AudioObjectPropertyListenerBlock!
 
@@ -1867,14 +1879,19 @@ final class AudioWatch {
         guard let others = outputs() else { return }   // couldn't tell: what we knew stands
         if others.isEmpty {
             if !tapped.isEmpty { meter.stop(); tapped = [] }   // quiet Mac: nothing runs
+            refused = nil   // permission may have come by the next sound
             set(false, nil)
             return
         }
         if others != tapped {
             tapped = []
+            // Refused for these same apps: asking again four times a second won't change it.
+            guard others != refused else { set(false, nil); return }
             if meter.start(others) {
                 tapped = others
+                refused = nil
             } else {
+                refused = others
                 if !warned { warned = true; onUnavailable() }
                 set(false, nil)
                 return
@@ -2609,7 +2626,12 @@ final class Playback {
         guard on != away else { return }
         away = on
         if on {
-            closeWindow("away")
+            if window?.phase == .sending {   // you'd finished saying it: it goes now, not lost
+                cancelTimer?()
+                sendReply(movingOn: false)
+            } else {
+                closeWindow("away")
+            }
             silence()
             resumeAt = 0   // the one being read, if it's kept, is read from the top
             if let c = current, !waitsWhileAway(c) {
@@ -2731,9 +2753,10 @@ final class Playback {
         // Not while another app has the mic: you're already answering with a key held.
         // Not under your pause: caught on its last word, the voice ran on to the end of
         // the turn, and a mic opening then is the opposite of the quiet you asked for.
+        // Not while another app is making sound: the mic would hear that as your answer.
         // Not when its session has more to say already: that turn gets the window.
         listens && ear != nil && item.answerable && Reply.canReach(item.origin) && !micBusy && !userPaused
-            && !queue.contains { $0.key == item.key }
+            && !audioBusy && !queue.contains { $0.key == item.key }
     }
 
     private func openWindow(for item: SpeechItem) {
@@ -2889,7 +2912,7 @@ final class Playback {
         publish()
     }
 
-    private func sendReply() {
+    private func sendReply(movingOn: Bool = true) {
         guard let w = window else { return }
         cancelTimer = nil
         window = nil
@@ -2900,7 +2923,7 @@ final class Playback {
         note = outcome == .sent ? "✓ Sent to \(w.item.source)" : "✗ Not sent: \(outcome)"
         said = line
         onReplied(outcome)
-        moveOn()
+        if movingOn { moveOn() }
     }
 
     // -- commands while reading ---------------------------------------------
@@ -5394,9 +5417,8 @@ struct PhoneConfig: Equatable {
     var ntfyToken: String? = nil
 
     static func newToken() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return bytes.map { String(format: "%02x", $0) }.joined()
+        // The system's secure generator; SecRandomCopyBytes could fail and leave all zeros.
+        (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
     }
 
     /// nil when the file is missing or its token is no good: the page stays off rather
@@ -6751,8 +6773,9 @@ final class Agent {
     var usr1: DispatchSourceSignal?
 
     /// launchd routes stderr to ~/Library/Logs/speakhud-agent.log (see build.sh).
+    private static let stamp = ISO8601DateFormatter()   // one, not one per line: they're slow to make
     func log(_ message: String) {
-        let ts = ISO8601DateFormatter().string(from: Date())
+        let ts = Self.stamp.string(from: Date())
         FileHandle.standardError.write("[\(ts)] \(message)\n".data(using: .utf8)!)
     }
 
@@ -7135,13 +7158,25 @@ final class MenuController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// The Codex check runs a Python script (about a fifth of a second), too slow for the
+    /// menu's opening: it shows the last answer and the item updates when the new one is in.
+    private var codexStatus: String?
+    private var codexChecking = false
+
     private func refreshHook() {
-        let codex = CodexHook.run("status")
-        codexItem.title = codex.hasPrefix("stale") ? "Read Codex CLI Responses Aloud — Repair"
-                                                  : "Read Codex CLI Responses Aloud"
-        codexItem.state = codex == "installed" ? .on : codex.hasPrefix("stale") ? .mixed : .off
-        codexItem.toolTip = codex == "installed" ? "Reads finished Codex CLI turns. Restart Codex after changing this setting."
-                                                : codex + ". Restart Codex after enabling."
+        if let codex = codexStatus { showCodex(codex) }
+        if !codexChecking {
+            codexChecking = true
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let codex = CodexHook.run("status")
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.codexChecking = false
+                    self.codexStatus = codex
+                    self.showCodex(codex)
+                }
+            }
+        }
         let hook = ClaudeHook.check()
         claudeItem.title = hook.status == .stale ? "Read Claude Code Responses Aloud — Repair"
                                                  : "Read Claude Code Responses Aloud"
@@ -7153,6 +7188,14 @@ final class MenuController: NSObject, NSMenuDelegate {
         claudeItem.toolTip = hook.problems.isEmpty ? nil
             : hook.status == .stale ? "Needs repair: " + hook.problems.joined(separator: "; ") + ". Click to reinstall."
             : hook.problems.joined(separator: "; ")
+    }
+
+    private func showCodex(_ codex: String) {
+        codexItem.title = codex.hasPrefix("stale") ? "Read Codex CLI Responses Aloud — Repair"
+                                                  : "Read Codex CLI Responses Aloud"
+        codexItem.state = codex == "installed" ? .on : codex.hasPrefix("stale") ? .mixed : .off
+        codexItem.toolTip = codex == "installed" ? "Reads finished Codex CLI turns. Restart Codex after changing this setting."
+                                                : codex + ". Restart Codex after enabling."
     }
 
     @objc private func toggleHUD() { agent.hud.toggleMinimized() }
