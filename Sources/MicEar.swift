@@ -41,6 +41,9 @@ final class MicEar: Ear, @unchecked Sendable {
     }
     private var tally: Tally?
     private var player: Task<Void, Never>?
+    /// Watches the open mic's engine for a change of sound device.
+    private var deviceWatch: NSObjectProtocol?
+    private var reopens = 0   // for the open window
 
     static let micDenied = "microphone access is off for SpeakHUD (System Settings › Privacy & Security › Microphone)"
 
@@ -57,10 +60,8 @@ final class MicEar: Ear, @unchecked Sendable {
         player?.cancel()
         player = nil
         if let t = tally { listener?.log("mic shut after \(t.count) buffers") }
-        tally = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
+        reopens = 0
+        shutEngine()
         feed?.finish()
         feed = nil
         if let a = analyzer { Task { await a.cancelAndFinishNow() } }
@@ -195,10 +196,37 @@ final class MicEar: Ear, @unchecked Sendable {
     /// Let go of a mic that failed to start or gave nothing, keeping the window, the
     /// feed and the transcriber for the next try. Main thread.
     private func shutEngine() {
+        if let w = deviceWatch { NotificationCenter.default.removeObserver(w) }
+        deviceWatch = nil
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
         tally = nil
+    }
+
+    /// A change of sound device (headphones in or out, another mic picked) stops the
+    /// engine, and nothing would start it again: the window hears nothing and closes as
+    /// "nothing said". So the mic is opened afresh on whatever is there now, for the same
+    /// window, feeding the same transcriber. Only for an engine that has stopped, and a
+    /// few times a window at most: a change it caused itself mustn't set it going round.
+    static let maxReopens = 3
+
+    private func deviceChanged(_ changed: AVAudioEngine, reopen: @escaping () throws -> Bool, window id: Int) {
+        guard window == id, changed === engine, !changed.isRunning else { return }
+        guard reopens < Self.maxReopens else {
+            listener?.earFailed("the sound device keeps changing", window: id)
+            return
+        }
+        reopens += 1
+        listener?.log("sound device changed: opening the mic again")
+        shutEngine()
+        // A mic opened the moment another lets go can fail to start: give it a breath.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.tryGap) { [weak self] in
+            guard let self = self, self.window == id else { return }
+            do { _ = try reopen() } catch {
+                self.listener?.earFailed((error as? Failure)?.why ?? error.localizedDescription, window: id)
+            }
+        }
     }
 
     /// Runs on the main thread, where stop() does: a window shut while the model was
@@ -284,6 +312,13 @@ final class MicEar: Ear, @unchecked Sendable {
         do { try engine.start() } catch {
             input.removeTap(onBus: 0)
             throw Failure("the microphone wouldn't start: \(error.localizedDescription)")
+        }
+        deviceWatch = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
+                                                             object: engine, queue: .main) { [weak self, weak engine] _ in
+            guard let engine = engine else { return }
+            self?.deviceChanged(engine, reopen: { [weak self] in
+                try self?.openMic(for: id, overSpeech: overSpeech, feed: feed, as: format, analyzer: analyzer) ?? false
+            }, window: id)
         }
         self.engine = engine
         self.tally = tally
