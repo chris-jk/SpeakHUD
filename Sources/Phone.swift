@@ -43,6 +43,11 @@ final class Phone {
     var terminal = Reply.Terminal()
     /// Sends a push. Tests keep the request instead.
     var transport: (URLRequest, @escaping (String?) -> Void) -> Void = Phone.post
+    /// How long to wait before each try again of a push that didn't get through. A phone
+    /// on the move drops off the network for a moment, and a push lost then never comes.
+    static let pushRetries: [TimeInterval] = [5, 30]
+    /// Runs `work` after a wait. Tests hold it instead.
+    var later: (TimeInterval, @escaping () -> Void) -> Void = { DispatchQueue.main.asyncAfter(deadline: .now() + $0, execute: $1) }
     /// A file of the page, by name. The app's are in its bundle; tests read the repo's.
     var asset: (String) -> Data? = { name in
         Bundle.main.resourcePath.flatMap { FileManager.default.contents(atPath: $0 + "/phone/" + name) }
@@ -198,8 +203,29 @@ final class Phone {
             log("away: no push for \(name) — phone.json has no ntfy topic")
             return
         }
+        send(request, name: name, tries: 0)
+    }
+
+    /// One try at a push; one that fails is tried again after each of `pushRetries`,
+    /// unless you're back at the Mac by then.
+    private func send(_ request: URLRequest, name: String, tries: Int) {
         transport(request) { [weak self] problem in
-            self?.log(problem.map { "away: push for \(name) failed — \($0)" } ?? "away: pushed \(name)")
+            guard let self = self else { return }
+            guard let problem = problem else {
+                self.log("away: pushed \(name)" + (tries > 0 ? " (try \(tries + 1))" : ""))
+                return
+            }
+            guard tries < Self.pushRetries.count else {
+                self.log("away: push for \(name) failed — \(problem); gave up")
+                return
+            }
+            let wait = Self.pushRetries[tries]
+            self.log("away: push for \(name) failed — \(problem); trying again in \(Int(wait)) s")
+            self.later(wait) { [weak self] in
+                guard let self = self else { return }
+                guard self.away else { self.log("away: push for \(name) not tried again — back at the Mac"); return }
+                self.send(request, name: name, tries: tries + 1)
+            }
         }
     }
 

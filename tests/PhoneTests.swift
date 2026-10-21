@@ -1063,6 +1063,50 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(quiet.pushes.isEmpty && quiet.logs.contains { $0.contains("no ntfy topic") }, "no push server set up: said in the log, nothing sent")
     t.expect(!(b.logs + quiet.logs).contains { $0.contains(token) || $0.contains("tk_secret") }, "no token is ever logged")
 
+    // A push that doesn't get through is tried again: a phone on the move drops off the
+    // network for a moment ("The network connection was lost.", in the log 10-21).
+    do {
+        let flaky = Bench()
+        var failures = 2
+        var waits: [(delay: TimeInterval, run: () -> Void)] = []
+        flaky.phone.transport = { [unowned flaky] request, done in
+            flaky.pushes.append(request)
+            if failures > 0 { failures -= 1; done("The network connection was lost.") } else { done(nil) }
+        }
+        flaky.phone.later = { waits.append(($0, $1)) }
+        flaky.phone.setAway(true)
+        flaky.phone.took(turn("a", "hello"))
+        t.expectEqual(flaky.pushes.count, 1, "a push that fails…")
+        t.expectEqual(waits.map(\.delay), [Phone.pushRetries[0]], "…is tried again after a moment")
+        waits[0].run()
+        t.expectEqual(waits.map(\.delay), Phone.pushRetries, "failing again, it waits longer")
+        waits[1].run()
+        t.expectEqual(flaky.pushes.count, 3, "the third try gets through")
+        t.expect(flaky.pushes.allSatisfy { $0.httpBody == flaky.pushes[0].httpBody }, "the same push each time")
+        t.expect(flaky.logs.contains { $0.contains("trying again in 5 s") } && flaky.logs.last?.contains("pushed") == true,
+                 "the log says so")
+
+        let dead = Bench()
+        var deadWaits: [() -> Void] = []
+        dead.phone.transport = { [unowned dead] request, done in dead.pushes.append(request); done("the server answered 500") }
+        dead.phone.later = { deadWaits.append($1) }
+        dead.phone.setAway(true)
+        dead.phone.took(turn("a", "hello"))
+        while !deadWaits.isEmpty { deadWaits.removeFirst()() }
+        t.expectEqual(dead.pushes.count, 1 + Phone.pushRetries.count, "a push that never gets through is tried a few times, no more")
+        t.expect(dead.logs.last?.contains("gave up") == true, "and the log says it gave up")
+
+        let back = Bench()
+        var backWaits: [() -> Void] = []
+        back.phone.transport = { [unowned back] request, done in back.pushes.append(request); done("The network connection was lost.") }
+        back.phone.later = { backWaits.append($1) }
+        back.phone.setAway(true)
+        back.phone.took(turn("a", "hello"))
+        back.phone.setAway(false)
+        backWaits.forEach { $0() }
+        t.expectEqual(back.pushes.count, 1, "back at the Mac before the next try: not pushed again")
+    }
+
     // -- what a turn made, shown under it ------------------------------------
     let shots = dir + "/shots"
     try? fm.createDirectory(atPath: shots, withIntermediateDirectories: true)
