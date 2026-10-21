@@ -12,3 +12,4 @@
 icon_master.png
 *.iconset/
 build-out/
+__pycache__/

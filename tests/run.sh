@@ -10,3 +10,4 @@ swiftc -D TESTING speak-hud.swift tests/*.swift -o "$OUT"
 if command -v node >/dev/null; then node --check phone/app.js; node --check phone/mic.js; node tests/page/run.js; fi
 # The AskUserQuestion hook, against a fake HUD (Python: it never touches the app code).
 python3 tests/read_question_test.py
+python3 tests/codex_test.py

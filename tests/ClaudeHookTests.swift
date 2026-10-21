@@ -386,7 +386,7 @@ let claudeHookSuite = Suite("ClaudeHook") { t in
     let build = (try? String(contentsOf: repo.appendingPathComponent("build.sh"), encoding: .utf8)) ?? ""
     let scripts = ((try? fm.contentsOfDirectory(atPath: repo.appendingPathComponent("hook").path)) ?? [])
         .filter { $0.hasSuffix(".py") }.sorted()
-    t.expectEqual(scripts, ["read-question.py", "read-summary.py"], "the hook scripts there are")
+    t.expectEqual(scripts, ["read-codex.py", "read-question.py", "read-summary.py", "setup-codex.py"], "the hook scripts there are")
     for s in scripts {
         t.expect(build.contains("\ncp hook/\(s) \"$STAGE/Contents/Resources/\(s)\""), "build.sh bundles \(s)")
     }

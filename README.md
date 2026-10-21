@@ -15,6 +15,9 @@ a standalone app.
 - **Floating HUD** with karaoke-style word highlighting that follows along.
 - **One speech queue.** Run Claude in four terminals and they take turns instead of
   cutting each other off — you only have one pair of ears.
+- **Codex CLI support.** Enable **Read Codex CLI Responses Aloud** in the menu bar.
+  Finished Codex responses join the same queue, labeled by project, with clickable
+  paths and commands. Claude and Codex sessions can run together.
 - **Speed control** — cycle `0.75× → 2×`. Changing speed mid-read resumes from the
   current word at the new rate (AVSpeech can't change rate live, so it restarts cleanly
   on a fresh synthesizer — reusing one after `stopSpeaking(.immediate)` silently drops
@@ -458,6 +461,7 @@ so a rebuild never leaves a stale copy behind. Stock-macOS tools only (`swiftc`,
 
 Tests: `./tests/run.sh`. It compiles `speak-hud.swift` with `-D TESTING` (the entry
 point drops out) alongside `tests/*.swift` — no XCTest, so bare Command Line Tools are enough.
+The Codex integration tests require Python 3.11+; phone page tests also run when Node is available.
 
 `build.sh` prints the path it installed to (`installed -> …`). If it fell back to
 `~/Applications`, use that prefix in the `speak-hud` commands on this page — for example
@@ -498,6 +502,38 @@ The background agent shows a small **speaker icon** in the menu bar:
   here if the file is invalid).
 - **Grant Accessibility Access…** — shown only until the permission is granted.
 - **SpeakHUD on GitHub** / **Quit**.
+
+## Codex CLI integration
+
+Tick **Read Codex CLI Responses Aloud** in the speaker menu, then restart Codex CLI.
+Or use the app's command line:
+
+```bash
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --setup-codex   # install or repair
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --codex-status  # check
+/Applications/SpeakHUD.app/Contents/MacOS/speak-hud --remove-codex  # disable
+```
+
+Setup requires Python 3.11 or later (`brew install python`). The menu checks your
+PATH and the standard Homebrew locations. It adds a managed, top-level `notify`
+setting to `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`), copies the adapter,
+shared reader, setup helper and fallback executable into that directory's `speakhud/`
+folder, and keeps an original config backup at `speakhud-config.toml.bak`.
+An existing notification command is left untouched; setup reports the conflict.
+Other config text, comments, formatting and file permissions are preserved. Disabling
+removes only SpeakHUD's managed setting and leaves its files available for reinstall.
+Rebuilds refresh an enabled integration. Restart Codex after enabling or disabling it.
+
+Codex's [notification interface](https://developers.openai.com/codex/config-advanced#notifications)
+passes the last assistant message when a turn completes. SpeakHUD cleans its Markdown
+and queues it under `codex:<thread-id>`, so separate sessions in one project stay
+separate and pending updates from one session coalesce. Clicking the source pill
+returns to the terminal where supported. Reading works with the existing replay,
+pause, speed, skip and stop controls.
+
+This integration reads finished responses. Codex permission prompts and questions
+are not read, and Codex turns do not enable Listen After Reading or phone replies;
+those reply paths currently recognize Claude Code's prompt.
 
 ## Claude Code integration
 

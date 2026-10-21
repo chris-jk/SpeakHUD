@@ -5001,6 +5001,42 @@ enum ClaudeHook {
     }
 }
 
+// Codex uses a JSON argv notification rather than Claude's stdin Stop hook.
+// The helper parses TOML with Python's standard library and preserves the user's
+// config verbatim outside our own marked block. Shared speech code stays beside it.
+enum CodexHook {
+    static func run(_ action: String) -> String {
+        let env = ProcessInfo.processInfo.environment
+        let home = NSString(string: env["CODEX_HOME"] ?? "~/.codex").expandingTildeInPath
+        let script = Bundle.main.url(forResource: "setup-codex", withExtension: "py")?.path
+            ?? home + "/speakhud/setup-codex.py"
+        guard FileManager.default.isReadableFile(atPath: script) else {
+            return "error: no bundled setup-codex.py (run this from SpeakHUD.app)"
+        }
+        let candidates = (env["PATH"] ?? "").split(separator: ":").map { String($0) + "/python3" }
+            + ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
+        var tried: Set<String> = []
+        for python in candidates where tried.insert(python).inserted && FileManager.default.isExecutableFile(atPath: python) {
+            let process = Process(), pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: python)
+            process.arguments = [script, action, ClaudeHook.runningExecutable?.path ?? ""]
+            process.standardOutput = pipe
+            process.standardError = pipe
+            do { try process.run() }
+            catch { continue }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let result = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if result.hasPrefix("error: Codex setup needs Python") { continue }
+            if process.terminationStatus != 0 && !result.hasPrefix("error") {
+                return "error: Codex setup failed: " + result
+            }
+            return result
+        }
+        return "error: Codex setup needs Python 3.11 or later (brew install python)"
+    }
+}
+
 // Human combo like "ctrl+opt+s" -> (Carbon keycode, modifier mask).
 let keyCodeMap: [String: UInt32] = [
     "a":0x00,"s":0x01,"d":0x02,"f":0x03,"h":0x04,"g":0x05,"z":0x06,"x":0x07,"c":0x08,
@@ -6930,6 +6966,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     let agent: Agent
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var claudeItem: NSMenuItem!
+    var codexItem: NSMenuItem!
     var axItem: NSMenuItem!
     var hudItem: NSMenuItem!
     let hotkeyPresets = [("⌃⌥S", "ctrl+opt+s"), ("⌃⌥R", "ctrl+opt+r"),
@@ -6968,6 +7005,8 @@ final class MenuController: NSObject, NSMenuDelegate {
 
         claudeItem = item("Read Claude Code Responses Aloud", #selector(toggleClaude))
         menu.addItem(claudeItem)
+        codexItem = item("Read Codex CLI Responses Aloud", #selector(toggleCodex))
+        menu.addItem(codexItem)
 
         micItem = item("Pause While Recording", #selector(toggleMicHold))
         if #available(macOS 14.0, *) {
@@ -7097,6 +7136,12 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
 
     private func refreshHook() {
+        let codex = CodexHook.run("status")
+        codexItem.title = codex.hasPrefix("stale") ? "Read Codex CLI Responses Aloud — Repair"
+                                                  : "Read Codex CLI Responses Aloud"
+        codexItem.state = codex == "installed" ? .on : codex.hasPrefix("stale") ? .mixed : .off
+        codexItem.toolTip = codex == "installed" ? "Reads finished Codex CLI turns. Restart Codex after changing this setting."
+                                                : codex + ". Restart Codex after enabling."
         let hook = ClaudeHook.check()
         claudeItem.title = hook.status == .stale ? "Read Claude Code Responses Aloud — Repair"
                                                  : "Read Claude Code Responses Aloud"
@@ -7111,6 +7156,17 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleHUD() { agent.hud.toggleMinimized() }
+    @objc private func toggleCodex() {
+        let result = CodexHook.run(CodexHook.run("status") == "installed" ? "remove" : "install")
+        if result.hasPrefix("error") {
+            let alert = NSAlert()
+            alert.messageText = "Codex CLI integration"
+            alert.informativeText = result
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        refresh()
+    }
     @objc private func readClipboard() { agent.readClipboard() }
     @objc private func toggleClaude() {
         // Installed -> remove. Stale -> reinstall (a repair, not an uninstall). Off -> install.
@@ -7225,6 +7281,13 @@ enum Main {
             exit(outcome.exitCode)
         }
 
+        for (flag, action) in [("--setup-codex", "install"), ("--remove-codex", "remove"), ("--codex-status", "status")] {
+            if argv.contains(flag) {
+                let result = CodexHook.run(action)
+                print(result)
+                exit(result.hasPrefix("error") ? 1 : 0)
+            }
+        }
         if argv.contains("--setup-claude") || argv.contains("--remove-claude") {
             let r = argv.contains("--setup-claude") ? ClaudeHook.install() : ClaudeHook.remove()
             print(r); exit(r.hasPrefix("error") ? 1 : 0)

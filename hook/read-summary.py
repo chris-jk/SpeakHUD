@@ -707,13 +707,13 @@ def pipe_to(argv, text):
     return rc == 0
 
 
-def speak_directly(text, source, where=None):
+def speak_directly(text, source, where=None, hud=None):
     """No agent to queue behind: read it here, as this hook used to. Never raises.
 
     `say` gets the text on stdin (`-f -`, per `man say`), never in argv: a turn that
     starts with "-" would otherwise be parsed as options.
     """
-    hud = os.path.expanduser("~/.claude/bin/speak-hud")
+    hud = hud or os.path.expanduser("~/.claude/bin/speak-hud")
     argv = [hud, "--source", source]
     if where:
         argv += ["--origin", json.dumps(where)]

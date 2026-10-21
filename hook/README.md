@@ -1,4 +1,21 @@
-# Claude Code integration
+# Speech integrations
+
+## Codex CLI
+
+`read-codex.py` receives Codex's `agent-turn-complete` notification as one JSON argv
+argument. It uses the sibling `read-summary.py` for Markdown cleanup, links, terminal
+origin detection, heartbeat checks and atomic queue writes. It reads
+`last-assistant-message` directly, so there is no transcript flush race. Keys are
+`codex:<thread-id>`; sources are `Codex · <folder>`. No `reply` field is emitted:
+the app's automatic reply path currently checks Claude's prompt.
+
+`setup-codex.py` installs these scripts plus itself and the fallback executable in
+`$CODEX_HOME/speakhud/` (default `~/.codex/speakhud/`). It requires Python 3.11+ for
+standard-library TOML parsing. It prepends a marked root `notify` setting, preserves
+all other config bytes, and refuses to replace another notifier. Both menu and CLI
+setup invoke it; see the [main README](../README.md#codex-cli-integration).
+
+## Claude Code
 
 `read-summary.py` is a [Claude Code](https://www.claude.com/product/claude-code) `Stop`
 hook. When Claude finishes a turn it reads the transcript, extracts the latest assistant

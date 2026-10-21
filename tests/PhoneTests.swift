@@ -237,7 +237,9 @@ let phoneSuite = Suite("Phone") { t in
 
     // -- the desk -----------------------------------------------------------
     var desk = PhoneDesk()
-    let t0 = Date(timeIntervalSince1970: 1_791_000_000)
+    // The restart check below uses the real clock; keep its saved turns within
+    // the seven-day retention window instead of letting a fixed fixture expire.
+    let t0 = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
     t.expect(desk.took(turn("a", "first"), now: t0), "a finished turn is a turn's first word")
     desk.took(turn("b", "other", name: "Review desk"), now: t0.addingTimeInterval(1))
     desk.took(turn("a", "second"), now: t0.addingTimeInterval(2))

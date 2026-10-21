@@ -31,6 +31,8 @@ fi
 cp AppIcon.icns "$STAGE/Contents/Resources/AppIcon.icns"
 cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the in-app Claude Code setup
 cp hook/read-question.py "$STAGE/Contents/Resources/read-question.py" # same: the AskUserQuestion hook
+cp hook/read-codex.py "$STAGE/Contents/Resources/read-codex.py"
+cp hook/setup-codex.py "$STAGE/Contents/Resources/setup-codex.py"
 mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in speak-hud.swift)
 cp phone/index.html phone/app.css phone/app.js phone/mic.js "$STAGE/Contents/Resources/phone/"
 
@@ -198,6 +200,21 @@ case "$HOOK_STATUS" in
     fi ;;
   *)
     echo "  WARNING: couldn't read the hook status ($HOOK_STATUS); left it alone" >&2 ;;
+esac
+
+echo "== Refresh Codex CLI integration =="
+CODEX_STATUS="$("$APPBIN" --codex-status 2>&1 || true)"
+case "$CODEX_STATUS" in
+  installed|stale*)
+    if CODEX_OUT="$("$APPBIN" --setup-codex 2>&1)"; then
+      echo "  $CODEX_OUT (was: $CODEX_STATUS)"
+    else
+      echo "  WARNING: Codex CLI refresh failed: $CODEX_OUT" >&2
+    fi ;;
+  "not installed"*)
+    echo "  $CODEX_STATUS; enable it from the menu bar or with --setup-codex" ;;
+  *)
+    echo "  WARNING: couldn't read Codex integration status ($CODEX_STATUS)" >&2 ;;
 esac
 
 echo "Done."
