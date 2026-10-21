@@ -16,7 +16,7 @@ from datetime import datetime
 
 WAIT_SECONDS = 3.0      # max time to wait for the final message to be flushed
 POLL_SECONDS = 0.1
-# Must match Spool.dir in speak-hud.swift, override included (tests/SpoolTests.swift
+# Must match Spool.dir in Sources/Spool.swift, override included (tests/SpoolTests.swift
 # pins both). The variable is for tests: set it on one side only and turns go unheard.
 QUEUE_DIR = os.path.expanduser(
     os.environ.get("SPEAKHUD_QUEUE_DIR") or "~/.local/state/speakhud/queue"
@@ -390,7 +390,7 @@ def path_target(s, cwd, loose):
 # The phone page shows a turn's pictures, video and sound under it. The hook finds
 # them, since it has the transcript: a file of one of these kinds that a tool call or
 # its output names and that was written since the turn began, plus any the turn's own
-# words name. Must match PhoneMedia.types in speak-hud.swift (tests/PhoneTests.swift
+# words name. Must match PhoneMedia.types in Sources/PhoneDesk.swift (tests/PhoneTests.swift
 # pins both).
 MEDIA_EXT = {"png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "mp4", "m4v", "mov", "webm",
              "mp3", "m4a", "wav", "aac", "pdf"}
@@ -634,7 +634,7 @@ def heartbeat_fresh():
 def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, reply=None, media=None):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
-    The fields are the contract with Spool.drain in speak-hud.swift, pinned by
+    The fields are the contract with Spool.drain in Sources/Spool.swift, pinned by
     tests/SpoolTests.swift: rename one here and that test fails. Changing what they
     mean means bumping `v` on both sides.
     """

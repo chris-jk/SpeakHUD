@@ -13,7 +13,7 @@ STAGE="$(mktemp -d)/$APPNAME.app"
 
 echo "== Compiling =="
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
-swiftc -O -parse-as-library "$EXEC.swift" -o "$STAGE/Contents/MacOS/$EXEC"
+swiftc -O -wmo -parse-as-library "$EXEC.swift" Sources/*.swift -o "$STAGE/Contents/MacOS/$EXEC"
 echo "  $(file -b "$STAGE/Contents/MacOS/$EXEC")"
 
 echo "== Icon =="
@@ -33,7 +33,7 @@ cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the 
 cp hook/read-question.py "$STAGE/Contents/Resources/read-question.py" # same: the AskUserQuestion hook
 cp hook/read-codex.py "$STAGE/Contents/Resources/read-codex.py"
 cp hook/setup-codex.py "$STAGE/Contents/Resources/setup-codex.py"
-mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in speak-hud.swift)
+mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in Sources/Phone.swift)
 cp phone/index.html phone/app.css phone/app.js phone/mic.js "$STAGE/Contents/Resources/phone/"
 
 echo "== Info.plist =="
@@ -175,7 +175,7 @@ echo "  change it with:  $DEST/Contents/MacOS/$EXEC --set-hotkey \"ctrl+opt+r\""
 echo "== Refresh Claude Code hook =="
 # After the agent is up: the new hook trusts only the new agent's heartbeat, so
 # refreshing it first would send every turn around a live old agent in the gap.
-# The app owns installation (ClaudeHook in speak-hud.swift); build.sh only asks it to
+# The app owns installation (ClaudeHook in Sources/Hooks.swift); build.sh only asks it to
 # refresh an existing install, so both hook scripts, the binary and settings.json all go
 # through one code path. A stale script silently keeps old behaviour, so this matters.
 # An install from before the app knew the question hook reports "stale" and gains it here.

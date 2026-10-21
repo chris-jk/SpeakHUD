@@ -459,7 +459,7 @@ app's `--setup-claude` to refresh `~/.claude/read-summary.py`,
 `~/.claude/hooks/read-question.py` and `~/.claude/bin/speak-hud`,
 so a rebuild never leaves a stale copy behind. Stock-macOS tools only (`swiftc`, `codesign`, `sips`, `iconutil`).
 
-Tests: `./tests/run.sh`. It compiles `speak-hud.swift` with `-D TESTING` (the entry
+Tests: `./tests/run.sh`. It compiles `speak-hud.swift` and `Sources/*.swift` with `-D TESTING` (the entry
 point drops out) alongside `tests/*.swift` — no XCTest, so bare Command Line Tools are enough.
 The Codex integration tests require Python 3.11+; phone page tests also run when Node is available.
 
@@ -581,13 +581,19 @@ instead. You lose the queue in that mode, so simultaneous turns can talk over ea
 
 ## Files
 
-- `speak-hud.swift` — the whole app: the queue-owning HUD, `--agent` (hotkey listener,
-  spool watcher, menu bar), and `--set-hotkey`.
+- `speak-hud.swift` — the entry point: which mode the binary runs in (the HUD,
+  `--agent`, `--set-hotkey`, the setup commands).
+- `Sources/` — the rest of the app, one area to a file: `Playback.swift` (every rule
+  about what speaks and when, no AppKit), `HUD.swift` and `Panel.swift` (the window),
+  `Agent.swift` and `Menu.swift` (hotkey listener, spool watcher, menu bar), `Spool.swift`,
+  `Reply.swift` (reading and writing terminal panes), `MicEar.swift`, `MicWatch.swift`,
+  `AudioWatch.swift`, `Dictation.swift`, `Hooks.swift` (Claude Code and Codex setup), and
+  the phone in `Phone.swift`, `PhoneDesk.swift`, `PhoneServer.swift` and `Terminals.swift`.
 - `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn, or
   speaks it directly when the agent isn't running.
 - `hook/read-question.py` — the `AskUserQuestion` hook; reads a question, then its
   options. Installed and removed with the `Stop` hook.
 - `phone/` — the phone page (`index.html`, `app.css`, `app.js`, and `mic.js`, its microphone), copied into the app's
-  resources by `build.sh` and served by `Phone` in `speak-hud.swift`.
+  resources by `build.sh` and served by `Phone` in `Sources/Phone.swift`.
 - `make-icon.swift` — build-time tool that renders `AppIcon.icns`; not part of the app.
 - `build.sh` — compile, bundle, sign, install the app + the LaunchAgent.

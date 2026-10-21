@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="$(mktemp -d)/speakhud-tests"
-swiftc -D TESTING speak-hud.swift tests/*.swift -o "$OUT"
+swiftc -D TESTING speak-hud.swift Sources/*.swift tests/*.swift -o "$OUT"
 "$OUT"
 # The phone page's script has to parse: a broken one serves fine and shows a dead page.
 # Then the page itself is run, in a stand-in browser against a fake Mac (tests/page).

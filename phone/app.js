@@ -363,7 +363,7 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
 (() => {
   const POLL_MS = 2500;
   // The HUD's colours for a terminal with no frame colour of its own: the same hash
-  // and order as Accent in speak-hud.swift, so a name gets the same colour in both.
+  // and order as Accent in Sources/Panel.swift, so a name gets the same colour in both.
   const PALETTE = ['#007aff', '#34c759', '#ff9500', '#af52de', '#30b0c7', '#ff2d55', '#5856d6', '#a2845e'];
   const OPTION = /^\s*(?:[-*•]\s*)?([1-9])\.\s+(.+)$/;
 

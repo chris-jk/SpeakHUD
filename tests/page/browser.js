@@ -18,7 +18,7 @@ const vm = require('vm');
 
 const PHONE = path.join(__dirname, '..', '..', 'phone');
 
-// A terminal's turn as the Mac's /api/state lists it (Phone.state in speak-hud.swift).
+// A terminal's turn as the Mac's /api/state lists it (Phone.state in Sources/Phone.swift).
 function turn(key, text, more = {}) {
   return Object.assign({
     key, name: 'T-' + key, text, at: 1_700_000_000, color: null, canReply: true, question: null, sent: null,
