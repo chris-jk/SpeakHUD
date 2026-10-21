@@ -24,6 +24,13 @@ struct SpeechItem {
     /// A finished Claude Code turn, whose terminal is back at Claude's prompt: an answer
     /// said out loud can go there (Reply). Only the Stop hook says so.
     var answerable = false
+    /// A question box's choices, read out by the question hook: the answer said out loud
+    /// after them picks one (`SpokenChoice`), pressed as its number (`Reply.press`).
+    struct Choices: Equatable {
+        let asked: String      // the question as the hook has it, which says whose box it is
+        let options: [String]  // each choice's label, in the box's order: the first is 1
+    }
+    var choices: Choices? = nil
     /// Pictures, video and sound the turn made or named, for the phone page to show
     /// under it (PhoneMedia). Only the hook finds these.
     var media: [String] = []

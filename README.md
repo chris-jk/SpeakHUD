@@ -135,6 +135,13 @@ When a Claude Code turn has been read to its end, the mic opens for that turn an
 
   Apart from "skip" they're whole phrases you wouldn't say to Claude, on purpose: plain
   "later" or "again" is a reply, and is sent.
+- **A question box** is answered the same way once its options have been read: say the
+  number (*"two"*, *"the second one"*, *"number 2"*) or the choice's own words (*"Navy"*,
+  *"go with navy"*). After the same *Sending…* moment its number is pressed in that
+  terminal, but only if the box there still asks that question with that choice at that
+  number. Something that isn't plainly one of the choices is heard again once, then let
+  go. Only for a single question with one pick: several questions at once, or "pick any",
+  are answered in the box.
 - Nothing else is read while the mic is open, and holding Claude Code's own dictation
   key closes it (you're answering that way instead).
 

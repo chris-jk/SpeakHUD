@@ -428,6 +428,12 @@ final class Playback {
     var deliver: (String, SpeechItem) -> Reply.Outcome = { text, item in
         item.origin.map { Reply.send(text, to: $0) } ?? .gone
     }
+    /// Presses choice `number` of the item's question box, if that box is still the one
+    /// up in its terminal with that choice at that number. Tests answer for iTerm2.
+    var choose: (Int, SpeechItem.Choices, SpeechItem) -> Reply.Outcome = { number, choices, item in
+        guard let origin = item.origin, choices.options.indices.contains(number - 1) else { return .gone }
+        return Reply.press(String(number), on: .question(asked: choices.asked, option: choices.options[number - 1]), in: origin)
+    }
 
     private let ear: Ear?
     private let timer: (TimeInterval, @escaping () -> Void) -> () -> Void
@@ -446,7 +452,7 @@ final class Playback {
         // the turn, and a mic opening then is the opposite of the quiet you asked for.
         // Not while another app is making sound: the mic would hear that as your answer.
         // Not when its session has more to say already: that turn gets the window.
-        listens && ear != nil && item.answerable && Reply.canReach(item.origin) && !micBusy && !userPaused
+        listens && ear != nil && (item.answerable || item.choices != nil) && Reply.canReach(item.origin) && !micBusy && !userPaused
             && !audioBusy && !queue.contains { $0.key == item.key }
     }
 
@@ -582,6 +588,14 @@ final class Playback {
         case .scratch?:
             hearAgain("scratched")
         case nil, .pause?, .resume?, .stopAll?:   // those three are only ever heard mid-turn
+            if let choices = w.item.choices, SpokenChoice.pick(w.heard, from: choices.options) == nil {
+                // Not plainly one of the choices: hear it again, once; then let it go.
+                guard w.again else { hearAgain("not one of the choices"); return }
+                closeWindow("not one of the choices")
+                note = "✗ Not one of the choices"
+                moveOn()
+                return
+            }
             w.phase = .sending
             window = w
             arm(Self.replyGrace) { [weak self] in self?.sendReply() }
@@ -608,10 +622,19 @@ final class Playback {
         cancelTimer = nil
         window = nil
         ear?.stop()
-        let line = Reply.clean(w.heard)
-        let outcome = line.map { deliver($0, w.item) } ?? .failed("nothing to send")
-        log("reply to \(w.item.source) (\(w.heard.count) chars): \(outcome)")
-        note = outcome == .sent ? "✓ Sent to \(w.item.source)" : "✗ Not sent: \(outcome)"
+        let line: String?, outcome: Reply.Outcome
+        if let choices = w.item.choices {
+            let n = SpokenChoice.pick(w.heard, from: choices.options)
+            line = n.map { "\($0). \(choices.options[$0 - 1])" }
+            outcome = n.map { choose($0, choices, w.item) } ?? .failed("not one of the choices")
+            log("choice for \(w.item.source): \(n.map(String.init) ?? "none") of \(choices.options.count): \(outcome)")
+            note = outcome == .sent ? "✓ Picked \(line ?? "") for \(w.item.source)" : "✗ Not picked: \(outcome)"
+        } else {
+            line = Reply.clean(w.heard)
+            outcome = line.map { deliver($0, w.item) } ?? .failed("nothing to send")
+            log("reply to \(w.item.source) (\(w.heard.count) chars): \(outcome)")
+            note = outcome == .sent ? "✓ Sent to \(w.item.source)" : "✗ Not sent: \(outcome)"
+        }
         said = line
         onReplied(outcome)
         if movingOn { moveOn() }

@@ -330,4 +330,21 @@ let commandSuite = Suite("Commands") { t in
         r.fire(Playback.commandPause)
         t.expect(r.commands.isEmpty && p.current?.text == "a", "words from a mic that's since been shut are stale")
     }
+
+    // -- a question box's choice, said after its options ---------------------
+    let colours = ["Forest", "Navy", "Sunset orange"]
+    for (heard, want) in [("two", 2), ("2", 2), ("Two.", 2), ("the second one", 2), ("number two", 2), ("option 2 please", 2),
+                          ("one", 1), ("The first.", 1), ("number one", 1), ("third", 3),
+                          ("navy", 2), ("Navy, please.", 2), ("go with navy", 2), ("sunset orange", 3), ("Forest.", 1)] as [(String, Int)] {
+        t.expectEqual(SpokenChoice.pick(heard, from: colours), want, "\"\(heard)\" picks choice \(want)")
+    }
+    for heard in ["four", "two or three", "orange", "the blue one", "", "I'm not sure", "for now"] {
+        t.expect(SpokenChoice.pick(heard, from: colours) == nil, "\"\(heard)\" picks nothing: not plainly one of them")
+    }
+    let yeses = ["Yes", "Yes, and don't ask again", "No"]
+    t.expectEqual(SpokenChoice.pick("yes and don't ask again", from: yeses), 2, "the longest choice whose words were all said")
+    t.expectEqual(SpokenChoice.pick("yes", from: yeses), 1, "and the short one on its own")
+    t.expect(SpokenChoice.pick("navy", from: ["Navy blue", "Navy grey"]) == nil && SpokenChoice.pick("blue", from: ["Navy", "Sky"]) == nil,
+             "half a choice's words, or none, picks nothing")
+    t.expect(SpokenChoice.pick("navy blue sky", from: ["Navy blue", "Sky blue"]) == nil, "two choices said as fully: no answer")
 }

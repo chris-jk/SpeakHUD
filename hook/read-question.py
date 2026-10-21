@@ -20,7 +20,7 @@ asks one question per call and those are read in a row. Previews aren't spoken.
 Known gap: the spool is empty during the pause, so another session's turn can be read
 between a question and its options. Doing the pause in Playback would close it.
 """
-import hashlib, importlib.util, json, os, re, subprocess, sys, time
+import hashlib, importlib.util, inspect, json, os, re, subprocess, sys, time
 from datetime import datetime
 
 # The Stop hook's cleaning and spool code: beside this file in the repo, and in
@@ -67,6 +67,19 @@ def segments(questions):
             lines.append(f"- {i}. {label}." + (f" {desc}" if desc else ""))
         out.append(("\n".join(lines), True))
     return out
+
+
+def choice(questions):
+    """What an answer said out loud picks from, sent with the options: one question with
+    one pick, two to nine choices. {"asked", "options": [label]} in the box's order, or
+    None. The agent presses the number of the one said, only in a box that asks this."""
+    if len(questions) != 1 or questions[0].get("multiSelect"):
+        return None
+    labels = [opt.get("label", "").strip() for opt in questions[0].get("options", [])]
+    asked = questions[0].get("question", "").strip()
+    if not asked or not 2 <= len(labels) <= 9 or not all(labels):
+        return None
+    return {"asked": asked, "options": labels}
 
 
 def session_key(data):
@@ -251,8 +264,18 @@ def run(data, questions, marker, key):
     cwd = data.get("cwd") or ""
     source = rs.source_name(path, cwd)
     where = rs.origin()
+    def plain(md):
+        return rs.unmark(rs.marked(md)[0])[0]
+
+    # The options are the last piece; an answer said after them picks one. In the words
+    # the box shows, which is what says it's the same box: no markdown.
+    picks = choice(questions)
+    if picks:
+        picks = {"asked": plain(picks["asked"]), "options": [plain(o) for o in picks["options"]]}
+        if not picks["asked"] or not all(picks["options"]):
+            picks = None
     spoken = []
-    for md, pause in parts:
+    for i, (md, pause) in enumerate(parts):
         text, _ = rs.marked(md)
         text, spans, _ = rs.unmark(text)
         if not text:
@@ -261,20 +284,20 @@ def run(data, questions, marker, key):
             clickable = rs.links(text, spans, cwd)
         except Exception:
             clickable = []
-        spoken.append((text, clickable, pause))
+        spoken.append((text, clickable, pause, picks if i == len(parts) - 1 else None))
     if not spoken:
         return
     # What the turn has made so far goes with the question: "which of these?" is no
     # use to a phone that can't see them. (An older read-summary.py doesn't look.)
     try:
-        named = [l["path"] for _, clickable, _ in spoken for l in clickable if "path" in l]
+        named = [l["path"] for _, clickable, _, _ in spoken for l in clickable if "path" in l]
         media = rs.turn_media(path, named, cwd) if hasattr(rs, "turn_media") else []
     except Exception:
         media = []
 
     if not rs.agent_running():
         chime()
-        rs.speak_directly("\n\n".join(t for t, _, _ in spoken), source, where)
+        rs.speak_directly("\n\n".join(t for t, _, _, _ in spoken), source, where)
         return
 
     # Its own key: the session's Stop-hook turn must never be swapped for options
@@ -285,7 +308,9 @@ def run(data, questions, marker, key):
 def ask(marker, spoken, source, key, where, cwd, media=None):
     deadline = time.time() + BUDGET
     prev, queued_at = None, 0.0
-    for text, clickable, pause in spoken:
+    # An older read-summary.py (a copy left in ~/.claude/hooks) takes no choices.
+    takes_choices = "choices" in inspect.signature(rs.enqueue).parameters
+    for text, clickable, pause, picks in spoken:
         if prev:
             if not wait_for(lambda: done(prev) or marker.superseded(), deadline):
                 return
@@ -307,8 +332,10 @@ def ask(marker, spoken, source, key, where, cwd, media=None):
                 return
         try:
             # The first piece carries the media: the options follow by themselves.
-            prev = (rs.enqueue(text, source, key, where, clickable, cwd, media=media) if media and not prev
-                    else rs.enqueue(text, source, key, where, clickable, cwd))
+            extra = {"reply": "choice", "choices": picks} if picks and takes_choices else {}
+            if media and not prev:
+                extra["media"] = media
+            prev = rs.enqueue(text, source, key, where, clickable, cwd, **extra)
         except OSError as e:
             print(f"speakhud: could not queue question ({e})", file=sys.stderr)
             return

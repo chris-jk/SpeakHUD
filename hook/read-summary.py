@@ -631,7 +631,7 @@ def heartbeat_fresh():
     return -HEARTBEAT_STALE < age < HEARTBEAT_STALE
 
 
-def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, reply=None, media=None):
+def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, reply=None, media=None, choices=None):
     """Hand the turn to the agent. Write-then-rename so it never reads a partial file.
 
     The fields are the contract with Spool.drain in Sources/Spool.swift, pinned by
@@ -658,6 +658,8 @@ def enqueue(text, source, key, where=None, links=None, cwd=None, blocks=None, re
             item["reply"] = reply
         if media:
             item["media"] = media
+        if choices:
+            item["choices"] = choices
         with open(tmp, "w") as f:
             json.dump(item, f)
         os.rename(tmp, os.path.join(QUEUE_DIR, stem + ".json"))

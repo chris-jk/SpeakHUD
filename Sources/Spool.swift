@@ -23,7 +23,9 @@ import Foundation
 //   blocks   array, optional: [{at, code, links}], fenced code shown but never spoken —
 //            `at` is where in `text` it goes back, `links` as above but within `code`.
 //   reply    string, optional: "prompt" when the turn left its terminal waiting at
-//            Claude's prompt, so an answer said out loud can be pasted there (Reply).
+//            Claude's prompt, so an answer said out loud can be pasted there (Reply);
+//            "choice" for a question box's options, answered by picking one, with
+//   choices  object: {asked, options: [label]}, the question and its choices in order.
 //            Anything else, or missing, is an item nobody can answer.
 // Every dropped item comes back as a `Drop` with its reason, for the agent to log.
 //
@@ -145,9 +147,20 @@ enum Spool {
                                           cwd: TextLink.absolutePath(obj["cwd"]),
                                           blocks: CodeBlock.parse(obj["blocks"], in: text),
                                           answerable: obj["reply"] as? String == "prompt",
+                                          choices: obj["reply"] as? String == "choice" ? choices(obj["choices"]) : nil,
                                           media: PhoneMedia.parse(obj["media"])))
         }
         return batch
+    }
+
+    /// A question's choices as the hook sends them, or nil if they aren't: a question,
+    /// and one to nine labels, none blank (a number is pressed for the one said).
+    static func choices(_ raw: Any?) -> SpeechItem.Choices? {
+        guard let obj = raw as? [String: Any], let asked = obj["asked"] as? String,
+              !asked.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let options = obj["options"] as? [String], (1...9).contains(options.count),
+              options.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
+        return SpeechItem.Choices(asked: asked, options: options)
     }
 
     /// "The agent is alive and draining": touch the heartbeat's mtime. Only its first

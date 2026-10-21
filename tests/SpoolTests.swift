@@ -217,10 +217,20 @@ let spoolSuite = Suite("Spool") { t in
         let q = tempDir("reply")
         write(q, "1.json", ["text": "a turn", "reply": "prompt", "created": fresh])
         write(q, "2.json", ["text": "a question", "created": fresh])
-        write(q, "3.json", ["text": "some later kind", "reply": "choice", "created": fresh])
+        write(q, "3.json", ["text": "choices with nothing to pick", "reply": "choice", "created": fresh])
         write(q, "4.json", ["text": "nonsense", "reply": true, "created": fresh])
-        t.expectEqual(Spool.drain(in: q, now: now).items.map(\.answerable), [true, false, false, false],
-                      "only reply: \"prompt\" opens the mic; anything else, or nothing, doesn't")
+        write(q, "5.json", ["text": "1. Forest.\n2. Navy.", "reply": "choice", "created": fresh,
+                            "choices": ["asked": "Which colour?", "options": ["Forest", "Navy"]]])
+        write(q, "6.json", ["text": "1. Forest.", "reply": "choice", "created": fresh,
+                            "choices": ["asked": "Which colour?", "options": ["Forest", " "]]])
+        write(q, "7.json", ["text": "a turn", "reply": "prompt", "created": fresh,
+                            "choices": ["asked": "Which colour?", "options": ["Forest", "Navy"]]])
+        let items = Spool.drain(in: q, now: now).items
+        t.expectEqual(items.map(\.answerable), [true, false, false, false, false, false, true],
+                      "only reply: \"prompt\" is answered at Claude's prompt; anything else, or nothing, isn't")
+        t.expectEqual(items.map { $0.choices?.options ?? [] }, [[], [], [], [], ["Forest", "Navy"], [], []],
+                      "reply: \"choice\" with a question and its choices is answered by picking one; a blank choice, or choices on anything else, isn't")
+        t.expectEqual(items[4].choices?.asked, "Which colour?", "and it says which question")
         try? fm.removeItem(atPath: q)
     }
 

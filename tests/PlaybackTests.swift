@@ -88,6 +88,7 @@ final class Rig {
     var listened: [String] = []            // texts of the turns the mic opened for
     var replied: [Reply.Outcome] = []
     var sent: [(text: String, to: String)] = []   // what `deliver` was handed
+    var chosen: [Int] = []                 // each choice `choose` was handed, by number
     var delivery = Reply.Outcome.sent      // and what it answers
     var earFailures: [String] = []
     private(set) var playback: Playback!
@@ -114,6 +115,7 @@ final class Rig {
         p.onEarFailed = { [unowned self] in self.earFailures.append($0) }
         p.onCommand = { [unowned self] in self.commands.append($0) }
         p.deliver = { [unowned self] text, item in self.sent.append((text, item.source)); return self.delivery }
+        p.choose = { [unowned self] number, _, _ in self.chosen.append(number); return self.delivery }
         p.onStart = { [unowned self] in self.shown.append($0.text) }
         p.onRanDry = { [unowned self] in self.ranDry += 1 }
         p.onStopped = { [unowned self] in self.stopped += 1 }
@@ -546,6 +548,59 @@ let playbackSuite = Suite("Playback") { t in
         t.expectEqual(r.voice.take(), [], "the turn behind it isn't read")
         t.expectEqual(r.shown, ["a"], "nor put up on the HUD")
         t.expectEqual(r.retired, ["a", "b"], "it's let go with the rest")
+    }
+
+    // -- a question box's options, answered by saying one ---------------------
+    func options(_ key: String = "Q") -> SpeechItem {
+        var item = answerable("1. Forest. 2. Navy.", key: key)
+        item.answerable = false
+        item.choices = SpeechItem.Choices(asked: "Which colour for the bar?", options: ["Forest", "Navy"])
+        return item
+    }
+    do {
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(options())
+        r.voice.finish()
+        t.expectEqual(r.listened, ["1. Forest. 2. Navy."], "after a question's options, the mic opens for the answer")
+        r.ear.hear("the second one")
+        r.fire(Playback.replyPause)
+        t.expect(r.chosen.isEmpty, "nothing is pressed until the moment of \"Sending\" has passed")
+        r.fire(Playback.replyGrace)
+        t.expectEqual(r.chosen, [2], "what was said picks that choice")
+        t.expect(r.sent.isEmpty, "and nothing is pasted at the prompt")
+        t.expectEqual(r.replied, [.sent], "the HUD hears how it went")
+    }
+    do {
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(options())
+        r.voice.finish()
+        r.ear.hear("hmm, the purple one")
+        r.fire(Playback.replyPause)
+        t.expect(r.chosen.isEmpty && p.state.isActive, "not one of the choices: nothing is pressed, and it listens again")
+        r.ear.hear("navy")
+        r.fire(Playback.replyPause)
+        r.fire(Playback.replyGrace)
+        t.expectEqual(r.chosen, [2], "said again, it's picked")
+    }
+    do {
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        p.enqueue(options())
+        r.voice.finish()
+        r.ear.hear("purple"); r.fire(Playback.replyPause)
+        r.ear.hear("still purple"); r.fire(Playback.replyPause)
+        t.expect(r.chosen.isEmpty && r.sent.isEmpty && !p.state.isActive, "twice not one of them: let go, nothing pressed or sent")
+    }
+    do {
+        let r = Rig(), p = r.playback!
+        p.listens = true
+        var plain = options()
+        plain.choices = nil
+        p.enqueue(plain)
+        r.voice.finish()
+        t.expect(r.listened.isEmpty, "a question's options with no choices sent (an older hook): no mic opens")
     }
 
     do {  // no reply mic opens while another app is making sound: it would hear that as your answer

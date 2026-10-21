@@ -144,8 +144,11 @@ class ReadQuestion(unittest.TestCase):
         self.assertGreaterEqual(gap, PAUSE, "the options wait out the pause after the question ends")
         self.assertEqual({h[1] for h in self.hud.heard}, {"s1:question"},
                          "its own key, so it never replaces the session's spoken reply")
-        self.assertEqual([i.get("reply") for i in self.hud.items], [None, None],
-                         "a question isn't a turn at Claude's prompt: no mic opens to answer it there")
+        self.assertEqual([i.get("reply") for i in self.hud.items], [None, "choice"],
+                         "a question isn't a turn at Claude's prompt; after its options, one is picked by saying it")
+        self.assertEqual([i.get("choices") for i in self.hud.items],
+                         [None, {"asked": "Which method?", "options": ["OAuth (Recommended)", "Key"]}],
+                         "the options carry the question and each choice's label, in order, as the box shows them")
         self.assertEqual(os.listdir(os.path.join(self.tmp, "state", "questions")), [], "marker released")
 
     def test_answering_stops_the_options(self):
@@ -209,11 +212,15 @@ class ReadQuestion(unittest.TestCase):
     def test_multi_select_says_so(self):
         self.ask(question("Which?", ("A", ""), ("B", ""), multi=True))
         self.assertTrue(self.texts()[1].startswith("Pick any that apply.\n1. A."))
+        self.assertEqual([i.get("reply") for i in self.hud.items], [None, None],
+                         "pick any: no single choice to say, so none is listened for")
 
     def test_several_questions_in_one_call_read_in_order(self):
         self.ask(question("First?", ("A", ""), ("B", "")), question("Second?", ("C", ""), ("D", "")))
         self.assertEqual(self.texts(),
                          ["Question 1 of 2. First?", "1. A.\n2. B.", "Question 2 of 2. Second?", "1. C.\n2. D."])
+        self.assertTrue(all(i.get("reply") is None for i in self.hud.items),
+                        "several questions at once: their answers are picked in the box, not said")
 
     def test_a_newer_question_drops_the_older_ones_options(self):
         old = self.ask(question("Old?", ("A", ""), ("B", "")), wait=False, tool_id="tu1")
