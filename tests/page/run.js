@@ -47,6 +47,19 @@ scenario('a window for each terminal, newest first, and a closed terminal\'s win
   assert.strictEqual(w.$('empty').hidden, false);
 });
 
+scenario('a terminal at work says what it is doing under the working bar, and not once it is done', async () => {
+  const w = await open([turn('a', 'Ay.', { busy: true, doing: 'Bash(swift build)' })]);
+  const doing = w.win('a').querySelector('.win-doing');
+  assert.strictEqual(w.win('a').querySelector('.win-working').hidden, false);
+  assert.strictEqual(doing.hidden, false);
+  assert.strictEqual(doing.textContent, 'Bash(swift build)');
+
+  w.mac.state.turns = [turn('a', 'Done.')];
+  await w.advance(2500);
+  assert.strictEqual(doing.hidden, true);
+  assert.strictEqual(doing.textContent, '');
+});
+
 scenario('an answer typed in the box goes to its terminal, and only what was sent is cleared', async () => {
   const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')]);
   w.mac.routes['/api/reply'] = () => ({ data: { sent: true, outcome: 'sent' } });

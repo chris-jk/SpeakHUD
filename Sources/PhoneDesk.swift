@@ -184,6 +184,7 @@ struct PhoneDesk {
         var note: String? = nil      // why a send didn't go
         var box: TerminalBox? = nil  // what its screen is asking right now, if anything
         var busy = false             // in the middle of a turn
+        var doing: String? = nil     // and the newest thing it's put on its screen in it
         var status: String? = nil    // its status line as last seen: folder, model, context
         var context: Int? = nil      // how full its context is, in percent, if the line says
         var media: [String] = []     // pictures, video and sound that turn made or named
@@ -213,15 +214,16 @@ struct PhoneDesk {
         for pane in open {
             let showing = pane.showing
             let box = showing.box, busy = showing.busy
+            let doing = busy ? Reply.doing(pane.screen) : nil
             if let i = turns.firstIndex(where: { $0.origin?.session == pane.session }) {
                 if turns[i].key.hasPrefix(Self.paneKey) { turns[i].name = Reply.paneName(pane.name) }
                 if let box = box, turns[i].box?.ask != box.ask { asking.append(turns[i].key) }
-                (turns[i].box, turns[i].busy) = (box, busy)
+                (turns[i].box, turns[i].busy, turns[i].doing) = (box, busy, doing)
                 if let prompt = showing.prompt, let status = prompt.status { (turns[i].status, turns[i].context) = (status, prompt.context) }
             } else if showing.isClaude, turns.count < Self.keep {
                 var t = Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
                              origin: Origin(term: "iTerm.app", session: pane.session))
-                (t.box, t.busy) = (box, busy)
+                (t.box, t.busy, t.doing) = (box, busy, doing)
                 if let prompt = showing.prompt, let status = prompt.status { (t.status, t.context) = (status, prompt.context) }
                 if box != nil { asking.append(t.key) }
                 turns.append(t)
@@ -236,7 +238,7 @@ struct PhoneDesk {
         guard let i = turns.firstIndex(where: { $0.key == key }) else { return }
         let showing = Reply.showing(screen)
         turns[i].box = showing.box
-        if turns[i].box != nil { turns[i].busy = false }
+        if turns[i].box != nil { (turns[i].busy, turns[i].doing) = (false, nil) }
         if let prompt = showing.prompt, let status = prompt.status { (turns[i].status, turns[i].context) = (status, prompt.context) }
         if turns[i].question != nil, showing.prompt != nil { (turns[i].question, turns[i].askedAt) = (nil, nil) }
     }

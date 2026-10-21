@@ -113,6 +113,25 @@ enum Reply {
         return .notClaude(foot == nil ? "its screen is blank" : "nothing at the foot of its screen is Claude's prompt or a box of its")
     }
 
+    /// The newest thing Claude has put on a screen: its last stretch of words, or the tool
+    /// it's running ("Bash(npm test)"), as one line cut to `maxLength`. Nil when none is in
+    /// sight. For the phone, under its working bar: a long turn otherwise says nothing
+    /// until it ends (Chris, 10-07, twenty minutes into one: "Yo, are you stuck?").
+    static func doing(_ screen: String, maxLength: Int = 160) -> String? {
+        let lines = lines(of: screen)
+        guard let at = lines.lastIndex(where: { $0.hasPrefix("⏺ ") }) else { return nil }
+        var parts = [String(lines[at].dropFirst(2))]
+        // Its words wrap onto lines set in by two; what a tool gave back starts "⎿".
+        for line in lines[(at + 1)...] {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("  "), !t.isEmpty, !t.hasPrefix("⎿") else { break }
+            parts.append(t)
+        }
+        let words = parts.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !words.isEmpty else { return nil }
+        return words.count > maxLength ? String(words.prefix(maxLength - 1)) + "…" : words
+    }
+
     /// A screen as its lines, a no-break space read as a space.
     private static func lines(of screen: String) -> [String] {
         screen.components(separatedBy: .newlines).map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }

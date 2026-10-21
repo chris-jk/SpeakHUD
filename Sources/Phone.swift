@@ -267,6 +267,7 @@ final class Phone {
              "note": t.note as Any? ?? NSNull(),
              "box": t.box?.json as Any? ?? NSNull(),
              "busy": t.busy,
+             "doing": t.busy ? t.doing as Any? ?? NSNull() : NSNull(),
              "status": t.status as Any? ?? NSNull(),
              "context": t.context as Any? ?? NSNull(),
              // Each by its place in the turn's list, which is all the page ever asks by.

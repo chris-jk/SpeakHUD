@@ -1306,6 +1306,11 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
     // Said down by the buttons too, with a bar that keeps moving: that's where your
     // thumb is when you're about to send it something more.
     el.querySelector('.win-working').hidden = !working;
+    // Under it, the newest thing its screen shows it doing: a long turn says something
+    // before it ends.
+    const doing = el.querySelector('.win-doing');
+    doing.textContent = working && turn.doing ? turn.doing : '';
+    doing.hidden = !doing.textContent;
     const sent = el.querySelector('.win-sent');
     // A terminal that's open but hasn't finished a turn since it was first seen.
     const idle = !turn.text && !asking && !turn.sent;

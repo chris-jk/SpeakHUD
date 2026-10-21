@@ -435,6 +435,26 @@ let phoneSuite = Suite("Phone") { t in
     t.expect(seen.map { $0["name"] as? String ?? "" } == ["Grow guide replies", "Review desk"] && seen.allSatisfy { $0["canReply"] as? Bool == true && $0["text"] as? String == "" },
              "the page is shown every open Claude terminal, even before any has finished a turn")
     t.expect(seen[0]["busy"] as? Bool == false && seen[1]["busy"] as? Bool == true && seen[0]["box"] is NSNull, "and which of them is working")
+    t.expect(seen[0]["doing"] is NSNull && seen[1]["doing"] is NSNull, "working with nothing of Claude's on its screen: nothing said as doing")
+
+    // A long turn says what it's doing (Chris, 10-07, twenty minutes into one: "Yo, are you stuck?").
+    let atWork = "⏺ Now the mic reopen. It watches the engine for a change of sound\n  device and opens again.\n\n"
+        + "⏺ Bash(cd ~/x && swift build)\n  ⎿  Building…\n     Compiling 12 files\n\n✻ Percolating… (2m 13s · esc to interrupt)\n\n" + atPrompt
+    t.expectEqual(Reply.doing(atWork), "Bash(cd ~/x && swift build)", "the newest thing on a working screen: the tool it's running, not what it gave back")
+    t.expectEqual(Reply.doing(atWork.components(separatedBy: "\n\n")[0] + "\n\n✻ Percolating… (esc to interrupt)"),
+                  "Now the mic reopen. It watches the engine for a change of sound device and opens again.", "or its words, wrapped lines and all, as one line")
+    t.expect(Reply.doing("⏺ " + String(repeating: "word ", count: 60))?.count == 160, "cut to length")
+    t.expect(Reply.doing(atPrompt) == nil && Reply.doing("") == nil, "nothing of Claude's in sight: nothing")
+    do {
+        let w = Bench()
+        w.open = [Reply.Pane(session: pane.session!, name: "◐ Grow guide replies — ~", screen: atWork)]
+        let row = turns(json(w.phone.respond(to: get("/api/state"))))
+        t.expect(row.first?["busy"] as? Bool == true && row.first?["doing"] as? String == "Bash(cd ~/x && swift build)",
+                 "the page is told what a terminal at work is doing")
+        w.open = [Reply.Pane(session: pane.session!, name: "✳ Grow guide replies — ~", screen: "⏺ Done.\n\n" + atPrompt)]
+        w.phone.scan(now: Date().addingTimeInterval(Phone.scanEvery + 1))
+        t.expect(turns(json(w.phone.respond(to: get("/api/state")))).first?["doing"] is NSNull, "and nothing once it's done")
+    }
     t.expectEqual(o.saves, 1, "and the list is kept as it changes")
     o.open = []
     t.expectEqual(turns(json(o.phone.respond(to: get("/api/state")))).count, 2, "iTerm2 is asked at most every \(Int(Phone.scanEvery)) s, however often the page polls")

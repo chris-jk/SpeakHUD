@@ -216,7 +216,9 @@ What's on the page:
 - **Working, asking, or waiting on you.** A window in full colour is waiting on you; one
   that has stepped back to a stripe says "working", and its Send becomes Queue; one
   with a box up says "asking". A working window also runs a bar down by its answer
-  buttons, where your thumb is, for as long as its terminal is at work. Under the bar
+  buttons, where your thumb is, for as long as its terminal is at work, and under it
+  the newest thing its screen shows Claude doing: its last words, or the tool it's
+  running ("Bash(swift build)"), so a long turn isn't silent until it ends. Under the bar
   at the top is the terminal's own status line, which is where your model and context
   figure show if your status line has them.
 - **Say it instead of typing it.** A mic button by each answer box. Tap it and talk:

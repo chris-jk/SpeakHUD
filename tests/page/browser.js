@@ -22,7 +22,7 @@ const PHONE = path.join(__dirname, '..', '..', 'phone');
 function turn(key, text, more = {}) {
   return Object.assign({
     key, name: 'T-' + key, text, at: 1_700_000_000, color: null, canReply: true, question: null, sent: null,
-    note: null, box: null, busy: false, status: null, context: null, media: [],
+    note: null, box: null, busy: false, doing: null, status: null, context: null, media: [],
   }, more);
 }
 

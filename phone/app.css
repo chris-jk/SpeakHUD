@@ -581,6 +581,18 @@ html.is-old .trouble {
   background: var(--frame);
   animation: working 1.1s ease-in-out infinite alternate;
 }
+/* What the screen shows it doing, two lines at most. */
+.win-doing {
+  margin: 6px 0 0;
+  color: var(--quiet);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.win-doing[hidden] { display: none; }
 @keyframes working {
   from { transform: translateX(0); }
   to { transform: translateX(150%); }
