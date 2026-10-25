@@ -184,6 +184,68 @@ scenario('a fault in the drawing after an answer has gone is not called a failur
   assert.strictEqual(w.$('trouble').hidden, false);
 });
 
+// -- hiding a terminal ---------------------------------------------------------
+
+const hideButton = (w, key) => w.win(key).querySelector('.win-hide');
+const hiddenRows = (w) => w.$('hidden-list').children.map((li) => li.querySelector('span').textContent);
+
+scenario('Hide puts a terminal away under Hidden, and Show brings it back', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')]);
+  assert.strictEqual(w.$('hidden').hidden, true);
+  await w.tap(hideButton(w, 'a'));
+  assert.strictEqual(w.win('a').hidden, true);
+  assert.strictEqual(w.win('b').hidden, false);
+  assert.strictEqual(w.$('hidden').hidden, false);
+  assert.deepStrictEqual(hiddenRows(w), ['T-a']);
+  assert.strictEqual(w.$('hidden-count').textContent, '1');
+
+  await w.tap(w.$('hidden-list').children[0].querySelector('button'));
+  assert.strictEqual(w.win('a').hidden, false);
+  assert.strictEqual(w.$('hidden').hidden, true);
+});
+
+scenario('a hidden terminal stays away while it works, and comes back with its next turn', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')]);
+  await w.tap(hideButton(w, 'a'));
+  w.mac.state.turns = [turn('a', 'Alpha.', { busy: true, doing: 'Bash(swift build)', status: 'Opus' }), turn('b', 'Bee.')];
+  await w.advance(2500);
+  assert.strictEqual(w.win('a').hidden, true);
+
+  w.mac.state.turns = [turn('a', 'Done now.'), turn('b', 'Bee.')];
+  await w.advance(2500);
+  assert.strictEqual(w.win('a').hidden, false);
+  assert.deepStrictEqual(hiddenRows(w), []);
+});
+
+scenario('a hidden terminal comes back when it asks something', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')]);
+  await w.tap(hideButton(w, 'a'));
+  const box = { ask: 'Allow this?', tabs: null, hints: null, rows: [
+    { label: 'Yes', detail: null, number: 1, cursor: true, checked: null, types: false }] };
+  w.mac.state.turns = [turn('a', 'Alpha.', { box }), turn('b', 'Bee.')];
+  await w.advance(2500);
+  assert.strictEqual(w.win('a').hidden, false);
+
+  await w.tap(hideButton(w, 'b'));
+  w.mac.state.turns = [turn('a', 'Alpha.', { box }), turn('b', 'Bee.', { question: 'Which one?\n1. This\n2. That' })];
+  await w.advance(2500);
+  assert.strictEqual(w.win('b').hidden, false);
+});
+
+scenario('what is hidden is remembered on the phone, and forgotten once its terminal closes', async () => {
+  const w = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')]);
+  await w.tap(hideButton(w, 'a'));
+  const again = await open([turn('a', 'Alpha.'), turn('b', 'Bee.')], { storage: Object.fromEntries(w.store) });
+  assert.strictEqual(again.win('a').hidden, true);
+  assert.deepStrictEqual(hiddenRows(again), ['T-a']);
+
+  again.mac.state.turns = [turn('b', 'Bee.')];
+  await again.advance(2500);
+  assert.deepStrictEqual(hiddenRows(again), []);
+  assert.strictEqual(again.$('hidden').hidden, true);
+  assert.strictEqual(JSON.parse(again.store.get('hiddenWindows') || '{}').a, undefined);
+});
+
 // -- reading aloud -------------------------------------------------------------
 
 scenario('Read says who it is, then the turn a paragraph at a time, and tells the Mac how it went', async () => {

@@ -48,6 +48,12 @@
 
 <main id="windows"></main>
 
+<details class="fold" id="hidden" hidden>
+  <summary>Hidden terminals (<span id="hidden-count">0</span>)</summary>
+  <p class="says">Each comes back by itself when it finishes a turn or asks you something.</p>
+  <ul class="old-list" id="hidden-list"></ul>
+</details>
+
 <p class="empty" id="empty" hidden>No terminals open. Start a new one below, or resume an old session.</p>
 
 <details class="fold" id="new">
@@ -74,6 +80,7 @@
         <button type="button" class="win-stop" aria-label="Stop" title="Stop">&#9632;</button>
       </span>
       <button type="button" class="win-read" hidden>Read</button>
+      <button type="button" class="win-hide" title="Hide until it finishes a turn or asks you something">Hide</button>
     </header>
     <div class="win-body">
       <span class="win-cursor" aria-hidden="true"></span>

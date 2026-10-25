@@ -303,6 +303,21 @@ html.is-old .trouble {
 }
 .win-reading .win-stop { font-size: 0.75rem; }
 
+/* Put this terminal away until it says something new. Quieter than Read: no ring. */
+.win-hide {
+  flex: none;
+  align-self: center;
+  min-height: 30px;
+  margin: -4px -6px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8125rem;
+  opacity: 0.8;
+}
+
 /* Read this turn aloud on the phone. Sits in the bar, in the bar's own ink. */
 .win-read {
   flex: none;

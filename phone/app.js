@@ -373,6 +373,18 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
   const awaySays = document.getElementById('away-says');
   const trouble = document.getElementById('trouble');
   const empty = document.getElementById('empty');
+  const hiddenFold = document.getElementById('hidden');
+  const hiddenCount = document.getElementById('hidden-count');
+  const hiddenList = document.getElementById('hidden-list');
+
+  // Terminals put away with Hide: key -> what it last said when hidden. One comes
+  // back by itself once it says something new (a finished turn, a question); working
+  // doesn't count. Kept on this phone, so a reload keeps them away.
+  const HIDDEN = 'hiddenWindows';
+  let hidden = {};
+  try { hidden = JSON.parse(localStorage.getItem(HIDDEN) || '{}') || {}; } catch (e) { hidden = {}; }
+  function keepHidden() { try { localStorage.setItem(HIDDEN, JSON.stringify(hidden)); } catch (e) { /* private mode */ } }
+  const said = (turn) => (turn.text || '') + '\n' + (turn.box ? 'ask:' + turn.box.ask : turn.question ? 'ask:' + turn.question : '');
 
   const speakSwitch = document.getElementById('speak');
   const speakSays = document.getElementById('speak-says');
@@ -974,6 +986,14 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
       // One turn the page can't draw doesn't take the others with it.
       try { update(turn); } catch (e) { fault(e, turn); }
     }
+    // A hidden terminal that has said something new comes back; a closed one is forgotten.
+    let changed = false;
+    for (const key of Object.keys(hidden)) {
+      const turn = state.turns.find((t) => t.key === key);
+      if (!turn || said(turn) !== hidden[key]) { delete hidden[key]; changed = true; }
+    }
+    if (changed) keepHidden();
+    placeHidden();
 
     // Newest first, but never shuffle the page under a keyboard, a reading, or a thumb.
     const order = Array.from(list.children).map((el) => el.dataset.key);
@@ -1152,10 +1172,40 @@ function Reader({ voice, Utterance, clock, page, report, lang, speed = 1, aloud 
       else press(turn.key, option.dataset.press, option);
     });
 
+    el.querySelector('.win-hide').addEventListener('click', () => {
+      const now = shown.get(turn.key);
+      hidden[turn.key] = said((now && now.turn) || turn);
+      keepHidden();
+      reader.windowGone(turn.key);
+      placeHidden();
+    });
+
     list.appendChild(el);
     const w = { el, text: null, question: null, note: '' };
     shown.set(turn.key, w);
     return w;
+  }
+
+  // Each window shown or put away as `hidden` says, and the Hidden fold to match.
+  function placeHidden() {
+    const away = [];
+    for (const [key, w] of shown) {
+      w.el.hidden = key in hidden;
+      if (w.el.hidden) away.push([key, w]);
+    }
+    hiddenCount.textContent = String(away.length);
+    hiddenFold.hidden = !away.length;
+    hiddenList.replaceChildren(...away.map(([key, w]) => {
+      const row = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = w.turn ? w.turn.name : key;
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.textContent = 'Show';
+      back.addEventListener('click', () => { delete hidden[key]; keepHidden(); placeHidden(); });
+      row.append(name, back);
+      return row;
+    }));
   }
 
   // A line under the turn: why something didn't go, or (plain) a fact about the window.
