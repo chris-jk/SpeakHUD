@@ -111,9 +111,17 @@ final class MicWatch {
             let running: UInt32? = read(id, flag)
             guard (running ?? 0) != 0 else { return nil }
             let pid: Int32? = read(id, kAudioProcessPropertyPID)
-            return pid == me ? nil : (id: id, name: name(of: pid))
+            guard pid != me else { return nil }
+            let who = name(of: pid)
+            return ignored(who) ? nil : (id: id, name: who)
         }
     }
+
+    /// Apps that hold the mic or play sound all day without anyone using them, so they
+    /// never hold speech. Vorssaint (a menu bar utility) keeps the mic open from launch
+    /// (Chris, 10-26: "make it ignore that shit").
+    static let ignoredPrograms: Set<String> = ["Vorssaint"]
+    static func ignored(_ name: String) -> Bool { ignoredPrograms.contains(name) }
 
     /// What to call a recorder in the log. macOS dictation and Siri have no process of
     /// their own on the mic: both show up as the system's historicalaudiod. Claude Code's

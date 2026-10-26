@@ -11,6 +11,7 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - macOS dictation no longer leaves speech held (the 10-07 fix): 306 dictations in the log since, every one followed by `mic released`, median hold 7 s (read 10-21 9:27 AM).
 - The phone page (README "The phone"): `Phone`, `PhoneDesk`, `PhoneServer` on loopback, carried tailnet-only by `tailscale serve` (set up 10-07, not re-checked 10-21); Away sends turns to the page and a push instead of reading them.
 - Reply mic after the 10-07 6:40 PM fix (agent log, read 10-21 9:27 AM): no `can't listen` since; 30 opens needed a second or third try (the retry doing its job); 65 `mic shut after 0 buffers`, the last on 10-10 (not looked into: a command mic shut before sound arrived would log the same); 2 spoken commands ever taken (`heard "…"`).
+- 10-26 2:48 PM: Vorssaint (menu bar utility) held the mic from launch, so speech stayed held with nobody talking (log `mic taken by Vorssaint`). `MicWatch.ignoredPrograms` now skips it for both the mic and the sound check; tests pass. Add any other always-on app there.
 - Live mic tests fight the running agent (it holds speech while another process records): quit the agent before one, or run it when Chris is away.
 - A reply is pasted, never typed: a typed digit picks a question box's choice at once (10-07, tmux). `Reply.send` pastes only where Claude's prompt shows. Not checked: a paste against a permission box.
 

@@ -45,4 +45,7 @@ let micWatchSuite = Suite("MicWatch") { t in
                   "Claude Code's program file is its version number: say whose")
     t.expectEqual(MicWatch.name(ofProgram: "/Applications/zoom.us.app/Contents/MacOS/zoom.us"), "zoom.us",
                   "anything else goes by its program's name")
+    t.expect(MicWatch.ignored(MicWatch.name(ofProgram: "/Applications/Vorssaint.app/Contents/MacOS/Vorssaint")),
+             "Vorssaint keeps the mic open all day: it never holds speech")
+    t.expect(!MicWatch.ignored("zoom.us"), "a real recorder still does")
 }
