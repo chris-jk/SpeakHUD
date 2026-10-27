@@ -68,6 +68,18 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         }
     }
 
+    /// "Read Responses Aloud": the one switch over every tool's turns (Claude Code, Codex,
+    /// OpenCode). Off, turns still reach the phone but nothing is read here. The hotkey and
+    /// Read Clipboard still read: those are asked for by hand. Persisted in the shared suite.
+    static let readTurnsKey = "readTurns"
+    var readTurns: Bool {
+        get { prefs.object(forKey: Controller.readTurnsKey) as? Bool ?? true }
+        set {
+            prefs.set(newValue, forKey: Controller.readTurnsKey)
+            log("read responses aloud: \(newValue ? "on" : "off")")
+        }
+    }
+
     /// "A Voice per Project". Takes effect from the next turn read. Persisted in the shared suite.
     var voicePerProject: Bool {
         get { VoiceCast.enabled(in: prefs) }

@@ -5,8 +5,10 @@ import Cocoa
 final class MenuController: NSObject, NSMenuDelegate {
     let agent: Agent
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    var readTurnsItem: NSMenuItem!
     var claudeItem: NSMenuItem!
     var codexItem: NSMenuItem!
+    var opencodeItem: NSMenuItem!
     var axItem: NSMenuItem!
     var hudItem: NSMenuItem!
     let hotkeyPresets = [("⌃⌥S", "ctrl+opt+s"), ("⌃⌥R", "ctrl+opt+r"),
@@ -44,10 +46,15 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(item("Read Clipboard Aloud", #selector(readClipboard)))
         menu.addItem(.separator())
 
+        readTurnsItem = item("Read Responses Aloud", #selector(toggleReadTurns))
+        readTurnsItem.toolTip = "One switch for all of them. Off: no tool's turns are read; the switches below stay as they are"
+        menu.addItem(readTurnsItem)
         claudeItem = item("Read Claude Code Responses Aloud", #selector(toggleClaude))
         menu.addItem(claudeItem)
         codexItem = item("Read Codex CLI Responses Aloud", #selector(toggleCodex))
         menu.addItem(codexItem)
+        opencodeItem = item("Read OpenCode Responses Aloud", #selector(toggleOpenCode))
+        menu.addItem(opencodeItem)
 
         micItem = item("Pause While Recording", #selector(toggleMicHold))
         if #available(macOS 14.0, *) {
@@ -152,6 +159,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         micItem.state = micItem.isEnabled && agent.hud.pauseWhileRecording ? .on : .off
         audioItem.state = audioItem.isEnabled && agent.hud.waitWhileAudioPlays ? .on : .off
         voicesItem.state = agent.hud.voicePerProject ? .on : .off
+        readTurnsItem.state = agent.hud.readTurns ? .on : .off
         listenItem.state = agent.hud.listenAfterReading ? .on : .off
         obeyItem.state = agent.hud.listenWhileReading ? .on : .off
         let phone = agent.phone
@@ -200,6 +208,8 @@ final class MenuController: NSObject, NSMenuDelegate {
                 }
             }
         }
+        opencodeItem.state = OpenCodeHook.installed ? .on : .off
+        opencodeItem.toolTip = "Reads finished OpenCode turns. Restart OpenCode after changing this setting."
         let hook = ClaudeHook.check()
         claudeItem.title = hook.status == .stale ? "Read Claude Code Responses Aloud — Repair"
                                                  : "Read Claude Code Responses Aloud"
@@ -227,6 +237,17 @@ final class MenuController: NSObject, NSMenuDelegate {
         if result.hasPrefix("error") {
             let alert = NSAlert()
             alert.messageText = "Codex CLI integration"
+            alert.informativeText = result
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        refresh()
+    }
+    @objc private func toggleOpenCode() {
+        let result = OpenCodeHook.installed ? OpenCodeHook.remove() : OpenCodeHook.install()
+        if result.hasPrefix("error") {
+            let alert = NSAlert()
+            alert.messageText = "OpenCode integration"
             alert.informativeText = result
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
@@ -265,6 +286,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
     @objc private func toggleAudioHold() {
         agent.hud.waitWhileAudioPlays.toggle()
+        refresh()
+    }
+    @objc private func toggleReadTurns() {
+        agent.hud.readTurns.toggle()
         refresh()
     }
     @objc private func toggleVoices() {

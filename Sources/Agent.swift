@@ -191,7 +191,11 @@ final class Agent {
         for drop in batch.dropped { log("spool: dropped \(drop.name) — \(drop.reason)") }
         // The phone keeps what it can show. Whether a turn is read, and what Away does
         // with it, is Playback's to decide and to log.
-        for item in batch.items { hud.playback.enqueue(item, onPhone: phone?.took(item) ?? false) }
+        for item in batch.items {
+            let onPhone = phone?.took(item) ?? false
+            guard hud.readTurns else { log("muted: \(item.source) not read"); continue }
+            hud.playback.enqueue(item, onPhone: onPhone)
+        }
     }
 
     // -- phone -------------------------------------------------------------

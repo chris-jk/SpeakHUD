@@ -33,6 +33,7 @@ cp hook/read-summary.py "$STAGE/Contents/Resources/read-summary.py"   # for the 
 cp hook/read-question.py "$STAGE/Contents/Resources/read-question.py" # same: the AskUserQuestion hook
 cp hook/read-codex.py "$STAGE/Contents/Resources/read-codex.py"
 cp hook/setup-codex.py "$STAGE/Contents/Resources/setup-codex.py"
+cp hook/speakhud-opencode.js "$STAGE/Contents/Resources/speakhud-opencode.js"
 mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in Sources/Phone.swift)
 cp phone/index.html phone/app.css phone/app.js phone/mic.js "$STAGE/Contents/Resources/phone/"
 

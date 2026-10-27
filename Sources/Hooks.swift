@@ -372,3 +372,35 @@ enum CodexHook {
         return "error: Codex setup needs Python 3.11 or later (brew install python)"
     }
 }
+
+/// OpenCode reads plugins from its plugin folder at start, so the switch is that one file:
+/// on = SpeakHUD's plugin copied in, off = removed. A running OpenCode keeps what it loaded.
+enum OpenCodeHook {
+    static var pluginPath: String {
+        let env = ProcessInfo.processInfo.environment
+        let dir = env["SPEAKHUD_OPENCODE_DIR"] ?? NSString(string: "~/.config/opencode").expandingTildeInPath
+        return dir + "/plugin/speakhud.js"
+    }
+    static var installed: Bool { FileManager.default.fileExists(atPath: pluginPath) }
+
+    static func install(from source: URL? = Bundle.main.url(forResource: "speakhud-opencode", withExtension: "js")) -> String {
+        guard let source = source, FileManager.default.isReadableFile(atPath: source.path) else {
+            return "error: no bundled speakhud-opencode.js (run this from SpeakHUD.app)"
+        }
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(atPath: (pluginPath as NSString).deletingLastPathComponent,
+                                   withIntermediateDirectories: true)
+            try? fm.removeItem(atPath: pluginPath)
+            try fm.copyItem(atPath: source.path, toPath: pluginPath)
+            return "installed"
+        } catch { return "error: \(error.localizedDescription)" }
+    }
+
+    static func remove() -> String {
+        do {
+            if installed { try FileManager.default.removeItem(atPath: pluginPath) }
+            return "removed"
+        } catch { return "error: \(error.localizedDescription)" }
+    }
+}
