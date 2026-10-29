@@ -23,6 +23,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     var awayItem: NSMenuItem!
     var pairItem: NSMenuItem!
     var phoneNote: NSMenuItem!
+    private var menu: NSMenu!
 
     init(_ agent: Agent) {
         self.agent = agent
@@ -134,8 +135,30 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(item("SpeakHUD on GitHub", #selector(openGitHub)))
         menu.addItem(item("Quit SpeakHUD", #selector(quit)))
+        self.menu = menu
         statusItem.menu = menu
+        if let btn = statusItem.button {
+            btn.target = self
+            btn.action = #selector(statusClicked)
+            btn.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
         refresh()
+    }
+
+    /// Away, the menu bar's phone is its own off switch: a click brings you back to the
+    /// Mac without opening the menu or the phone. Right-click or ⌥-click still opens it.
+    /// Only reached while Away: otherwise the item has its menu and AppKit opens that.
+    @objc private func statusClicked() {
+        let event = NSApp.currentEvent
+        let wantsMenu = event?.type == .rightMouseUp || event?.modifierFlags.contains(.option) == true
+        if !wantsMenu, let phone = agent.phone, phone.away {
+            phone.setAway(false)
+            refresh()
+            return
+        }
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = agent.phone?.away == true ? nil : menu
     }
 
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {
@@ -182,8 +205,12 @@ final class MenuController: NSObject, NSMenuDelegate {
                let phone = NSImage(systemSymbolName: "iphone.radiowaves.left.and.right",
                                    accessibilityDescription: "SpeakHUD (away: turns go to your phone)") {
                 btn.image = phone
+                btn.toolTip = "Away: turns go to your phone. Click to come back; right-click for the menu."
+                statusItem.menu = nil   // so a click reaches statusClicked
                 return
             }
+            btn.toolTip = nil
+            statusItem.menu = menu
             btn.image = NSImage(systemSymbolName: hidden ? "speaker.wave.2" : "speaker.wave.2.fill",
                                 accessibilityDescription: hidden ? "SpeakHUD (hidden)" : "SpeakHUD")
         }
