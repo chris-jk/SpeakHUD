@@ -22,7 +22,6 @@ Running tab. Current state at top, then next up, waiting-on, recently shipped. P
 - [ ] Read the agent log for the first live uses of 10-21's work: `trying again in` / `gave up` (push retry), `sound device changed`, `choice for` (a question answered by voice), and whether each terminal is heard in its own voice. Fix what shows up before adding more
 - [ ] The Blocking item: one live session per pane on the phone (decided, small, test-pinned)
 - [ ] The small review items (2) to (9), first under Next up, each with its test written first
-- [ ] Push main to GitHub (nothing waits on it)
 
 ## 🚨 Blocking
 - [ ] An old session's turn stays answerable in a reused pane: after `/clear` or a restart of claude in the same pane the phone shows two windows for it, and an answer typed under the old one is pasted into the new conversation; Resume also refuses the old session as already open. `PhoneDesk.took` removes only the same key or the pane's placeholder (checked 10-08 01:45 AM against 641bdfa by reading; two readers). A passing test expects two session keys kept ("one turn per terminal", tests/PhoneTests.swift:158-161), so whether two sessions may share a pane is Chris's call first. Report candidate 6. Not fixed. **Decided 10-08 by the dispatcher session, for Chris to overrule: a pane holds one live session, the newest.** Not built: it was to be a later agent, held when the model-lanes rule arrived that morning; it is a small test-pinned fix for the cheap worker.
