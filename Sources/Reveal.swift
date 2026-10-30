@@ -108,6 +108,14 @@ enum Reveal {
     }
 
     static func go(_ origin: Origin) -> Outcome {
+        if let session = origin.session, AgentLink.owns(session) {
+            if #available(macOS 14.0, *), let app = NSRunningApplication.runningApplications(withBundleIdentifier: AgentLink.bundleID).first {
+                NSApp.yieldActivation(to: app)
+            }
+            if let answer = AgentLink.call(["op": "reveal", "session": session]), answer["ok"] as? Bool == true {
+                return .pane(bounds(inReply: "ok " + (answer["text"] as? String ?? "")))
+            }
+        }
         if let (bundleID, source) = script(for: origin) {
             // `tell application` would launch a terminal that's been quit. Don't.
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {

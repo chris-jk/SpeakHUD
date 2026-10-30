@@ -124,8 +124,8 @@ final class Phone {
     func scan(now: Date = Date()) {
         guard now.timeIntervalSince(scanned) >= Self.scanEvery else { return }
         scanned = now
-        guard let open = Reply.survey(via: terminal) else { return }   // iTerm2 not running, or not saying: nothing learned
-        for key in desk.met(open, now: now) where away {
+        guard let open = Reply.surveyAll(via: terminal) else { return }   // no terminal running, or not saying: nothing learned
+        for key in desk.met(open.panes, iTermSaid: open.iTermSaid, now: now) where away {
             guard let turn = desk.turn(key), let box = turn.box, firstAsk(key, now) else { continue }
             push(title: "\(turn.name) is asking", message: box.ask, key: key, name: turn.name)
         }

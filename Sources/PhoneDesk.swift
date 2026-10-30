@@ -207,9 +207,10 @@ struct PhoneDesk {
     /// window; and each is marked with whether it's working and what box, if any, its
     /// screen is showing. Returns the keys whose box has just come up.
     @discardableResult
-    mutating func met(_ open: [Reply.Pane], now: Date = Date()) -> [String] {
+    mutating func met(_ open: [Reply.Pane], iTermSaid: Bool = true, now: Date = Date()) -> [String] {
         let ids = Set(open.map { $0.session })
-        turns.removeAll { $0.origin?.session.map { !ids.contains($0) } ?? false }
+        // iTerm2 saying nothing isn't its panes closing.
+        turns.removeAll { $0.origin?.session.map { !ids.contains($0) && (iTermSaid || AgentLink.owns($0)) } ?? false }
         var asking: [String] = []
         for pane in open {
             let showing = pane.showing
@@ -222,7 +223,7 @@ struct PhoneDesk {
                 if let prompt = showing.prompt, let status = prompt.status { (turns[i].status, turns[i].context) = (status, prompt.context) }
             } else if showing.isClaude, turns.count < Self.keep {
                 var t = Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
-                             origin: Origin(term: "iTerm.app", session: pane.session))
+                             origin: Origin(term: AgentLink.owns(pane.session) ? AgentLink.term : "iTerm.app", session: pane.session))
                 (t.box, t.busy, t.doing) = (box, busy, doing)
                 if let prompt = showing.prompt, let status = prompt.status { (t.status, t.context) = (status, prompt.context) }
                 if box != nil { asking.append(t.key) }

@@ -54,9 +54,11 @@ enum Spool {
         case tooOld           // waited longer than maxAge
         case staleTmp         // a hook died between writing and renaming
         case unsupportedVersion  // `v` present but not the version this agent reads
+        case saysNothing      // the whole reply is "Nothing"
 
         var description: String {
             switch self {
+            case .saysNothing: return "reply is only \"Nothing\""
             case .unsupportedVersion: return "unsupported schema version (this agent reads v\(Spool.version)) — update SpeakHUD"
             case .malformed: return "malformed JSON"
             case .emptyText: return "no text"
@@ -123,6 +125,7 @@ enum Spool {
             guard let text = obj["text"] as? String,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { drop(.emptyText); continue }
+            guard !saysNothing(text) else { drop(.saysNothing); continue }
             let created: Date
             if let raw = obj["created"] {
                 // JSON booleans also bridge to NSNumber; they aren't timestamps.
@@ -175,6 +178,12 @@ enum Spool {
         if !fm.fileExists(atPath: dir) { ensure(dir) }
         if !fm.fileExists(atPath: path), !fm.createFile(atPath: path, contents: nil) { return false }
         return (try? fm.setAttributes([.modificationDate: now], ofItemAtPath: path)) != nil
+    }
+
+    /// A turn whose whole reply is "Nothing": an answer to a hook's check, not to Chris.
+    static func saysNothing(_ text: String) -> Bool {
+        text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            .lowercased() == "nothing"
     }
 
     /// This item will never be spoken again — finished, skipped, stopped, or superseded.

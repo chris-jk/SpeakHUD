@@ -23,11 +23,12 @@ enum Reply {
     static let looks = 8
     static let lookGap: TimeInterval = 0.1
 
-    /// Whether an item from `origin` can be answered: an iTerm2 pane, by its id.
+    /// Whether an item from `origin` can be answered: an iTerm2 pane or an Agent Terminal
+    /// session, by its id.
     static func canReach(_ origin: Origin?) -> Bool {
         guard let o = origin, o.session != nil else { return false }
         let term = o.term ?? ""
-        return term == "iTerm.app" || term.isEmpty
+        return term == "iTerm.app" || term == AgentLink.term || term.isEmpty
     }
 
     /// What was heard as one line a terminal can take: no line breaks or control
@@ -361,6 +362,35 @@ enum Reply {
     struct Terminal {
         var ask: (String) -> Answer = Reply.ask
         var wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+        /// Agent Terminal, for its own sessions (`AgentLink`).
+        #if TESTING
+        var link: (([String: Any]) -> [String: Any]?)? = nil
+        #else
+        var link: (([String: Any]) -> [String: Any]?)? = AgentLink.call
+        #endif
+    }
+
+    /// One thing to do to a pane, said both ways: the AppleScript for iTerm2 and the
+    /// request for Agent Terminal. The session's id decides which goes.
+    struct Op {
+        var session: String
+        var source: String
+        var link: [String: Any]
+
+        static func screen(_ session: String) -> Op {
+            Op(session: session, source: screenScript(session), link: ["op": "screen"])
+        }
+        static func write(_ session: String, _ text: String, _ source: String) -> Op {
+            Op(session: session, source: source, link: ["op": "write", "text": text])
+        }
+    }
+
+    private static func tell(_ terminal: Terminal, _ op: Op) -> Result<String, Outcome> {
+        guard AgentLink.owns(op.session) else { return tell(terminal, op.source) }
+        var request = op.link
+        request["session"] = op.session
+        guard let answer = terminal.link?(request), answer["ok"] as? Bool == true else { return .failure(.gone) }
+        return .success(answer["text"] as? String ?? "")
     }
 
     /// Run one script: what it gave back after its "ok", or why there's nothing. The one
@@ -376,14 +406,14 @@ enum Reply {
     }
 
     /// A script that writes to a pane: nil once it has, or why it didn't.
-    private static func wrote(_ terminal: Terminal, _ source: String) -> Outcome? {
-        if case .failure(let why) = tell(terminal, source) { return why }
+    private static func wrote(_ terminal: Terminal, _ op: Op) -> Outcome? {
+        if case .failure(let why) = tell(terminal, op) { return why }
         return nil
     }
 
     /// One look at the pane `session`: what the foot of its screen is showing.
     private static func look(_ session: String, _ terminal: Terminal) -> Result<Showing, Outcome> {
-        tell(terminal, screenScript(session)).map { showing(foot($0)) }
+        tell(terminal, .screen(session)).map { showing(foot($0)) }
     }
 
     /// An AppleScript that finds the pane `session` and does `action` with it as `s`.
@@ -446,16 +476,17 @@ enum Reply {
     /// the pane and knows the key belongs there: `press`, `pick`, `close`.
     private static func key(_ name: String, _ session: String, _ terminal: Terminal) -> Outcome {
         guard let codes = keys[name] else { return .failed("no such key") }
-        return wrote(terminal, keyScript(session, codes)) ?? .sent
+        let text = String(String.UnicodeScalarView(codes.compactMap { Unicode.Scalar($0) }))
+        return wrote(terminal, .write(session, text, keyScript(session, codes))) ?? .sent
     }
 
     /// `line` typed into the pane as keys (not a paste: a question's own text field takes
     /// no paste), with no Return. For the same callers as `key`.
     private static func type(_ line: String, _ session: String, _ terminal: Terminal) -> Outcome {
-        wrote(terminal, script(session, """
+        wrote(terminal, .write(session, line, script(session, """
         tell s to write text \(LoadCommand.literal(line)) newline no
                             return "ok"
-        """)) ?? .sent
+        """))) ?? .sent
     }
 
     /// What a page had drawn where a key was tapped. Pressing asks for it: a key goes
@@ -484,7 +515,7 @@ enum Reply {
     static func press(_ key: String, on tapped: Tapped, in origin: Origin, via terminal: Terminal = Terminal()) -> Outcome {
         guard canReach(origin), let session = origin.session else { return .gone }
         guard keys[key] != nil else { return .failed("no such key") }
-        switch tell(terminal, screenScript(session)).map({ foot($0) }) {
+        switch tell(terminal, .screen(session)).map({ foot($0) }) {
         case .failure(let stop): return stop
         case .success(let screen): return refusal(of: key, on: tapped, screen: screen) ?? self.key(key, session, terminal)
         }
@@ -559,7 +590,7 @@ enum Reply {
     /// The foot of the pane's screen as text, for the phone to show. Nil when it's gone.
     static func screen(of origin: Origin, lines: Int = 40, via terminal: Terminal = Terminal()) -> String? {
         guard canReach(origin), let session = origin.session,
-              case .success(let contents) = tell(terminal, screenScript(session)) else { return nil }
+              case .success(let contents) = tell(terminal, .screen(session)) else { return nil }
         return foot(contents, lines: lines)
     }
 
@@ -600,6 +631,18 @@ enum Reply {
         }
     }
 
+    /// What `survey` found plus Agent Terminal's sessions, and whether iTerm2 said at all:
+    /// if it didn't, nothing is known about its panes. Nil when neither said.
+    static func surveyAll(via terminal: Terminal = Terminal()) -> (panes: [Pane], iTermSaid: Bool)? {
+        let iTerm = survey(via: terminal)
+        let own = (terminal.link?(["op": "survey"])?["panes"] as? [[String: String]])?.compactMap { pane -> Pane? in
+            guard let id = pane["session"], AgentLink.owns(id) else { return nil }
+            return Pane(session: id, name: pane["name"] ?? "", screen: foot(pane["screen"] ?? ""))
+        }
+        if iTerm == nil && own == nil { return nil }
+        return ((iTerm ?? []) + (own ?? []), iTerm != nil)
+    }
+
     /// The last `lines` lines of a screen, without the blank ones under them.
     static func foot(_ contents: String, lines: Int = 40) -> String {
         let all = contents.components(separatedBy: .newlines)
@@ -618,10 +661,11 @@ enum Reply {
             _ = key("enter", session, terminal)
             terminal.wait(1.5)
         }
-        switch wrote(terminal, script(session, """
+        let closing = Op(session: session, source: script(session, """
         tell s to close
                             return "ok"
-        """)) {
+        """), link: ["op": "close"])
+        switch wrote(terminal, closing) {
         case nil, .gone?: return .sent   // gone: it had already closed when Claude exited. Closed all the same.
         case let stop?: return stop
         }
@@ -694,14 +738,15 @@ enum Reply {
         func holdsIt(_ showing: Showing) -> Bool {
             showing.prompt.map { shows(line, inPrompt: $0.text, pictures: pictures, markerIsOurs: !foldedBefore) } ?? false
         }
-        if let stop = wrote(terminal, pasteScript(session, line)) { return stop }
+        let paste = "\u{1B}[200~" + line + "\u{1B}[201~"
+        if let stop = wrote(terminal, .write(session, paste, pasteScript(session, line))) { return stop }
         for _ in 0..<looks {
             terminal.wait(lookGap)
             switch look(session, terminal) {
             case .failure(let stop): return stop
             case .success(let now): guard holdsIt(now) else { continue }
             }
-            if let stop = wrote(terminal, returnScript(session)) { return stop }
+            if let stop = wrote(terminal, .write(session, "\r", returnScript(session))) { return stop }
             // Sent means gone from the box. Still sitting there, Return didn't take.
             for _ in 0..<looks {
                 terminal.wait(lookGap)
