@@ -35,7 +35,7 @@ cp hook/read-codex.py "$STAGE/Contents/Resources/read-codex.py"
 cp hook/setup-codex.py "$STAGE/Contents/Resources/setup-codex.py"
 cp hook/speakhud-opencode.js "$STAGE/Contents/Resources/speakhud-opencode.js"
 mkdir -p "$STAGE/Contents/Resources/phone"                            # the phone page (Phone in Sources/Phone.swift)
-cp phone/index.html phone/app.css phone/app.js phone/mic.js "$STAGE/Contents/Resources/phone/"
+cp phone/index.html phone/app.css phone/app.js phone/mic.js phone/icon.png "$STAGE/Contents/Resources/phone/"
 
 echo "== Info.plist =="
 cat > "$STAGE/Contents/Info.plist" <<PLIST

@@ -66,6 +66,11 @@ let agentLinkSuite = Suite("AgentLink") { t in
     desk.met([], iTermSaid: false)
     t.expectEqual(desk.turns.count, 0, "a session that left the list has closed")
 
+    let unpaired = Phone(config: PhoneConfig(token: "not-this-one"), defaults: UserDefaults(suiteName: "agent-link-tests")!)
+    unpaired.asset = { FileManager.default.contents(atPath: "phone/" + $0) }
+    t.expectEqual(unpaired.respond(to: HTTP.Request(path: "/icon.png")).status, 200, "the logo needs no pairing")
+    t.expectEqual(unpaired.respond(to: HTTP.Request(path: "/app.js")).status == 200, false, "the page's other files do")
+
     for text in ["Nothing.", "nothing", "  Nothing!\n", "**Nothing.**"] {
         t.expect(Spool.saysNothing(text), "\(text) is not read")
     }

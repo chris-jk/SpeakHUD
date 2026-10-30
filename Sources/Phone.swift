@@ -17,7 +17,8 @@ final class Phone {
     static let assets = ["/": ("index.html", "text/html; charset=utf-8"),
                          "/app.css": ("app.css", "text/css; charset=utf-8"),
                          "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                         "/mic.js": ("mic.js", "text/javascript; charset=utf-8")]
+                         "/mic.js": ("mic.js", "text/javascript; charset=utf-8"),
+                         "/icon.png": ("icon.png", "image/png")]
 
     /// How often, at most, iTerm2 is asked what its panes are showing: while a page is
     /// polling, or while you're away and a box coming up needs a push.
@@ -436,6 +437,10 @@ final class Phone {
             return HTTP.Response(status: 303, type: "text/plain; charset=utf-8", headers: [
                 ("Location", "/"),
                 ("Set-Cookie", "\(Self.cookie)=\(config.token); Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax\(secure)")])
+        }
+        // Asked for by Add to Home Screen, which may not hold the page's cookie. Only a logo.
+        if r.method == "GET", r.path == "/icon.png", let data = asset("icon.png") {
+            return HTTP.Response(type: "image/png", body: data)
         }
         guard paired(r) else {
             return r.path.hasPrefix("/api/")
