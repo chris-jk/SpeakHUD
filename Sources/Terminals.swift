@@ -95,10 +95,20 @@ enum OldSessions {
 
     /// The AppleScript that opens a new iTerm2 window in the session's folder and resumes
     /// it there. Only an id that is one and a folder that's a plain path are ever put in.
-    static func script(_ session: Session) -> String? {
+    static func script(_ session: Session) -> String? { line(session).map(window(typing:)) }
+
+    /// What's typed to resume it.
+    static func line(_ session: Session) -> String? {
         guard isID(session.id), LoadCommand.isLoadable(session.cwd) else { return nil }
-        return window(typing: "cd " + LoadCommand.shellQuote(session.cwd) + " && claude --resume " + session.id)
+        return "cd " + LoadCommand.shellQuote(session.cwd) + " && claude --resume " + session.id
     }
+
+    /// Agent Terminal, when it's open, takes a new terminal before iTerm2 does.
+    #if TESTING
+    nonisolated(unsafe) static var agentTerminal: (String, String) -> Bool = { _, _ in false }
+    #else
+    nonisolated(unsafe) static var agentTerminal: (String, String) -> Bool = { AgentLink.open(folder: $0, line: $1) }
+    #endif
 
     /// The AppleScript that opens a new iTerm2 window and runs `line` in it, which must
     /// already be isLoadable.
@@ -114,13 +124,15 @@ enum OldSessions {
 
     /// Open it. `run` is what executes the script; tests keep it instead.
     static func resume(_ session: Session, run: (String) -> Reply.Answer = OldSessions.run) -> Reply.Outcome {
-        open(script(session), in: session.cwd, refused: "that isn't a session that can be resumed", run: run)
+        open(script(session), typing: line(session), in: session.cwd, refused: "that isn't a session that can be resumed", run: run)
     }
 
     /// Run `source`, a window's script, if `folder` is still there. Nil `source`: refused.
-    static func open(_ source: String?, in folder: String, refused: String, run: (String) -> Reply.Answer) -> Reply.Outcome {
+    static func open(_ source: String?, typing line: String? = nil, in folder: String, refused: String,
+                     run: (String) -> Reply.Answer) -> Reply.Outcome {
         guard NewTerminal.isFolder(folder) else { return .failed("its folder isn't there any more") }
         guard let source = source else { return .failed(refused) }
+        if let line = line, agentTerminal(folder, line) { return .sent }
         let a = run(source)
         if let code = a.errorCode {
             return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")
@@ -221,7 +233,8 @@ enum NewTerminal {
     }
 
     static func start(folder: String, message: String?, run: (String) -> Reply.Answer = OldSessions.run) -> Reply.Outcome {
-        OldSessions.open(line(folder: folder, message: message).map(OldSessions.window(typing:)), in: folder,
+        OldSessions.open(line(folder: folder, message: message).map(OldSessions.window(typing:)),
+                         typing: line(folder: folder, message: message), in: folder,
                          refused: "that message is too long to type into a terminal", run: run)
     }
 }

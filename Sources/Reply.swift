@@ -599,6 +599,7 @@ enum Reply {
         var session: String
         var name: String
         var screen: String
+        var color: String? = nil   // Agent Terminal's project color, "#rrggbb"
 
         var showing: Showing { Reply.showing(screen, title: name) }
     }
@@ -637,7 +638,7 @@ enum Reply {
         let iTerm = survey(via: terminal)
         let own = (terminal.link?(["op": "survey"])?["panes"] as? [[String: String]])?.compactMap { pane -> Pane? in
             guard let id = pane["session"], AgentLink.owns(id) else { return nil }
-            return Pane(session: id, name: pane["name"] ?? "", screen: foot(pane["screen"] ?? ""))
+            return Pane(session: id, name: pane["name"] ?? "", screen: foot(pane["screen"] ?? ""), color: pane["color"])
         }
         if iTerm == nil && own == nil { return nil }
         return ((iTerm ?? []) + (own ?? []), iTerm != nil)

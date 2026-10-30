@@ -12,6 +12,12 @@ enum AgentLink {
 
     static func owns(_ session: String) -> Bool { session.uppercased().hasPrefix(prefix) }
 
+    /// A new session in `folder` with `line` typed into it. False when the app isn't open:
+    /// then the caller opens iTerm2.
+    static func open(folder: String, line: String) -> Bool {
+        call(["op": "new", "folder": folder, "line": line])?["ok"] as? Bool == true
+    }
+
     /// One request and its answer. Nil when the app isn't there or doesn't answer in time.
     static func call(_ request: [String: Any]) -> [String: Any]? {
         guard var body = try? JSONSerialization.data(withJSONObject: request) else { return nil }

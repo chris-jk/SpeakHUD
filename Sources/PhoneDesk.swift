@@ -218,12 +218,14 @@ struct PhoneDesk {
             let doing = busy ? Reply.doing(pane.screen) : nil
             if let i = turns.firstIndex(where: { $0.origin?.session == pane.session }) {
                 if turns[i].key.hasPrefix(Self.paneKey) { turns[i].name = Reply.paneName(pane.name) }
+                if let color = pane.color { turns[i].origin?.color = color }
                 if let box = box, turns[i].box?.ask != box.ask { asking.append(turns[i].key) }
                 (turns[i].box, turns[i].busy, turns[i].doing) = (box, busy, doing)
                 if let prompt = showing.prompt, let status = prompt.status { (turns[i].status, turns[i].context) = (status, prompt.context) }
             } else if showing.isClaude, turns.count < Self.keep {
                 var t = Turn(key: Self.paneKey + pane.session, name: Reply.paneName(pane.name), text: "", at: now,
-                             origin: Origin(term: AgentLink.owns(pane.session) ? AgentLink.term : "iTerm.app", session: pane.session))
+                             origin: Origin(term: AgentLink.owns(pane.session) ? AgentLink.term : "iTerm.app", session: pane.session,
+                                            color: pane.color))
                 (t.box, t.busy, t.doing) = (box, busy, doing)
                 if let prompt = showing.prompt, let status = prompt.status { (t.status, t.context) = (status, prompt.context) }
                 if box != nil { asking.append(t.key) }

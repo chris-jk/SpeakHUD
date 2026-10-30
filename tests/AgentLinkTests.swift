@@ -66,6 +66,20 @@ let agentLinkSuite = Suite("AgentLink") { t in
     desk.met([], iTermSaid: false)
     t.expectEqual(desk.turns.count, 0, "a session that left the list has closed")
 
+    var colored = PhoneDesk()
+    colored.met([Reply.Pane(session: session.id, name: "✳ Topic", screen: session.screen, color: "#4d80e6")])
+    t.expectEqual(colored.turns.first?.origin?.color, "#4d80e6", "a session's bar takes its project color")
+
+    var opened: [String] = [], iTerm = 0
+    OldSessions.agentTerminal = { folder, line in opened.append(folder + " | " + line); return true }
+    let here = NSTemporaryDirectory()
+    let started = NewTerminal.start(folder: here, message: "hello there", run: { _ in iTerm += 1; return Reply.Answer(reply: "ok") })
+    t.expectEqual(started, .sent, "Start goes to Agent Terminal while it's open")
+    t.expect(iTerm == 0 && opened.first?.contains("claude 'hello there'") == true, "with the same line, and no iTerm2 window")
+    OldSessions.agentTerminal = { _, _ in false }
+    _ = NewTerminal.start(folder: here, message: nil, run: { _ in iTerm += 1; return Reply.Answer(reply: "ok") })
+    t.expectEqual(iTerm, 1, "with it closed, iTerm2 opens")
+
     let unpaired = Phone(config: PhoneConfig(token: "not-this-one"), defaults: UserDefaults(suiteName: "agent-link-tests")!)
     unpaired.asset = { FileManager.default.contents(atPath: "phone/" + $0) }
     t.expectEqual(unpaired.respond(to: HTTP.Request(path: "/icon.png")).status, 200, "the logo needs no pairing")
