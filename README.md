@@ -12,7 +12,9 @@ a standalone app.
 
 ## Features
 
-- **Floating HUD** with karaoke-style word highlighting that follows along.
+- **Floating HUD** with karaoke-style word highlighting that follows along. Click another
+  window and the HUD drops just behind it, so you can see your work; the next thing it
+  reads brings it back to the front, and so does clicking any part of it still showing.
 - **One speech queue.** Run Claude in four terminals and they take turns instead of
   cutting each other off — you only have one pair of ears.
 - **Codex CLI support.** Enable **Read Codex CLI Responses Aloud** in the menu bar.

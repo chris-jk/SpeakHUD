@@ -214,12 +214,81 @@ final class Spotlight {
 final class HUDPanel: NSPanel {
     override var canBecomeKey: Bool { true }   // …or it never sees a keystroke at all
 
+    /// One entry of the window server's list, which runs front to back.
+    struct ScreenWindow {
+        let id: Int
+        let pid: pid_t
+        let layer: Int
+        let alpha: Double
+        let bounds: CGRect
+    }
+
+    /// The ordinary window a click landed on. Layer 0 is where app windows live: above
+    /// it are overlays that let clicks through, below it is the desktop, which is no
+    /// window to go behind. `point` counts down from the top of the main screen.
+    static func clickedWindow(at point: CGPoint, in windows: [ScreenWindow], own: pid_t) -> Int? {
+        windows.first { $0.pid != own && $0.layer == 0 && $0.alpha > 0 && $0.bounds.contains(point) }?.id
+    }
+
+    private static func screenWindows() -> [ScreenWindow] {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        return (list as? [[String: Any]] ?? []).compactMap { w in
+            guard let id = w[kCGWindowNumber as String] as? Int,
+                  let pid = w[kCGWindowOwnerPID as String] as? Int,
+                  let layer = w[kCGWindowLayer as String] as? Int,
+                  let box = w[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: box) else { return nil }
+            return ScreenWindow(id: id, pid: pid_t(pid), layer: layer,
+                                alpha: w[kCGWindowAlpha as String] as? Double ?? 1, bounds: bounds)
+        }
+    }
+
+    /// Sent behind a window by a click, until something brings it forward.
+    var isBehind: Bool { level != .floating }
+
+    /// Over every app window: where it sits to be read.
+    func comeForward() {
+        level = .floating
+        orderFrontRegardless()
+    }
+
+    /// Just under one window, so the work in it shows and anything further back stays covered.
+    func goBehind(window: Int) {
+        level = .normal
+        order(.below, relativeTo: window)
+    }
+
+    private var clickWatch: Any?
+
+    /// A global monitor only sees clicks meant for other apps, so the HUD's own never get here.
+    func watchClicks() {
+        guard clickWatch == nil else { return }
+        clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.clickedElsewhere()
+        }
+    }
+
+    private func clickedElsewhere() {
+        let point = NSEvent.mouseLocation
+        // visibleFrame leaves out the menu bar and the Dock, which aren't windows being worked in.
+        guard isVisible, !isBehind, NSScreen.screens.contains(where: { $0.visibleFrame.contains(point) }),
+              let top = NSScreen.screens.first?.frame.height,
+              let window = Self.clickedWindow(at: CGPoint(x: point.x, y: top - point.y), in: Self.screenWindows(),
+                                              own: ProcessInfo.processInfo.processIdentifier)
+        else { return }
+        goBehind(window: window)
+        onWentBehind()
+    }
+
+    var onWentBehind: () -> Void = {}
+
     /// The panel is deliberately non-activating, so it can appear mid-sentence without
     /// stealing focus from whatever you're typing in. The cost is that an inactive app
     /// receives no keyboard input at all — which is why selecting text and pressing ⌘C
     /// did nothing. Clicking the HUD is an unambiguous "I want to use this", so take
     /// focus at that point, and only then.
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, isBehind { comeForward() }   // the part still showing was clicked
         // The pill sits under the transparent title bar, which takes clicks there as
         // the start of a drag, and the first click on an inactive panel only focuses
         // it. Either way the pill itself would never see the click, so catch it here.

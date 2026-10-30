@@ -168,7 +168,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         playback.onListen = { [weak self] _ in
             guard let self = self else { return }
             self.closeTimer?.invalidate()
-            if !self.isMinimized { self.panel?.orderFrontRegardless() }
+            // Listening isn't speaking: a HUD clicked out of the way stays there.
+            if !self.isMinimized, self.panel?.isBehind == false { self.panel?.orderFrontRegardless() }
             NSSound(named: "Tink")?.play()   // your turn
         }
         playback.onReplied = { outcome in
@@ -238,7 +239,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         switch outcome {
         case .pane(let bounds?):
             spotlight.show(around: Spotlight.flipped(bounds), color: sourceBadge.accent)
-            if panel.isVisible { panel.orderFrontRegardless() }   // the HUD stays lit, above the dimming
+            if panel.isVisible { panel.comeForward() }   // the HUD stays lit, above the dimming
         case .pane, .app: break
         default: NSSound.beep()
         }
@@ -292,7 +293,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         sourceBadge.solid = frame != nil
         sourceBadge.isLink = item.origin != nil
         sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
-        if !isMinimized { panel.orderFrontRegardless() }
+        if !isMinimized { panel.comeForward() }
         onVisibilityChange()
     }
 
@@ -381,7 +382,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         isMinimized = false
         guard panel != nil else { onVisibilityChange(); return }
         closeTimer?.invalidate()
-        panel.orderFrontRegardless()
+        panel.comeForward()
         log("hud shown")
         if !playback.state.isActive { scheduleAutoClose(after: idleHideDelay) }
         onVisibilityChange()
@@ -590,6 +591,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         panel.minSize = NSSize(width: w, height: 260)   // narrower than this clips the button row
         panel.standardWindowButton(.zoomButton)?.isHidden = true   // zoom is refused; don't advertise it
         panel.delegate = self
+        panel.watchClicks()
+        panel.onWentBehind = { [weak self] in self?.log("hud behind a clicked window") }
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
 
