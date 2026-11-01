@@ -392,7 +392,26 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// question to toggle on — not whether the user pressed Hide.
     var isPanelVisible: Bool { panel?.isVisible == true }
 
-    @objc func toggleMinimized() { isPanelVisible ? minimize() : restore() }
+    /// Asked for from the menu bar or the hotkey: a HUD that's up belongs in front of
+    /// everything, wherever a click sent it. One put away with Hide stays away.
+    func bringForward() {
+        guard Self.shouldComeForward(minimized: isMinimized, visible: isPanelVisible,
+                                     active: playback.state.isActive) else { return }
+        panel?.comeForward()
+        lastInteraction = Date()   // looking at it: the idle close counts from here
+        onVisibilityChange()
+    }
+
+    /// Up, or supposed to be: on screen, or with something being read or waiting.
+    static func shouldComeForward(minimized: Bool, visible: Bool, active: Bool) -> Bool {
+        !minimized && (visible || active)
+    }
+
+    /// A HUD sitting behind a window comes forward; only one already in front gets hidden.
+    @objc func toggleMinimized() {
+        if panel?.isBehind == true, isPanelVisible { bringForward(); return }
+        isPanelVisible ? minimize() : restore()
+    }
 
     /// Lets the menu bar mirror whether the panel is currently up.
     var onVisibilityChange: () -> Void = {}

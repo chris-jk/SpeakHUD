@@ -153,6 +153,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         let wantsMenu = event?.type == .rightMouseUp || event?.modifierFlags.contains(.option) == true
         if !wantsMenu, let phone = agent.phone, phone.away {
             phone.setAway(false)
+            agent.hud.bringForward()
             refresh()
             return
         }
@@ -168,6 +169,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) { refresh() }
+
+    /// Clicking the icon also fetches a HUD lost behind a window, with the menu open over it.
+    func menuWillOpen(_ menu: NSMenu) { agent.hud.bringForward() }
 
     private func refresh() {
         refreshVisibility()
