@@ -27,7 +27,14 @@ import Foundation
 //            "choice" for a question box's options, answered by picking one, with
 //   choices  object: {asked, options: [label]}, the question and its choices in order.
 //            Anything else, or missing, is an item nobody can answer.
+//   reread   string, optional: a terminal session id. This file is then a request, from
+//            Agent Terminal's Reread button, and no other field but `v` counts: read that
+//            session's last turn again. An older agent drops it as having no text.
 // Every dropped item comes back as a `Drop` with its reason, for the agent to log.
+//
+// The last turn of each terminal session stays in `last/<session>.json`, beside the queue,
+// a copy of the file as it arrived. Agent Terminal looks there to say whether a Reread
+// can work; `lastKeep` after the session's last turn it goes.
 //
 // Liveness: the agent touches `heartbeatName` in the spool dir at startup and every
 // `heartbeatInterval`; the hook queues only while that mtime is fresh, and otherwise
@@ -38,6 +45,7 @@ enum Spool {
     /// Deliberately not .json/.tmp/.taken, so drain and recover never touch it.
     static let heartbeatName = "agent.heartbeat"
     static let heartbeatInterval: TimeInterval = 3
+    static let lastKeep: TimeInterval = 7 * 86_400
     /// Points both sides at another queue — the hook reads the same variable. For tests;
     /// set it for one side only and the hook writes where nobody reads.
     static let dirEnv = "SPEAKHUD_QUEUE_DIR"
@@ -55,10 +63,12 @@ enum Spool {
         case staleTmp         // a hook died between writing and renaming
         case unsupportedVersion  // `v` present but not the version this agent reads
         case saysNothing      // the whole reply is "Nothing"
+        case nothingToReread  // a reread for a session with no turn kept
 
         var description: String {
             switch self {
             case .saysNothing: return "reply is only \"Nothing\""
+            case .nothingToReread: return "no turn kept to read again"
             case .unsupportedVersion: return "unsupported schema version (this agent reads v\(Spool.version)) — update SpeakHUD"
             case .malformed: return "malformed JSON"
             case .emptyText: return "no text"
@@ -69,7 +79,11 @@ enum Spool {
         }
     }
     struct Drop: Equatable { let name: String; let reason: DropReason }
-    struct Batch { var items: [SpeechItem] = []; var dropped: [Drop] = [] }
+    struct Batch {
+        var items: [SpeechItem] = []
+        var dropped: [Drop] = []
+        var rereads: [SpeechItem] = []  // asked for again: the kept turn, with no spool file
+    }
 
     static func ensure(_ dir: String = Spool.dir) {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -122,6 +136,13 @@ enum Spool {
                       n.doubleValue == Double(version)
                 else { drop(.unsupportedVersion); continue }
             }
+            if let session = obj["reread"] as? String {
+                guard let turn = lastTurn(session: session, queue: dir, now: now)
+                else { drop(.nothingToReread); continue }
+                done(taken)
+                batch.rereads.append(turn)
+                continue
+            }
             guard let text = obj["text"] as? String,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { drop(.emptyText); continue }
@@ -138,22 +159,62 @@ enum Spool {
                 created = mtime(taken) ?? now
             }
             guard now.timeIntervalSince(created) < maxAge else { drop(.tooOld); continue }
-            let source = obj["source"] as? String ?? ""
-            let key = obj["key"] as? String ?? ""
-            batch.items.append(SpeechItem(text: text,
-                                          source: source.isEmpty ? "Claude Code" : source,
-                                          key: key.isEmpty ? stem : key,
-                                          created: created,
-                                          file: taken,
-                                          origin: Origin(json: obj["origin"]),
-                                          links: TextLink.parse(obj["links"], in: text),
-                                          cwd: TextLink.absolutePath(obj["cwd"]),
-                                          blocks: CodeBlock.parse(obj["blocks"], in: text),
-                                          answerable: obj["reply"] as? String == "prompt",
-                                          choices: obj["reply"] as? String == "choice" ? choices(obj["choices"]) : nil,
-                                          media: PhoneMedia.parse(obj["media"])))
+            let item = speechItem(obj, text: text, stem: stem, created: created, file: taken)
+            batch.items.append(item)
+            if let session = item.origin?.session { keepLast(data, session: session, queue: dir, now: now) }
         }
         return batch
+    }
+
+    private static func speechItem(_ obj: [String: Any], text: String, stem: String, created: Date,
+                                    file: String?) -> SpeechItem {
+        let source = obj["source"] as? String ?? ""
+        let key = obj["key"] as? String ?? ""
+        return SpeechItem(text: text,
+                          source: source.isEmpty ? "Claude Code" : source,
+                          key: key.isEmpty ? stem : key,
+                          created: created,
+                          file: file,
+                          origin: Origin(json: obj["origin"]),
+                          links: TextLink.parse(obj["links"], in: text),
+                          cwd: TextLink.absolutePath(obj["cwd"]),
+                          blocks: CodeBlock.parse(obj["blocks"], in: text),
+                          answerable: obj["reply"] as? String == "prompt",
+                          choices: obj["reply"] as? String == "choice" ? choices(obj["choices"]) : nil,
+                          media: PhoneMedia.parse(obj["media"]))
+    }
+
+    static func lastDir(queue dir: String) -> String {
+        (dir as NSString).deletingLastPathComponent + "/last"
+    }
+
+    /// Replaces the session's kept turn, and lets go of any past `lastKeep`.
+    static func keepLast(_ data: Data, session: String, queue dir: String, now: Date = Date()) {
+        let fm = FileManager.default
+        let last = lastDir(queue: dir)
+        try? fm.createDirectory(atPath: last, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        let path = last + "/" + session + ".json", tmp = path + ".tmp"
+        guard fm.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o600]) else { return }
+        rename(tmp, path)
+        for name in (try? fm.contentsOfDirectory(atPath: last)) ?? [] {
+            let old = last + "/" + name
+            if let m = (try? fm.attributesOfItem(atPath: old))?[.modificationDate] as? Date,
+               now.timeIntervalSince(m) >= lastKeep { try? fm.removeItem(atPath: old) }
+        }
+    }
+
+    /// The session's kept turn, to read again. Nobody can answer it: the terminal has
+    /// moved on since, and a question's box may be long gone.
+    static func lastTurn(session: String, queue dir: String, now: Date = Date()) -> SpeechItem? {
+        guard let safe = Origin(json: ["session": session])?.session,
+              let data = FileManager.default.contents(atPath: lastDir(queue: dir) + "/" + safe + ".json"),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = obj["text"] as? String else { return nil }
+        var item = speechItem(obj, text: text, stem: safe, created: now, file: nil)
+        item.answerable = false
+        item.choices = nil
+        return item
     }
 
     /// A question's choices as the hook sends them, or nil if they aren't: a question,

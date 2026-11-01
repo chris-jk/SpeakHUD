@@ -234,6 +234,47 @@ let spoolSuite = Suite("Spool") { t in
         try? fm.removeItem(atPath: q)
     }
 
+    // -- the last turn kept, and Reread ---------------------------------------------
+    do {
+        let root = tempDir("reread"), q = root + "/queue"
+        let now = Date()   // a kept turn's age comes from its real file time
+        try? fm.createDirectory(atPath: q, withIntermediateDirectories: true)
+        let a = "A6E47E00-1111-4222-8333-444455556666", b = "A6E47E00-1111-4222-8333-444455557777"
+        let at = now.timeIntervalSince1970
+        write(q, "1.json", ["v": 1, "text": "old", "key": "k", "created": at, "origin": ["session": a]])
+        write(q, "2.json", ["v": 1, "text": "Pick one", "source": "App", "key": "k", "created": at, "origin": ["session": a],
+                            "reply": "choice", "choices": ["asked": "Which?", "options": ["Yes"]]])
+        write(q, "3.json", ["v": 1, "text": "no terminal", "key": "x", "created": at])
+        _ = Spool.drain(in: q, now: now)
+        t.expectEqual(files(root + "/last"), [a + ".json"], "one file a session; a turn from no terminal keeps none")
+        let dirMode = (try? fm.attributesOfItem(atPath: root + "/last"))?[.posixPermissions] as? Int
+        let fileMode = (try? fm.attributesOfItem(atPath: root + "/last/" + a + ".json"))?[.posixPermissions] as? Int
+        t.expectEqual(dirMode, 0o700, "the folder is private: it holds what was said")
+        t.expectEqual(fileMode, 0o600, "and so is the file")
+
+        write(q, "4.json", ["v": 1, "reread": a])
+        write(q, "5.json", ["v": 1, "reread": b])
+        write(q, "6.json", ["v": 1, "reread": "../../secrets"])
+        let batch = Spool.drain(in: q, now: now)
+        t.expectEqual(batch.rereads.map(\.text), ["Pick one"], "a reread brings back the newest turn kept")
+        t.expectEqual(batch.rereads.first?.key, "k", "under its session's key")
+        t.expect(batch.rereads.first?.file == nil, "with no spool file to let go of")
+        t.expect(batch.rereads.first?.choices == nil, "its question box may be gone: nobody answers a reread")
+        t.expectEqual(batch.items.count, 0, "a reread is not a turn")
+        t.expectEqual(batch.dropped, [Spool.Drop(name: "5.json", reason: .nothingToReread),
+                                      Spool.Drop(name: "6.json", reason: .nothingToReread)],
+                      "a session with nothing kept, or a name that is no session id, is dropped with a reason")
+        t.expectEqual(files(q).filter { !$0.hasSuffix(".taken") }, [], "every request is let go of; turns wait to be spoken")
+        t.expect(!files(q).contains("4.taken"), "the one that worked too")
+
+        write(q, "7.json", ["v": 1, "text": "new", "key": "n", "created": at, "origin": ["session": b]])
+        try? fm.setAttributes([.modificationDate: now.addingTimeInterval(-Spool.lastKeep - 1)],
+                              ofItemAtPath: root + "/last/" + a + ".json")
+        _ = Spool.drain(in: q, now: now)
+        t.expectEqual(files(root + "/last"), [b + ".json"], "a session's turn goes a week after its last")
+        try? fm.removeItem(atPath: root)
+    }
+
     // -- abandoned .tmp files -----------------------------------------------------
     do {
         let q = tempDir("tmp")

@@ -196,6 +196,8 @@ final class Agent {
             guard hud.readTurns else { log("muted: \(item.source) not read"); continue }
             hud.playback.enqueue(item, onPhone: onPhone)
         }
+        // Asked for by hand, so it sounds with Read Responses Aloud off, as a hotkey read does.
+        for item in batch.rereads { hud.playback.reread(item) }
     }
 
     // -- phone -------------------------------------------------------------

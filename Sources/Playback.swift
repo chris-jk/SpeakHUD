@@ -196,6 +196,20 @@ final class Playback {
         publish()
     }
 
+    /// Agent Terminal's Reread button: this session's last turn, now and from the top.
+    /// A copy of it that is being read or waiting in line goes, so it's heard once.
+    func reread(_ item: SpeechItem) {
+        guard !away else { log("away: \(item.source) not read again"); return }
+        log("reading \(item.source) again")
+        if current?.key == item.key {
+            userPaused = false
+            replay()
+            return
+        }
+        if let i = queue.firstIndex(where: { $0.key == item.key }) { retire(queue.remove(at: i)) }
+        playNow(item)
+    }
+
     /// Drop the current item and move on. Clears your pause: skipping is asking for
     /// the next one. The mic still holds it.
     func skip() {

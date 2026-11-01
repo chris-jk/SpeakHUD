@@ -157,6 +157,38 @@ let playbackSuite = Suite("Playback") { t in
         t.expect(p.state.canSkip, "skip is offered with something waiting")
     }
 
+    do {  // Reread: at once, ahead of what's being read, which comes back after
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("b1", key: "B")); _ = r.voice.take()
+        p.reread(turn("a1", key: "A"))
+        t.expectEqual(p.current?.text, "a1", "the reread takes over")
+        t.expectEqual(p.queue.map(\.text), ["b1"], "the turn it cut off waits to be read")
+    }
+
+    do {  // Reread of the session being read starts it over, and clears a pause
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("a1", key: "A"))
+        p.togglePause(); _ = r.voice.take()
+        p.reread(turn("a1", key: "A"))
+        t.expect(r.voice.take().contains(.speak("a1", from: 0, rate: r1)), "from the top, with sound")
+        t.expectEqual(p.queue.count, 0, "and only once")
+    }
+
+    do {  // Reread of a turn still waiting in line takes it out of the line
+        let r = Rig(), p = r.playback!
+        p.enqueue(turn("b1", key: "B")); p.enqueue(turn("a1", key: "A"))
+        p.reread(turn("a1", key: "A"))
+        t.expectEqual(p.queue.map(\.text), ["b1"], "heard once")
+    }
+
+    do {  // Away: nothing sounds, not even this
+        let r = Rig(), p = r.playback!
+        p.awayChanged(on: true); _ = r.voice.take()
+        p.reread(turn("a1", key: "A"))
+        t.expect(p.current == nil, "a reread doesn't sit silent as the current item")
+        t.expectEqual(r.voice.take(), [], "and nothing is said")
+    }
+
     do {  // a new turn for the session that's speaking queues behind it
         let r = Rig(), p = r.playback!
         p.enqueue(turn("a1", key: "A"))
