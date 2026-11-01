@@ -126,7 +126,7 @@ final class Phone {
         guard now.timeIntervalSince(scanned) >= Self.scanEvery else { return }
         scanned = now
         guard let open = Reply.surveyAll(via: terminal) else { return }   // no terminal running, or not saying: nothing learned
-        for key in desk.met(open.panes, iTermSaid: open.iTermSaid, now: now) where away {
+        for key in desk.met(open.panes, iTermSaid: open.iTermSaid, agentSaid: open.agentSaid, now: now) where away {
             guard let turn = desk.turn(key), let box = turn.box, firstAsk(key, now) else { continue }
             push(title: "\(turn.name) is asking", message: box.ask, key: key, name: turn.name)
         }
@@ -166,7 +166,7 @@ final class Phone {
         let asking = item.key.hasSuffix(PhoneDesk.questionSuffix)
         guard item.answerable || asking else { return false }   // only Claude Code's turns have a terminal to answer in
         let first = desk.took(item, now: now)
-        guard away, first else { return true }
+        guard away, first, !item.quiet else { return true }   // on the page, no buzz for "Nothing"
         let key = asking ? String(item.key.dropLast(PhoneDesk.questionSuffix.count)) : item.key
         if asking, !firstAsk(key, now) { return true }   // the screen already said so
         // What came with it is said in the title: the words are cut to length.

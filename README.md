@@ -22,6 +22,9 @@ a standalone app.
 - **Codex CLI support.** Enable **Read Codex CLI Responses Aloud** in the menu bar.
   Finished Codex responses join the same queue, labeled by project, with clickable
   paths and commands. Claude and Codex sessions can run together.
+- **Read it again.** Agent Terminal's 🔊 Reread reads the selected session's last turn
+  from the top. Each session's last turn is kept in `~/.local/state/speakhud/last`, a
+  private folder, and goes a week after that session's last turn.
 - **Speed control** — cycle `0.75× → 2×`. Changing speed mid-read resumes from the
   current word at the new rate (AVSpeech can't change rate live, so it restarts cleanly
   on a fresh synthesizer — reusing one after `stopSpeaking(.immediate)` silently drops
@@ -211,7 +214,7 @@ network and nothing leaves your own devices.
 What's on the page:
 
 - **A window per terminal**, newest first, with a bar in that terminal's own frame
-  colour, its last finished turn, and a box to answer in. Every iTerm2 pane running
+  colour, its last finished turn, and a box to answer in. Every iTerm2 pane or Agent Terminal session running
   Claude Code gets one, whether or not it has finished a turn yet, and a closed
   terminal's window goes. An answer is pasted into that
   terminal's prompt and sent, by the same guarded paste as a spoken reply: only into
@@ -259,11 +262,13 @@ What's on the page:
 - **Start a new terminal**, at the foot of the page: your pinned folders, your home
   folder, the folders your recent sessions ran in, most used first, then the project
   folders Claude Code remembers (under ~/GitHub and ~/Desktop/Projects). Write a first
-  message if you like and tap Start beside a folder: a new iTerm2 window opens on the
-  Mac there and runs `claude` with that message. Pin keeps a folder on the list.
+  message if you like and tap Start beside a folder: a new session opens on the Mac
+  there and runs `claude` with that message, in Agent Terminal while it's open, else in
+  a new iTerm2 window. If Agent Terminal is open but busy, Start says so instead of
+  opening a second one in iTerm2. Pin keeps a folder on the list.
 - **Resume an old session**, at the foot of the page: recent sessions by name, folder
-  and age. Resume opens a new iTerm2 window on the Mac in the folder the session was
-  started in and runs `claude --resume` for it.
+  and age. Resume opens the same way, in the folder the session was started in, and
+  runs `claude --resume` for it.
 - **Its screen**: the foot of the terminal as text, with keys (1 to 4, up, down, Enter,
   Esc) for anything that wants a key, or Esc to stop a turn. A key goes only where
   Claude Code is showing something that takes it. Into a box, only the box the page is
@@ -383,7 +388,7 @@ Limits:
 - A window shows what its last finished turn made: the next turn replaces it.
 - Whether a video plays is up to the phone: iPhones play H.264 and HEVC in `mp4` and
   `mov`; one it can't play says so and offers its name to open or save.
-- Only iTerm2 panes can be answered, as with a spoken reply.
+- Only iTerm2 panes and Agent Terminal sessions can be answered, as with a spoken reply.
 - A terminal that hasn't finished a turn since SpeakHUD first saw it shows an empty
   window (its screen and the answer box still work), in a colour picked from its name
   rather than its frame's.
@@ -605,7 +610,7 @@ instead. You lose the queue in that mode, so simultaneous turns can talk over ea
 - `Sources/` — the rest of the app, one area to a file: `Playback.swift` (every rule
   about what speaks and when, no AppKit), `HUD.swift` and `Panel.swift` (the window),
   `Agent.swift` and `Menu.swift` (hotkey listener, spool watcher, menu bar), `Spool.swift`,
-  `Reply.swift` (reading and writing terminal panes), `MicEar.swift`, `MicWatch.swift`,
+  `Reply.swift` (reading and writing terminal panes), `AgentLink.swift` (Agent Terminal's socket), `MicEar.swift`, `MicWatch.swift`,
   `AudioWatch.swift`, `Dictation.swift`, `Hooks.swift` (Claude Code and Codex setup), and
   the phone in `Phone.swift`, `PhoneDesk.swift`, `PhoneServer.swift` and `Terminals.swift`.
 - `hook/read-summary.py` — the Claude Code `Stop` hook; enqueues a finished turn, or

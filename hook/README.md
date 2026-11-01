@@ -104,6 +104,11 @@ Instead the hook writes one JSON file per finished turn into
   with Listen After Reading on, the HUD opens the mic after reading it and pastes what you
   say there. A question read by `read-question.py` carries none, and no mic opens for it.
   Optional, so `v` stays 1.
+- `{"v": 1, "reread": "<session>"}` asks for that session's last turn again, from the
+  top, even with Read Responses Aloud off. The agent keeps each session's last turn, not
+  a question's pieces, in `last/<session>.json` beside the queue, for a week.
+- A turn whose whole reply is "Nothing" is never read aloud, but reaches the phone page
+  (no push) and is kept for a reread.
 - `SPEAKHUD_QUEUE_DIR` moves the queue for both the hook and the agent. It exists for
   tests. Set it for only one side and the hook writes somewhere the agent never reads,
   so the agent logs `spool: watching <dir>` at startup to show which one it chose.

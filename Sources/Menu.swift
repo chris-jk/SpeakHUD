@@ -157,9 +157,11 @@ final class MenuController: NSObject, NSMenuDelegate {
             refresh()
             return
         }
-        statusItem.menu = menu
-        statusItem.button?.performClick(nil)
-        statusItem.menu = agent.phone?.away == true ? nil : menu
+        // Popped up, not borrowed through statusItem.menu: opening the menu refreshes it,
+        // and the refresh takes that away again while Away.
+        if let btn = statusItem.button {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: btn.bounds.height + 5), in: btn)
+        }
     }
 
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {

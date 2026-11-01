@@ -112,8 +112,9 @@ enum Reveal {
             if #available(macOS 14.0, *), let app = NSRunningApplication.runningApplications(withBundleIdentifier: AgentLink.bundleID).first {
                 NSApp.yieldActivation(to: app)
             }
-            if let answer = AgentLink.call(["op": "reveal", "session": session]), answer["ok"] as? Bool == true {
-                return .pane(bounds(inReply: "ok " + (answer["text"] as? String ?? "")))
+            let said = AgentLink.call(["op": "reveal", "session": session])
+            if said.ok {
+                return .pane(bounds(inReply: "ok " + (said.reply?["text"] as? String ?? "")))
             }
         }
         if let (bundleID, source) = script(for: origin) {

@@ -105,9 +105,9 @@ enum OldSessions {
 
     /// Agent Terminal, when it's open, takes a new terminal before iTerm2 does.
     #if TESTING
-    nonisolated(unsafe) static var agentTerminal: (String, String) -> Bool = { _, _ in false }
+    nonisolated(unsafe) static var agentTerminal: (String, String) -> AgentLink.Said = { _, _ in .closed }
     #else
-    nonisolated(unsafe) static var agentTerminal: (String, String) -> Bool = { AgentLink.open(folder: $0, line: $1) }
+    nonisolated(unsafe) static var agentTerminal: (String, String) -> AgentLink.Said = { AgentLink.open(folder: $0, line: $1) }
     #endif
 
     /// The AppleScript that opens a new iTerm2 window and runs `line` in it, which must
@@ -132,7 +132,12 @@ enum OldSessions {
                      run: (String) -> Reply.Answer) -> Reply.Outcome {
         guard NewTerminal.isFolder(folder) else { return .failed("its folder isn't there any more") }
         guard let source = source else { return .failed(refused) }
-        if let line = line, agentTerminal(folder, line) { return .sent }
+        if let line = line {
+            let said = agentTerminal(folder, line)
+            if said.ok { return .sent }
+            // It may still open once the app is free: a window in iTerm2 too would be two.
+            if case .noAnswer = said { return .failed("Agent Terminal didn't answer") }
+        }
         let a = run(source)
         if let code = a.errorCode {
             return code == -1743 ? .denied : .failed(a.errorMessage ?? "AppleScript error \(code)")

@@ -207,10 +207,10 @@ struct PhoneDesk {
     /// window; and each is marked with whether it's working and what box, if any, its
     /// screen is showing. Returns the keys whose box has just come up.
     @discardableResult
-    mutating func met(_ open: [Reply.Pane], iTermSaid: Bool = true, now: Date = Date()) -> [String] {
+    mutating func met(_ open: [Reply.Pane], iTermSaid: Bool = true, agentSaid: Bool = true, now: Date = Date()) -> [String] {
         let ids = Set(open.map { $0.session })
-        // iTerm2 saying nothing isn't its panes closing.
-        turns.removeAll { $0.origin?.session.map { !ids.contains($0) && (iTermSaid || AgentLink.owns($0)) } ?? false }
+        // An app saying nothing isn't its panes closing.
+        turns.removeAll { $0.origin?.session.map { !ids.contains($0) && (AgentLink.owns($0) ? agentSaid : iTermSaid) } ?? false }
         var asking: [String] = []
         for pane in open {
             let showing = pane.showing

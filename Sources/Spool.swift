@@ -62,12 +62,10 @@ enum Spool {
         case tooOld           // waited longer than maxAge
         case staleTmp         // a hook died between writing and renaming
         case unsupportedVersion  // `v` present but not the version this agent reads
-        case saysNothing      // the whole reply is "Nothing"
         case nothingToReread  // a reread for a session with no turn kept
 
         var description: String {
             switch self {
-            case .saysNothing: return "reply is only \"Nothing\""
             case .nothingToReread: return "no turn kept to read again"
             case .unsupportedVersion: return "unsupported schema version (this agent reads v\(Spool.version)) — update SpeakHUD"
             case .malformed: return "malformed JSON"
@@ -146,7 +144,6 @@ enum Spool {
             guard let text = obj["text"] as? String,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { drop(.emptyText); continue }
-            guard !saysNothing(text) else { drop(.saysNothing); continue }
             let created: Date
             if let raw = obj["created"] {
                 // JSON booleans also bridge to NSNumber; they aren't timestamps.
@@ -159,9 +156,13 @@ enum Spool {
                 created = mtime(taken) ?? now
             }
             guard now.timeIntervalSince(created) < maxAge else { drop(.tooOld); continue }
-            let item = speechItem(obj, text: text, stem: stem, created: created, file: taken)
+            var item = speechItem(obj, text: text, stem: stem, created: created, file: taken)
+            item.quiet = saysNothing(text)
             batch.items.append(item)
-            if let session = item.origin?.session { keepLast(data, session: session, queue: dir, now: now) }
+            // A question's pieces are no turn to read again: they'd take the turn's place.
+            if let session = item.origin?.session, !item.key.hasSuffix(PhoneDesk.questionSuffix) {
+                keepLast(data, session: session, queue: dir, now: now)
+            }
         }
         return batch
     }

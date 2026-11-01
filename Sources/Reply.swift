@@ -364,9 +364,9 @@ enum Reply {
         var wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
         /// Agent Terminal, for its own sessions (`AgentLink`).
         #if TESTING
-        var link: (([String: Any]) -> [String: Any]?)? = nil
+        var link: (([String: Any]) -> AgentLink.Said)? = nil
         #else
-        var link: (([String: Any]) -> [String: Any]?)? = AgentLink.call
+        var link: (([String: Any]) -> AgentLink.Said)? = { AgentLink.call($0) }
         #endif
     }
 
@@ -389,8 +389,10 @@ enum Reply {
         guard AgentLink.owns(op.session) else { return tell(terminal, op.source) }
         var request = op.link
         request["session"] = op.session
-        guard let answer = terminal.link?(request), answer["ok"] as? Bool == true else { return .failure(.gone) }
-        return .success(answer["text"] as? String ?? "")
+        let said = terminal.link?(request) ?? .closed
+        if case .noAnswer = said { return .failure(.failed("Agent Terminal didn't answer")) }
+        guard said.ok else { return .failure(.gone) }
+        return .success(said.reply?["text"] as? String ?? "")
     }
 
     /// Run one script: what it gave back after its "ok", or why there's nothing. The one
@@ -632,16 +634,20 @@ enum Reply {
         }
     }
 
-    /// What `survey` found plus Agent Terminal's sessions, and whether iTerm2 said at all:
-    /// if it didn't, nothing is known about its panes. Nil when neither said.
-    static func surveyAll(via terminal: Terminal = Terminal()) -> (panes: [Pane], iTermSaid: Bool)? {
+    /// What `survey` found plus Agent Terminal's sessions, and whether each app said: one
+    /// that didn't tells us nothing about its panes. Agent Terminal being closed does say:
+    /// it has none. Nil when neither has anything to report.
+    static func surveyAll(via terminal: Terminal = Terminal()) -> (panes: [Pane], iTermSaid: Bool, agentSaid: Bool)? {
         let iTerm = survey(via: terminal)
-        let own = (terminal.link?(["op": "survey"])?["panes"] as? [[String: String]])?.compactMap { pane -> Pane? in
+        let said = terminal.link?(["op": "survey"]) ?? .closed
+        let own = (said.reply?["panes"] as? [[String: String]])?.compactMap { pane -> Pane? in
             guard let id = pane["session"], AgentLink.owns(id) else { return nil }
             return Pane(session: id, name: pane["name"] ?? "", screen: foot(pane["screen"] ?? ""), color: pane["color"])
         }
         if iTerm == nil && own == nil { return nil }
-        return ((iTerm ?? []) + (own ?? []), iTerm != nil)
+        var agentSaid = own != nil
+        if case .closed = said { agentSaid = true }
+        return ((iTerm ?? []) + (own ?? []), iTerm != nil, agentSaid)
     }
 
     /// The last `lines` lines of a screen, without the blank ones under them.

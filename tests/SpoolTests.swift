@@ -252,6 +252,9 @@ let spoolSuite = Suite("Spool") { t in
         t.expectEqual(dirMode, 0o700, "the folder is private: it holds what was said")
         t.expectEqual(fileMode, 0o600, "and so is the file")
 
+        write(q, "q1.json", ["v": 1, "text": "- 1. Yes", "key": "k:question", "created": at, "origin": ["session": a]])
+        let question = Spool.drain(in: q, now: now)
+        t.expectEqual(question.items.count, 1, "a question piece is still read")
         write(q, "4.json", ["v": 1, "reread": a])
         write(q, "5.json", ["v": 1, "reread": b])
         write(q, "6.json", ["v": 1, "reread": "../../secrets"])
@@ -264,6 +267,10 @@ let spoolSuite = Suite("Spool") { t in
         t.expectEqual(batch.dropped, [Spool.Drop(name: "5.json", reason: .nothingToReread),
                                       Spool.Drop(name: "6.json", reason: .nothingToReread)],
                       "a session with nothing kept, or a name that is no session id, is dropped with a reason")
+        write(q, "n.json", ["v": 1, "text": "Nothing.", "key": "k", "created": Date().timeIntervalSince1970, "origin": ["session": a]])
+        let nothing = Spool.drain(in: q)
+        t.expect(nothing.items.first?.quiet == true && nothing.dropped.isEmpty, "a Nothing turn isn't dropped, it's quiet")
+        t.expectEqual(Spool.lastTurn(session: a, queue: q)?.text, "Nothing.", "and it's the session's last turn")
         t.expectEqual(files(q).filter { !$0.hasSuffix(".taken") }, [], "every request is let go of; turns wait to be spoken")
         t.expect(!files(q).contains("4.taken"), "the one that worked too")
 

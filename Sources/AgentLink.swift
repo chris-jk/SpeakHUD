@@ -12,20 +12,36 @@ enum AgentLink {
 
     static func owns(_ session: String) -> Bool { session.uppercased().hasPrefix(prefix) }
 
-    /// A new session in `folder` with `line` typed into it. False when the app isn't open:
-    /// then the caller opens iTerm2.
-    static func open(folder: String, line: String) -> Bool {
-        call(["op": "new", "folder": folder, "line": line])?["ok"] as? Bool == true
+    /// What came of a request. The two kinds of silence mean opposite things: `.closed`,
+    /// nobody is there, so its sessions are gone and iTerm2 can stand in; `.noAnswer`,
+    /// the app is there and busy, so its sessions stand and the request may still run.
+    enum Said {
+        case answered([String: Any])
+        case closed
+        case noAnswer
+
+        var reply: [String: Any]? {
+            if case .answered(let reply) = self { return reply }
+            return nil
+        }
+        var ok: Bool { reply?["ok"] as? Bool == true }
     }
 
-    /// One request and its answer. Nil when the app isn't there or doesn't answer in time.
-    static func call(_ request: [String: Any]) -> [String: Any]? {
-        guard var body = try? JSONSerialization.data(withJSONObject: request) else { return nil }
+    /// A new session in `folder` with `line` typed into it.
+    static func open(folder: String, line: String) -> Said {
+        call(["op": "new", "folder": folder, "line": line])
+    }
+
+    /// One request and its answer.
+    static func call(_ request: [String: Any], at path: String = AgentLink.path) -> Said {
+        guard var body = try? JSONSerialization.data(withJSONObject: request) else { return .noAnswer }
         body.append(10)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
+        guard fd >= 0 else { return .noAnswer }
         defer { close(fd) }
         var limit = timeval(tv_sec: 1, tv_usec: 0)
+        var quiet: Int32 = 1   // a peer that left gives an error here, not a SIGPIPE that kills us
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &quiet, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
         var addr = sockaddr_un()
@@ -35,14 +51,17 @@ enum AgentLink {
         let joined = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard joined == 0, body.withUnsafeBytes({ write(fd, $0.baseAddress, body.count) }) == body.count else { return nil }
+        guard joined == 0 else { return errno == ECONNREFUSED || errno == ENOENT ? .closed : .noAnswer }
+        guard body.withUnsafeBytes({ write(fd, $0.baseAddress, body.count) }) == body.count else {
+            return errno == EPIPE ? .closed : .noAnswer
+        }
         var reply = Data()
         var chunk = [UInt8](repeating: 0, count: 65536)
         while reply.last != 10 {
             let n = read(fd, &chunk, chunk.count)
-            if n <= 0 { return nil }
+            if n <= 0 { return .noAnswer }
             reply.append(contentsOf: chunk[0..<n])
         }
-        return (try? JSONSerialization.jsonObject(with: reply)) as? [String: Any]
+        return ((try? JSONSerialization.jsonObject(with: reply)) as? [String: Any]).map { .answered($0) } ?? .noAnswer
     }
 }

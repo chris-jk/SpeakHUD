@@ -1077,6 +1077,11 @@ let phoneSuite = Suite("Phone") { t in
     b.phone.setAway(false)
     b.phone.took(turn("a", "back"))
     t.expect(b.pushes.count == 2 && b.awayChanges == [true, false], "back at the Mac, pushes stop")
+    let silent = Bench()
+    silent.phone.setAway(true)
+    var bare = turn("n", "Nothing.")
+    bare.quiet = true
+    t.expect(silent.phone.took(bare) && silent.pushes.isEmpty, "away, a Nothing turn is on the page with no push")
     let quiet = Bench(ntfy: nil)
     quiet.phone.setAway(true)
     quiet.phone.took(turn("a", "hello"))

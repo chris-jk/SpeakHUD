@@ -14,14 +14,18 @@ private func window(_ id: Int, pid: pid_t = 50, layer: Int = 0, alpha: Double = 
 let layeringSuite = Suite("Layering") { t in
     let at = CGPoint(x: 10, y: 10)
     func clicked(_ list: [W], hud: CGRect = CGRect(x: 0, y: 0, width: 100, height: 100)) -> Int? {
-        HUDPanel.windowToStepBehind(at: at, in: list, own: 7, hud: hud)
+        HUDPanel.windowToStepBehind(at: at, in: list, own: 7, hud: hud, screen: CGSize(width: 100, height: 100))
     }
 
     t.expectEqual(clicked([window(1), window(2)]), 1, "the frontmost window under the click")
     t.expectEqual(clicked([window(1, CGRect(x: 50, y: 50, width: 10, height: 10)), window(2)]), 2,
                   "a window elsewhere on screen wasn't clicked")
     t.expectEqual(clicked([window(1, pid: 7), window(2)]), 2, "never behind one of our own windows")
-    t.expectEqual(clicked([window(1, layer: 25), window(2)]), 2, "an overlay above the app windows is looked through")
+    t.expectEqual(clicked([window(1, layer: 25), window(2)]), 2, "a screen-sized overlay lets the click through")
+    t.expect(clicked([window(1, layer: 101, CGRect(x: 0, y: 0, width: 40, height: 40)), window(2)]) == nil,
+             "a menu or popover took the click: the window under it wasn't clicked")
+    t.expectEqual(clicked([window(1, CGRect(x: 0, y: 0, width: 40, height: 40)), window(2, layer: 3, CGRect(x: 0, y: 0, width: 40, height: 40))]), 1,
+                  "a palette behind the clicked window doesn't matter")
     t.expectEqual(clicked([window(1, alpha: 0), window(2)]), 2, "an invisible window is looked through")
     t.expect(clicked([window(1, layer: -2147483603)]) == nil, "the desktop is no window to go behind")
     t.expect(clicked([]) == nil, "nothing there")

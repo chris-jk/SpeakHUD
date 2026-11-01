@@ -284,6 +284,21 @@ let playbackSuite = Suite("Playback") { t in
         t.expectEqual(r.retired, [], "nothing retired by a stale finish")
     }
 
+    do {  // asked to hear it: the HUD comes back. A hold ending by itself: no
+        let r = Rig(), p = r.playback!
+        var asked = 0
+        p.onAsked = { asked += 1 }
+        p.enqueue(turn("a", key: "A"))
+        p.replay()
+        t.expectEqual(asked, 1, "a replay of the current item is asked for")
+        p.togglePause()
+        t.expectEqual(asked, 1, "pausing isn't")
+        p.togglePause()
+        t.expectEqual(asked, 2, "resuming is")
+        p.micChanged(busy: true); p.micChanged(busy: false)
+        t.expectEqual(asked, 2, "a mic hold ending isn't: nobody asked")
+    }
+
     // -- mic hold ----------------------------------------------------------
 
     do {  // mid-speech: pause on the spot, resume on release

@@ -70,6 +70,9 @@ final class Playback {
     var onChange: (State) -> Void = { _ in }
     /// A new item became current: show its text.
     var onStart: (SpeechItem) -> Void = { _ in }
+    /// The current item was asked for again or to carry on: it should be in sight. A hold
+    /// ending by itself stays out of this: nobody asked, and it would pop up over typing.
+    var onAsked: () -> Void = {}
     /// The word being spoken, in full-text coordinates.
     var onWord: (NSRange) -> Void = { _ in }
     var onRanDry: () -> Void = {}
@@ -263,6 +266,7 @@ final class Playback {
         }
         guard current != nil || !queue.isEmpty else { return }
         userPaused.toggle()
+        if !userPaused { onAsked() }
         proceed()
         publish()
     }
@@ -289,6 +293,7 @@ final class Playback {
         } else {
             silence()
             resumeAt = 0
+            onAsked()
             drive()
         }
         publish()
@@ -764,6 +769,7 @@ final class Playback {
             guard userPaused else { return }
             userPaused = false
             pausedByVoice = false
+            onAsked()
             proceed()
             publish()
         case .stopAll:

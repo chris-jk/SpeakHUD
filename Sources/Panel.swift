@@ -224,14 +224,18 @@ final class HUDPanel: NSPanel {
     }
 
     /// The ordinary window a click landed on, if the HUD should step behind it. Layer 0 is
-    /// where app windows live: above it are overlays that let clicks through, below it is
-    /// the desktop, which is no window to go behind. A window that doesn't touch the HUD
-    /// isn't one: going behind it would only sink the HUD under whatever else is open.
-    /// `point` and `hud` count down from the top of the main screen.
-    static func windowToStepBehind(at point: CGPoint, in windows: [ScreenWindow], own: pid_t, hud: CGRect) -> Int? {
-        guard let clicked = windows.first(where: {
-            $0.pid != own && $0.layer == 0 && $0.alpha > 0 && $0.bounds.contains(point)
-        }), clicked.bounds.intersects(hud) else { return nil }
+    /// where app windows live; below it is the desktop, which is no window to go behind.
+    /// Above it, something screen-sized is an overlay that lets clicks through, but anything
+    /// smaller (a context menu, a popover, a palette) took the click itself. A window that
+    /// doesn't touch the HUD doesn't count: going behind it would only sink the HUD under
+    /// whatever else is open. `point` and `hud` count down from the top of the main screen.
+    static func windowToStepBehind(at point: CGPoint, in windows: [ScreenWindow], own: pid_t, hud: CGRect,
+                                   screen: CGSize) -> Int? {
+        let under = windows.filter { $0.pid != own && $0.alpha > 0 && $0.bounds.contains(point) }
+        guard let clicked = under.first(where: { $0.layer == 0 }), clicked.bounds.intersects(hud),
+              !under.prefix(while: { $0.layer != 0 }).contains(where: {
+                  $0.layer > 0 && ($0.bounds.width < screen.width || $0.bounds.height < screen.height)
+              }) else { return nil }
         return clicked.id
     }
 
@@ -266,9 +270,10 @@ final class HUDPanel: NSPanel {
     private var clickWatch: Any?
 
     /// A global monitor only sees clicks meant for other apps, so the HUD's own never get here.
+    /// Left button only: a right-click doesn't raise the window it lands on.
     func watchClicks() {
         guard clickWatch == nil else { return }
-        clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+        clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
             self?.clickedElsewhere()
         }
     }
@@ -276,11 +281,12 @@ final class HUDPanel: NSPanel {
     private func clickedElsewhere() {
         let point = NSEvent.mouseLocation
         // visibleFrame leaves out the menu bar and the Dock, which aren't windows being worked in.
-        guard isVisible, !isBehind, NSScreen.screens.contains(where: { $0.visibleFrame.contains(point) }),
+        guard isVisible, !isBehind, let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(point) }),
               let top = NSScreen.screens.first?.frame.height,
               let window = Self.windowToStepBehind(at: CGPoint(x: point.x, y: top - point.y), in: Self.screenWindows(),
                                                    own: ProcessInfo.processInfo.processIdentifier,
-                                                   hud: Spotlight.flipped(frame, mainHeight: top))
+                                                   hud: Spotlight.flipped(frame, mainHeight: top),
+                                                   screen: screen.frame.size)
         else { return }
         goBehind(window: window)
         onWentBehind()

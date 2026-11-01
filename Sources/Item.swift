@@ -24,6 +24,8 @@ struct SpeechItem {
     /// A finished Claude Code turn, whose terminal is back at Claude's prompt: an answer
     /// said out loud can go there (Reply). Only the Stop hook says so.
     var answerable = false
+    /// The whole reply is "Nothing": kept and shown like any turn, never read aloud.
+    var quiet = false
     /// A question box's choices, read out by the question hook: the answer said out loud
     /// after them picks one (`SpokenChoice`), pressed as its number (`Reply.press`).
     struct Choices: Equatable {

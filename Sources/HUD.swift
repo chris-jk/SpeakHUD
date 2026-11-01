@@ -186,6 +186,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         playback.log = { [weak self] in self?.log($0) }
         playback.onChange = { [weak self] in self?.render($0) }
         playback.onStart = { [weak self] in self?.show($0) }
+        playback.onAsked = { [weak self] in
+            if self?.isMinimized == false { self?.panel?.comeForward() }
+        }
         playback.onWord = { [weak self] in self?.highlight($0) }
         playback.onRanDry = { [weak self] in
             guard let self = self else { return }
