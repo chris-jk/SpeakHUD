@@ -9,6 +9,17 @@ origin detection, heartbeat checks and atomic queue writes. It reads
 `codex:<thread-id>`; sources are `Codex · <folder>`. No `reply` field is emitted:
 the app's automatic reply path currently checks Claude's prompt.
 
+A detached Codex app-server daemon's inherited terminal ID is unsafe: it belongs
+to the first CLI that started that daemon. So under the daemon (no tty) the adapter
+reads the thread's current `name` from Codex's local `state_5.sqlite` (read-only)
+and matches the exact `<name> | <folder>` live terminal title over Agent Terminal's
+private socket, or the bare `<folder>` title of a thread not named yet, allowing
+Codex's working spinner prefix. Only a unique match supplies a pane ID. With none,
+an iTerm2 daemon keeps its inherited origin; an Agent Terminal one omits the origin,
+so speech still plays with no navigation. Direct CLI hooks with a tty keep their
+normal origin detection. Terminal contents are not stored. This path depends on
+Codex's current database and title format; its failure mode is no navigation.
+
 `setup-codex.py` installs these scripts plus itself and the fallback executable in
 `$CODEX_HOME/speakhud/` (default `~/.codex/speakhud/`). It requires Python 3.11+ for
 standard-library TOML parsing. It prepends a marked root `notify` setting, preserves
