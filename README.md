@@ -469,6 +469,7 @@ Chrome and some terminals — a synthesized `⌘C` with your clipboard restored 
 
 ```sh
 ./build.sh
+python3 settings/my-settings.py install --claude   # the owner's saved settings; drop --claude on a Mac that runs agents
 ```
 
 Installs `SpeakHUD.app` to `/Applications` (falls back to `~/Applications` when it isn't

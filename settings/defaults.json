@@ -1,0 +1,10 @@
+{
+  "hotkey": "cmd+opt+s",
+  "prefs": {
+    "listenAfterReading": false,
+    "listenWhileReading": false,
+    "readTurns": true,
+    "speakRateIndex": 2,
+    "voicePerProject": false
+  }
+}
