@@ -214,6 +214,13 @@ final class Spotlight {
 final class HUDPanel: NSPanel {
     override var canBecomeKey: Bool { true }   // …or it never sees a keystroke at all
 
+    /// Picked in Mission Control (or any other way the system hands it focus) while it sat
+    /// behind a clicked window: that's "I want this", same as clicking the part still showing.
+    override func becomeKey() {
+        super.becomeKey()
+        if isBehind { comeForward() }
+    }
+
     /// One entry of the window server's list, which runs front to back.
     struct ScreenWindow {
         let id: Int
