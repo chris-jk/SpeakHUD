@@ -16,7 +16,8 @@ a standalone app.
   window and the HUD drops just behind it, so you can see your work; the next thing it
   reads brings it back to the front, and so does clicking any part of it still showing,
   the menu bar icon (the menu still opens) or the Show/Hide hotkey. A window that doesn't
-  touch the HUD leaves it where it is. A HUD put away with Hide stays away.
+  touch the HUD leaves it where it is. A HUD put away with Hide, or closed after a
+  reading, stays away until the next reading or a click on the menu bar icon.
 - **One speech queue.** Run Claude in four terminals and they take turns instead of
   cutting each other off — you only have one pair of ears.
 - **Codex CLI support.** Enable **Read Codex CLI Responses Aloud** in the menu bar.
