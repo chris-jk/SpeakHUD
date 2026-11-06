@@ -42,4 +42,14 @@ let layeringSuite = Suite("Layering") { t in
     t.expect(forward(active: true), "reading with no window up: comes forward")
     t.expect(!forward(), "closed with nothing to read: nothing to bring")
     t.expect(!forward(minimized: true, visible: true, active: true), "put away with Hide: stays away")
+
+    // The menu bar icon is an explicit "show me": it brings the HUD up whatever hid it.
+    typealias S = Controller.Summon
+    func summon(built: Bool = true, minimized: Bool = false, visible: Bool = false) -> S {
+        Controller.summonAction(built: built, minimized: minimized, visible: visible)
+    }
+    t.expect(summon(visible: false) == S.reopen, "hid itself after a reading: icon brings it back")
+    t.expect(summon(minimized: true, visible: false) == S.reopen, "put away with Hide: icon still brings it back")
+    t.expect(summon(visible: true) == S.forward, "up, maybe behind a window: comes to the front")
+    t.expect(summon(built: false) == S.nothing, "nothing ever read: no window to show")
 }

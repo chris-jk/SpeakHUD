@@ -405,6 +405,32 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         onVisibilityChange()
     }
 
+    enum Summon { case nothing, reopen, forward }
+
+    /// What a click on the menu bar icon does: always shows the HUD if there is one,
+    /// whether it hid itself after a reading, was put away with Hide, or sits behind a window.
+    static func summonAction(built: Bool, minimized: Bool, visible: Bool) -> Summon {
+        guard built else { return .nothing }
+        return minimized || !visible ? .reopen : .forward
+    }
+
+    /// The menu bar icon was clicked. Shown this way it stays up until Hide or the end
+    /// of the next reading: no idle close 15 s later.
+    func summon() {
+        switch Self.summonAction(built: panel != nil, minimized: isMinimized, visible: isPanelVisible) {
+        case .nothing: return
+        case .reopen:
+            isMinimized = false
+            closeTimer?.invalidate()
+            panel.comeForward()
+            log("hud shown from the menu bar")
+        case .forward:
+            panel.comeForward()
+        }
+        lastInteraction = Date()
+        onVisibilityChange()
+    }
+
     /// Up, or supposed to be: on screen, or with something being read or waiting.
     static func shouldComeForward(minimized: Bool, visible: Bool, active: Bool) -> Bool {
         !minimized && (visible || active)
