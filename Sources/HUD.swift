@@ -422,10 +422,11 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         case .reopen:
             isMinimized = false
             closeTimer?.invalidate()
-            panel.comeForward()
+            panel.comeHere()
             log("hud shown from the menu bar")
         case .forward:
-            panel.comeForward()
+            panel.comeHere()
+            log("hud brought forward from the menu bar")
         }
         lastInteraction = Date()
         onVisibilityChange()

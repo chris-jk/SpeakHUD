@@ -268,6 +268,28 @@ final class HUDPanel: NSPanel {
         orderFrontRegardless()
     }
 
+    /// Asked for by name (the menu bar icon): on the desktop or full-screen app in use
+    /// right now, over everything. Ordering front alone leaves a panel macOS filed on
+    /// another Space there, so it is taken off screen, ordered in with "move to the
+    /// active Space", then put back to joining every Space.
+    func comeHere() {
+        let kept = collectionBehavior
+        orderOut(nil)
+        collectionBehavior = Self.pullBehavior(kept)
+        level = .floating
+        orderFrontRegardless()
+        collectionBehavior = kept
+    }
+
+    /// The pass-through behavior for comeHere: joining all Spaces and moving to the
+    /// active one exclude each other, so the first gives way for one ordering.
+    static func pullBehavior(_ kept: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
+        var b = kept
+        b.remove([.canJoinAllSpaces, .stationary])
+        b.insert([.moveToActiveSpace, .fullScreenAuxiliary])
+        return b
+    }
+
     /// Just under one window, so the work in it shows and anything further back stays covered.
     func goBehind(window: Int) {
         level = .normal

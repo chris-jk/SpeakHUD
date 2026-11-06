@@ -52,4 +52,12 @@ let layeringSuite = Suite("Layering") { t in
     t.expect(summon(minimized: true, visible: false) == S.reopen, "put away with Hide: icon still brings it back")
     t.expect(summon(visible: true) == S.forward, "up, maybe behind a window: comes to the front")
     t.expect(summon(built: false) == S.nothing, "nothing ever read: no window to show")
+
+    // Pulled onto the desktop in use: the one ordering moves it here, then it joins all again.
+    let kept: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .managed]
+    let pull = HUDPanel.pullBehavior(kept)
+    t.expect(pull.contains(.moveToActiveSpace) && !pull.contains(.canJoinAllSpaces),
+             "the menu bar icon moves the HUD to this desktop, not one it was filed on")
+    t.expect(pull.contains(.fullScreenAuxiliary) && pull.contains(.managed),
+             "still shows over a full-screen app and in Mission Control")
 }
