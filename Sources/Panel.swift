@@ -265,7 +265,18 @@ final class HUDPanel: NSPanel {
     /// Over every app window: where it sits to be read.
     func comeForward() {
         level = .floating
+        keepFullSize()
         orderFrontRegardless()
+    }
+
+    /// A window the system left drawn small (11-08: 268x178 under a 500x260 minimum, seen
+    /// stuck right after a hide and re-show in the same instant) gets its size back whenever
+    /// it is brought forward.
+    func keepFullSize() {
+        let f = frame
+        guard f.width < minSize.width || f.height < minSize.height else { return }
+        setFrame(NSRect(x: f.minX, y: f.maxY - max(f.height, minSize.height),
+                        width: max(f.width, minSize.width), height: max(f.height, minSize.height)), display: true)
     }
 
     /// Asked for by name (the menu bar icon): over everything. It already joins every
@@ -273,8 +284,11 @@ final class HUDPanel: NSPanel {
     /// to pull it here (11-06 to 11-08) left it filed on one desktop and drawn shrunken and
     /// stuck (Chris, 11-08: "tiny ... can't be drug around"), so it never changes now.
     func comeHere() {
-        orderOut(nil)
+        // No orderOut first: hiding and showing in one instant caught the system's
+        // window-appear animation half way (log 11-08 7:40 AM: four clicks, "NOT on this
+        // desktop", then the HUD stuck at about 54% size).
         level = .floating
+        keepFullSize()
         orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self else { return }

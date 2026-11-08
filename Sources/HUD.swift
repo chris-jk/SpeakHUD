@@ -636,6 +636,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none   // the appear animation is what got caught half way, shrunken
         // Not .stationary: that keeps Mission Control from picking the HUD's thumbnail.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .managed]
         panel.minSize = NSSize(width: w, height: 260)   // narrower than this clips the button row
