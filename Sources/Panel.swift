@@ -279,10 +279,9 @@ final class HUDPanel: NSPanel {
                         width: max(f.width, minSize.width), height: max(f.height, minSize.height)), display: true)
     }
 
-    /// Asked for by name (the menu bar icon): over everything. It already joins every
-    /// desktop, so ordering it in again is enough. Switching its desktop behavior off and on
-    /// to pull it here (11-06 to 11-08) left it filed on one desktop and drawn shrunken and
-    /// stuck (Chris, 11-08: "tiny ... can't be drug around"), so it never changes now.
+    /// Asked for by name (the menu bar icon): over everything, on the desktop Chris is on.
+    /// It joins every desktop, but stepping behind a window can leave it filed on that
+    /// window's desktop; then it is moved here explicitly (pullToThisDesktop).
     func comeHere() {
         // No orderOut first: hiding and showing in one instant caught the system's
         // window-appear animation half way (log 11-08 7:40 AM: four clicks, "NOT on this
@@ -295,19 +294,33 @@ final class HUDPanel: NSPanel {
             self.keepFullSize()
             if self.isOnActiveScreen { self.onPulled(true); return }
             // Still filed on the desktop of the window it stepped behind (log 11-08: four clicks,
-            // "NOT on this desktop"). Hide it, and show it again on a later turn, not the same
-            // instant, so the window server files it where the user is.
-            self.orderOut(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                guard let self else { return }
-                self.level = .floating
-                self.keepFullSize()
-                self.orderFrontRegardless()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                    guard let self else { return }
-                    self.onPulled(self.isOnActiveScreen)
-                }
-            }
+            // "NOT on this desktop"; a plain hide and re-show did not move it either, 9:11 AM).
+            // Ask the window server outright to bring it to this desktop, then, once it is
+            // listed here, make it join every desktop again. The two steps are a turn apart:
+            // done in the same instant (11-06) the move never landed. The appear animation that
+            // left it shrunken then is off now (animationBehavior .none) and keepFullSize runs.
+            self.pullToThisDesktop(tries: 3)
+        }
+    }
+
+    private func pullToThisDesktop(tries: Int) {
+        let everywhere = collectionBehavior
+        var here = everywhere
+        here.remove(.canJoinAllSpaces)
+        here.insert(.moveToActiveSpace)
+        orderOut(nil)
+        collectionBehavior = here
+        level = .floating
+        keepFullSize()
+        orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            let landed = self.isOnActiveScreen
+            self.collectionBehavior = everywhere
+            self.keepFullSize()
+            self.orderFrontRegardless()
+            if landed || tries <= 1 { self.onPulled(landed); return }
+            self.pullToThisDesktop(tries: tries - 1)
         }
     }
 
