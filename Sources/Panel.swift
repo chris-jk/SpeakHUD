@@ -278,7 +278,26 @@ final class HUDPanel: NSPanel {
         collectionBehavior = Self.pullBehavior(kept)
         level = .floating
         orderFrontRegardless()
-        collectionBehavior = kept
+        // The window server moves it to the active Space after this call returns (later
+        // still while the status menu is tracking); restoring "every Space" at once could
+        // leave it filed where it was. Give the move time to land, then restore and check.
+        pullGeneration += 1
+        let gen = pullGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, gen == self.pullGeneration else { return }
+            self.collectionBehavior = kept
+            if self.level == .floating { self.orderFrontRegardless() }
+            self.onPulled(self.isOnActiveScreen)
+        }
+    }
+
+    private var pullGeneration = 0
+    var onPulled: (Bool) -> Void = { _ in }
+
+    /// Whether the window server lists it among the windows on screen right now.
+    var isOnActiveScreen: Bool {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return list.contains { ($0[kCGWindowNumber as String] as? Int) == windowNumber }
     }
 
     /// The pass-through behavior for comeHere: joining all Spaces and moving to the

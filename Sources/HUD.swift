@@ -643,6 +643,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         panel.delegate = self
         panel.watchClicks()
         panel.onWentBehind = { [weak self] in self?.log("hud behind a clicked window") }
+        panel.onPulled = { [weak self] onScreen in
+            self?.log(onScreen ? "hud in front on this desktop" : "hud NOT on this desktop after the menu bar click")
+        }
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
 
