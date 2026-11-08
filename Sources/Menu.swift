@@ -173,7 +173,17 @@ final class MenuController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) { refresh() }
 
     /// Clicking the icon also fetches a HUD lost behind a window, with the menu open over it.
-    func menuWillOpen(_ menu: NSMenu) { agent.hud.summon() }
+    func menuWillOpen(_ menu: NSMenu) {
+        agent.hud.panel?.menuOpen = true
+        agent.hud.summon()
+    }
+
+    /// The click that closes the menu is not a click on a window: don't let it sink the HUD.
+    func menuDidClose(_ menu: NSMenu) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.agent.hud.panel?.menuOpen = false
+        }
+    }
 
     private func refresh() {
         refreshVisibility()

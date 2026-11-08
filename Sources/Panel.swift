@@ -326,7 +326,11 @@ final class HUDPanel: NSPanel {
         }
     }
 
+    /// Set while the menu bar menu is open (and just after): its closing click is ignored.
+    var menuOpen = false
+
     private func clickedElsewhere() {
+        guard !menuOpen else { return }
         let point = NSEvent.mouseLocation
         // visibleFrame leaves out the menu bar and the Dock, which aren't windows being worked in.
         guard isVisible, !isBehind, let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(point) }),
