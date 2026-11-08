@@ -268,45 +268,26 @@ final class HUDPanel: NSPanel {
         orderFrontRegardless()
     }
 
-    /// Asked for by name (the menu bar icon): on the desktop or full-screen app in use
-    /// right now, over everything. Ordering front alone leaves a panel macOS filed on
-    /// another Space there, so it is taken off screen, ordered in with "move to the
-    /// active Space", then put back to joining every Space.
+    /// Asked for by name (the menu bar icon): over everything. It already joins every
+    /// desktop, so ordering it in again is enough. Switching its desktop behavior off and on
+    /// to pull it here (11-06 to 11-08) left it filed on one desktop and drawn shrunken and
+    /// stuck (Chris, 11-08: "tiny ... can't be drug around"), so it never changes now.
     func comeHere() {
-        let kept = collectionBehavior
         orderOut(nil)
-        collectionBehavior = Self.pullBehavior(kept)
         level = .floating
         orderFrontRegardless()
-        // The window server moves it to the active Space after this call returns (later
-        // still while the status menu is tracking); restoring "every Space" at once could
-        // leave it filed where it was. Give the move time to land, then restore and check.
-        pullGeneration += 1
-        let gen = pullGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self, gen == self.pullGeneration else { return }
-            self.collectionBehavior = kept
-            if self.level == .floating { self.orderFrontRegardless() }
+            guard let self else { return }
             self.onPulled(self.isOnActiveScreen)
         }
     }
 
-    private var pullGeneration = 0
     var onPulled: (Bool) -> Void = { _ in }
 
     /// Whether the window server lists it among the windows on screen right now.
     var isOnActiveScreen: Bool {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         return list.contains { ($0[kCGWindowNumber as String] as? Int) == windowNumber }
-    }
-
-    /// The pass-through behavior for comeHere: joining all Spaces and moving to the
-    /// active one exclude each other, so the first gives way for one ordering.
-    static func pullBehavior(_ kept: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
-        var b = kept
-        b.remove([.canJoinAllSpaces, .stationary])
-        b.insert([.moveToActiveSpace, .fullScreenAuxiliary])
-        return b
     }
 
     /// Just under one window, so the work in it shows and anything further back stays covered.
