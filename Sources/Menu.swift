@@ -264,7 +264,11 @@ final class MenuController: NSObject, NSMenuDelegate {
                                                 : codex + ". Restart Codex after enabling."
     }
 
-    @objc private func toggleHUD() { agent.hud.toggleMinimized() }
+    /// Do what the item said when the menu opened. Opening the menu already summoned the
+    /// HUD, so "Show HUD" read as a toggle would hide the HUD that click just brought up.
+    @objc private func toggleHUD() {
+        if hudItem.title == "Show HUD" { agent.hud.summon() } else { agent.hud.toggleMinimized() }
+    }
     @objc private func toggleCodex() {
         let result = CodexHook.run(CodexHook.run("status") == "installed" ? "remove" : "install")
         if result.hasPrefix("error") {
