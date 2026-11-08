@@ -136,7 +136,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(item("SpeakHUD on GitHub", #selector(openGitHub)))
         menu.addItem(item("Quit SpeakHUD", #selector(quit)))
         self.menu = menu
-        statusItem.menu = menu
+        statusItem.menu = nil   // every click reaches statusClicked: one click shows the HUD, two open this
         if let btn = statusItem.button {
             btn.target = self
             btn.action = #selector(statusClicked)
@@ -145,20 +145,25 @@ final class MenuController: NSObject, NSMenuDelegate {
         refresh()
     }
 
-    /// Away, the menu bar's phone is its own off switch: a click brings you back to the
-    /// Mac without opening the menu or the phone. Right-click or ⌥-click still opens it.
-    /// Only reached while Away: otherwise the item has its menu and AppKit opens that.
+    /// One click on the icon brings the HUD to the front on this desktop; a double click,
+    /// right-click or ⌥-click opens the settings menu (Chris, 11-08). Away, one click on the
+    /// phone turns Away off and brings the HUD up.
     @objc private func statusClicked() {
         let event = NSApp.currentEvent
         let wantsMenu = event?.type == .rightMouseUp || event?.modifierFlags.contains(.option) == true
-        if !wantsMenu, let phone = agent.phone, phone.away {
-            phone.setAway(false)
-            agent.hud.bringForward()
-            refresh()
+            || (event?.clickCount ?? 1) >= 2
+        if !wantsMenu {
+            if let phone = agent.phone, phone.away {
+                phone.setAway(false)
+                agent.hud.bringForward()
+                refresh()
+            } else {
+                agent.hud.summon()
+                refreshVisibility()
+            }
             return
         }
-        // Popped up, not borrowed through statusItem.menu: opening the menu refreshes it,
-        // and the refresh takes that away again while Away.
+        // Popped up, not borrowed through statusItem.menu, so a single click never opens it.
         if let btn = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: btn.bounds.height + 5), in: btn)
         }
@@ -225,8 +230,7 @@ final class MenuController: NSObject, NSMenuDelegate {
                 statusItem.menu = nil   // so a click reaches statusClicked
                 return
             }
-            btn.toolTip = nil
-            statusItem.menu = menu
+            btn.toolTip = "Click to bring up the HUD; double-click for settings."
             btn.image = NSImage(systemSymbolName: hidden ? "speaker.wave.2" : "speaker.wave.2.fill",
                                 accessibilityDescription: hidden ? "SpeakHUD (hidden)" : "SpeakHUD")
         }

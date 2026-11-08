@@ -15,7 +15,7 @@ a standalone app.
 - **Floating HUD** with karaoke-style word highlighting that follows along. Click another
   window and the HUD drops just behind it, so you can see your work; the next thing it
   reads brings it back to the front, and so does clicking any part of it still showing,
-  the menu bar icon (the menu still opens) or the Show/Hide hotkey. A window that doesn't
+  one click on the menu bar icon or the Show/Hide hotkey. A window that doesn't
   touch the HUD leaves it where it is. A HUD put away with Hide, or closed after a
   reading, stays away until the next reading or a click on the menu bar icon.
 - **One speech queue.** Run Claude in four terminals and they take turns instead of
@@ -502,7 +502,8 @@ certificate works fine, since all that matters is that it's stable.
 
 ## Menu bar & settings
 
-The background agent shows a small **speaker icon** in the menu bar:
+The background agent shows a small **speaker icon** in the menu bar. One click brings the HUD
+to the front on the desktop you're on; double-click (or right-click) it for these settings:
 
 - **Read Clipboard Aloud**
 - **Read Claude Code Responses Aloud** — a checkbox that installs/removes the Claude
