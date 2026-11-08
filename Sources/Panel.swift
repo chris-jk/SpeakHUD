@@ -292,7 +292,22 @@ final class HUDPanel: NSPanel {
         orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self else { return }
-            self.onPulled(self.isOnActiveScreen)
+            self.keepFullSize()
+            if self.isOnActiveScreen { self.onPulled(true); return }
+            // Still filed on the desktop of the window it stepped behind (log 11-08: four clicks,
+            // "NOT on this desktop"). Hide it, and show it again on a later turn, not the same
+            // instant, so the window server files it where the user is.
+            self.orderOut(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self else { return }
+                self.level = .floating
+                self.keepFullSize()
+                self.orderFrontRegardless()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    guard let self else { return }
+                    self.onPulled(self.isOnActiveScreen)
+                }
+            }
         }
     }
 

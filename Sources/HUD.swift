@@ -363,6 +363,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     func hidePanel() {
         closeTimer?.invalidate()
         panel?.orderOut(nil)
+        panel?.level = .floating   // hidden while behind a window, it must not come back at .normal
         yieldFocus()
         onVisibilityChange()
     }
@@ -373,6 +374,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         isMinimized = true
         closeTimer?.invalidate()
         panel?.orderOut(nil)
+        panel?.level = .floating
         yieldFocus()
         log("hud hidden")
         onVisibilityChange()
