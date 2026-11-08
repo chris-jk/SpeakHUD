@@ -263,10 +263,9 @@ final class HUDPanel: NSPanel {
     var isBehind: Bool { level != .floating }
 
     /// Over every app window: where it sits to be read.
+    /// A reading coming up gets the same check as the menu bar click (comeHere).
     func comeForward() {
-        level = .floating
-        keepFullSize()
-        orderFrontRegardless()
+        comeHere()
     }
 
     /// A window the system left drawn small (11-08: 268x178 under a 500x260 minimum, seen
@@ -280,48 +279,27 @@ final class HUDPanel: NSPanel {
     }
 
     /// Asked for by name (the menu bar icon): over everything, on the desktop Chris is on.
-    /// It joins every desktop, but stepping behind a window can leave it filed on that
-    /// window's desktop; then it is moved here explicitly (pullToThisDesktop).
+    /// If the window server still doesn't list it on screen 0.4 s later, the window has gone
+    /// bad: every fix that moved it (11-06 to 11-08) worked right after an install and failed
+    /// later (Chris, 11-08: "after a while, it just shits the bed"), while a restart, which
+    /// builds a new window, always worked. So onPulled(false) has the HUD build a new one.
     func comeHere() {
-        // No orderOut first: hiding and showing in one instant caught the system's
-        // window-appear animation half way (log 11-08 7:40 AM: four clicks, "NOT on this
-        // desktop", then the HUD stuck at about 54% size).
         level = .floating
         keepFullSize()
         orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self else { return }
-            self.keepFullSize()
-            if self.isOnActiveScreen { self.onPulled(true); return }
-            // Still filed on the desktop of the window it stepped behind (log 11-08: four clicks,
-            // "NOT on this desktop"; a plain hide and re-show did not move it either, 9:11 AM).
-            // Ask the window server outright to bring it to this desktop, then, once it is
-            // listed here, make it join every desktop again. The two steps are a turn apart:
-            // done in the same instant (11-06) the move never landed. The appear animation that
-            // left it shrunken then is off now (animationBehavior .none) and keepFullSize runs.
-            self.pullToThisDesktop(tries: 3)
+            guard let self, self.isVisible else { return }
+            self.onPulled(self.isOnActiveScreen)
         }
     }
 
-    private func pullToThisDesktop(tries: Int) {
-        let everywhere = collectionBehavior
-        var here = everywhere
-        here.remove(.canJoinAllSpaces)
-        here.insert(.moveToActiveSpace)
+    /// Done with: the click watch goes too, or the old window's would keep firing.
+    func retire() {
+        if let w = clickWatch { NSEvent.removeMonitor(w); clickWatch = nil }
+        delegate = nil
         orderOut(nil)
-        collectionBehavior = here
-        level = .floating
-        keepFullSize()
-        orderFrontRegardless()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self else { return }
-            let landed = self.isOnActiveScreen
-            self.collectionBehavior = everywhere
-            self.keepFullSize()
-            self.orderFrontRegardless()
-            if landed || tries <= 1 { self.onPulled(landed); return }
-            self.pullToThisDesktop(tries: tries - 1)
-        }
+        isReleasedWhenClosed = false
+        close()
     }
 
     var onPulled: (Bool) -> Void = { _ in }

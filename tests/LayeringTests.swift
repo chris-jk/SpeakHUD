@@ -54,3 +54,21 @@ let layeringSuite = Suite("Layering") { t in
     t.expect(summon(built: false) == S.nothing, "nothing ever read: no window to show")
 
 }
+
+// The cure for a window the window server keeps on another desktop is a new one, as a
+// restart gives (Chris, 11-08: fixes "work" right after an install, then fail later).
+let rebuildSuite = Suite("Rebuild") { t in
+    _ = NSApplication.shared
+    let hud = Controller(listens: false)
+    hud.buildWindowIfNeeded()
+    let old = hud.panel!
+    old.setFrame(NSRect(x: 100, y: 120, width: 520, height: 300), display: false)
+    hud.rebuildWindow()
+    t.expect(hud.panel !== old, "a new window")
+    t.expectEqual(hud.panel.frame, old.frame, "in the same place and size")
+    t.expect(!old.isVisible, "the old one is gone")
+    t.expect(hud.panel.isVisible, "the new one is up")
+    t.expect(hud.panel.collectionBehavior.contains(.canJoinAllSpaces), "the new one joins every desktop")
+    hud.rebuildWindow()
+    t.expect(hud.panel.isVisible, "and again, without the first one's watchers in the way")
+}

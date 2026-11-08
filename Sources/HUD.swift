@@ -625,6 +625,35 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
     // -- window ------------------------------------------------------------
 
+    /// A new window in place of one the window server keeps on another desktop, as a restart
+    /// would: same place, same text, same buttons, then up front where Chris is.
+    func rebuildWindow() {
+        guard let old = panel else { return }
+        let frame = old.frame
+        if let m = interactionMonitor { NSEvent.removeMonitor(m); interactionMonitor = nil }
+        old.retire()
+        panel = nil
+        buildWindowIfNeeded()
+        panel.setFrame(frame, display: false)
+        shownHeard = nil
+        setTranscript()
+        if let old = old.link, let badge = sourceBadge {
+            badge.text = old.text
+            badge.accent = old.accent
+            badge.solid = old.solid
+            badge.isLink = old.isLink
+            badge.setFrameSize(badge.intrinsicContentSize)
+        }
+        render(playback.state)
+        panel.level = .floating
+        panel.orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, let panel = self.panel else { return }
+            self.log(panel.isOnActiveScreen ? "hud new window in front on this desktop" : "hud new window NOT on this desktop")
+        }
+        onVisibilityChange()
+    }
+
     func buildWindowIfNeeded() {
         guard panel == nil else { return }
         let w: CGFloat = 500, h: CGFloat = 330
@@ -646,8 +675,11 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         panel.delegate = self
         panel.watchClicks()
         panel.onWentBehind = { [weak self] in self?.log("hud behind a clicked window") }
-        panel.onPulled = { [weak self] onScreen in
-            self?.log(onScreen ? "hud in front on this desktop" : "hud NOT on this desktop after the menu bar click")
+        panel.onPulled = { [weak self, weak panel] onScreen in
+            guard let self, let panel, panel === self.panel else { return }
+            if onScreen { return }
+            self.log("hud NOT on this desktop: building a new window")
+            self.rebuildWindow()
         }
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
