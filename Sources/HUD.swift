@@ -18,6 +18,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     var queueLabel: NSTextField!
     var sourceBadge: SourceBadge!
     var nextLabel: NSTextField!
+    var replayBtn: NSButton!
     var pauseBtn: NSButton!
     var speedBtn: NSButton!
     var skipBtn: NSButton!
@@ -168,8 +169,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         playback.onListen = { [weak self] _ in
             guard let self = self else { return }
             self.closeTimer?.invalidate()
-            // Listening isn't speaking: a HUD clicked out of the way stays there.
-            if !self.isMinimized, self.panel?.isBehind == false { self.panel?.orderFrontRegardless() }
+            // Listening isn't speaking: a HUD shrunk to its bar stays shrunk.
+            if !self.isMinimized { self.panel?.orderFrontRegardless() }
             NSSound(named: "Tink")?.play()   // your turn
         }
         playback.onReplied = { outcome in
@@ -242,7 +243,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         switch outcome {
         case .pane(let bounds?):
             spotlight.show(around: Spotlight.flipped(bounds), color: sourceBadge.accent)
-            if panel.isVisible { panel.comeForward() }   // the HUD stays lit, above the dimming
+            // The HUD stays lit, above the dimming; shrunk to its bar, it stays shrunk.
+            if panel.isVisible { panel.isCollapsed ? panel.orderFrontRegardless() : panel.comeForward() }
         case .pane, .app: break
         default: NSSound.beep()
         }
@@ -295,16 +297,31 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         sourceBadge.accent = frame ?? Accent.color(for: item.source)
         sourceBadge.solid = frame != nil
         sourceBadge.isLink = item.origin != nil
-        sourceBadge.setFrameSize(sourceBadge.intrinsicContentSize)
+        fitBadge()
         if !isMinimized { panel.comeForward() }
         onVisibilityChange()
+    }
+
+    /// The pill takes the room left of the buttons; a longer name is cut short.
+    private func fitBadge() {
+        let size = sourceBadge.intrinsicContentSize
+        let room = replayBtn.frame.minX - 8 - sourceBadge.frame.minX
+        sourceBadge.setFrameSize(NSSize(width: min(size.width, max(room, 60)), height: size.height))
+    }
+
+    /// The bar's buttons are icons only (Chris, 11-13: "I know what they do"); the words
+    /// are the tooltip. The reply window's "✕ Close" gets its own mark: ✕ is Hide.
+    static func icon(_ title: String) -> String {
+        let mark = title.split(separator: " ").first.map(String.init) ?? title
+        return mark == "✕" ? "⌫" : mark
     }
 
     /// The only place the playback labels and buttons are written.
     private func render(_ s: Playback.State) {
         guard panel != nil else { return }
         statusLabel.stringValue = s.status
-        pauseBtn.title = s.pauseTitle
+        pauseBtn.title = Self.icon(s.pauseTitle)
+        pauseBtn.toolTip = s.pauseTitle.split(separator: " ").dropFirst().joined(separator: " ")
         speedBtn.title = s.speedTitle
         queueLabel.stringValue = !s.queued.isEmpty ? "▸ \(s.queued.count) queued"
             : s.putOff > 0 ? "⏳ \(s.putOff) put off" : ""
@@ -439,9 +456,9 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         !minimized && (visible || active)
     }
 
-    /// A HUD sitting behind a window comes forward; only one already in front gets hidden.
+    /// A HUD shrunk to its bar opens; only one already open gets hidden.
     @objc func toggleMinimized() {
-        if panel?.isBehind == true, isPanelVisible { bringForward(); return }
+        if panel?.isCollapsed == true, isPanelVisible { bringForward(); return }
         isPanelVisible ? minimize() : restore()
     }
 
@@ -629,7 +646,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// would: same place, same text, same buttons, then up front where Chris is.
     func rebuildWindow() {
         guard let old = panel else { return }
-        let frame = old.frame
+        let frame = old.fullFrame
         if let m = interactionMonitor { NSEvent.removeMonitor(m); interactionMonitor = nil }
         old.retire()
         panel = nil
@@ -642,7 +659,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
             badge.accent = old.accent
             badge.solid = old.solid
             badge.isLink = old.isLink
-            badge.setFrameSize(badge.intrinsicContentSize)
+            fitBadge()
         }
         render(playback.state)
         panel.level = .floating
@@ -674,7 +691,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true   // zoom is refused; don't advertise it
         panel.delegate = self
         panel.watchClicks()
-        panel.onWentBehind = { [weak self] in self?.log("hud behind a clicked window") }
+        panel.onCollapsed = { [weak self] in self?.log("hud shrunk to its bar by a click on a window") }
         panel.onPulled = { [weak self, weak panel] onScreen in
             guard let self, let panel, panel === self.panel else { return }
             if onScreen { return }
@@ -682,11 +699,17 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
             self.rebuildWindow()
         }
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        // The shell is the window's own view; `content` inside it is what collapse() hangs
+        // from the top, so only the bar shows.
+        let shell = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        let content = NSView(frame: shell.bounds)
+        content.autoresizingMask = [.width, .height]
+        shell.addSubview(content)
+        panel.body = content
 
-        // Who's talking — the loudest thing in the window, because with several
-        // terminals queued it's the first thing you need to know. Indented past the
-        // traffic lights, which float over this content view (.fullSizeContentView).
+        // The bar: who's talking, then the buttons. It is all that shows when the HUD is
+        // shrunk (HUDPanel.barHeight). The pill is indented past the traffic lights, which
+        // float over this content view (.fullSizeContentView).
         let badge = SourceBadge(frame: NSRect(x: 80, y: h - 34, width: 140, height: SourceBadge.height))
         badge.autoresizingMask = [.minYMargin]
         badge.onClick = { [weak self] in self?.revealSource() }
@@ -694,8 +717,38 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         panel.link = badge
         sourceBadge = badge
 
+        // Icons only; titles and enabled state of pause, speed and skip come from render().
+        var x = w - 10 - 240
+        func button(_ title: String, _ width: CGFloat, _ tip: String?, _ action: Selector) -> NSButton {
+            let b = NSButton(title: title, target: self, action: action)
+            b.frame = NSRect(x: x, y: h - 35, width: width, height: 26)
+            b.bezelStyle = .rounded
+            b.toolTip = tip
+            b.autoresizingMask = [.minXMargin, .minYMargin]
+            content.addSubview(b)
+            x += width
+            return b
+        }
+        replayBtn = button("↻", 34, "Replay", #selector(replay))
+        pauseBtn = button("", 34, nil, #selector(togglePause))
+        speedBtn = button("", 70, "Speed", #selector(changeSpeed))
+        skipBtn = button("⏭", 34, "Skip", #selector(skip))
+        _ = button("■", 34, "Stop", #selector(stopAll))
+        // Hide, not Stop: the panel goes away, the speech keeps going, and the
+        // menu-bar item brings it back.
+        hideBtn = button("✕", 34, "Hide", #selector(minimize))
+
+        // Playback state, below the bar, with what's queued at its right.
+        let label = NSTextField(labelWithString: "")
+        label.frame = NSRect(x: 18, y: h - 62, width: w - 36 - 160, height: 18)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(label)
+        statusLabel = label
+
         let queued = NSTextField(labelWithString: "")
-        queued.frame = NSRect(x: w - 166, y: h - 31, width: 150, height: 18)
+        queued.frame = NSRect(x: w - 168, y: h - 62, width: 150, height: 18)
         queued.alignment = .right
         queued.font = .systemFont(ofSize: 11, weight: .medium)
         queued.textColor = .secondaryLabelColor
@@ -703,17 +756,8 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         content.addSubview(queued)
         queueLabel = queued
 
-        // Playback state, demoted below the source.
-        let label = NSTextField(labelWithString: "")
-        label.frame = NSRect(x: 18, y: h - 58, width: w - 36, height: 18)
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .secondaryLabelColor
-        label.autoresizingMask = [.width, .minYMargin]
-        content.addSubview(label)
-        statusLabel = label
-
         // Full response text — scrollable, auto-follows speech (fills the middle)
-        let scroll = NSScrollView(frame: NSRect(x: 16, y: 96, width: w - 32, height: h - 162))
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 50, width: w - 32, height: h - 120))
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .bezelBorder
@@ -743,7 +787,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
         // What's waiting behind the current item
         let next = NSTextField(labelWithString: "")
-        next.frame = NSRect(x: 16, y: 76, width: w - 32, height: 14)
+        next.frame = NSRect(x: 16, y: 30, width: w - 32, height: 14)
         next.font = .systemFont(ofSize: 10)
         next.textColor = .tertiaryLabelColor
         next.lineBreakMode = .byTruncatingTail
@@ -751,37 +795,15 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
         content.addSubview(next)
         nextLabel = next
 
-        // Hotkey hint (above buttons, pinned to bottom)
+        // Hotkey hint, pinned to the bottom
         let hint = NSTextField(labelWithString: hotkeyHint)
-        hint.frame = NSRect(x: 16, y: 58, width: w - 32, height: 14)
+        hint.frame = NSRect(x: 16, y: 12, width: w - 32, height: 14)
         hint.font = .systemFont(ofSize: 10)
         hint.textColor = .secondaryLabelColor
         hint.autoresizingMask = [.width, .maxYMargin]
         content.addSubview(hint)
 
-        // Buttons (pinned to bottom)
-        func button(_ title: String, _ x: CGFloat, _ width: CGFloat, _ action: Selector) -> NSButton {
-            let b = NSButton(title: title, target: self, action: action)
-            b.frame = NSRect(x: x, y: 16, width: width, height: 26)
-            b.bezelStyle = .rounded
-            b.autoresizingMask = [.maxYMargin]
-            return b
-        }
-        content.addSubview(button("↻ Replay", 14, 78, #selector(replay)))
-        // Titles and enabled state come from render(), the one writer.
-        pauseBtn = button("", 96, 86, #selector(togglePause))
-        content.addSubview(pauseBtn)
-        speedBtn = button("", 186, 70, #selector(changeSpeed))
-        content.addSubview(speedBtn)
-        skipBtn = button("⏭ Skip", 260, 66, #selector(skip))
-        content.addSubview(skipBtn)
-        content.addSubview(button("■ Stop", 330, 66, #selector(stopAll)))
-        // Hide, not Stop: the panel goes away, the speech keeps going, and the
-        // menu-bar item brings it back.
-        hideBtn = button("⌄ Hide", 400, 86, #selector(minimize))
-        content.addSubview(hideBtn)
-
-        panel.contentView = content
+        panel.contentView = shell
 
         if let screen = NSScreen.main {
             let vf = screen.visibleFrame

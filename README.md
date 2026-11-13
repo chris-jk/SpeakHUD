@@ -13,8 +13,9 @@ a standalone app.
 ## Features
 
 - **Floating HUD** with karaoke-style word highlighting that follows along. Click another
-  window and the HUD drops just behind it, so you can see your work; the next thing it
-  reads brings it back to the front, and so does clicking any part of it still showing,
+  window and the HUD shrinks to its top bar, still over everything, so you can see your
+  work; the bar keeps the pill and the buttons (replay, pause, speed, skip, stop, hide).
+  The next thing it reads opens it again, and so does a click on the bar,
   one click on the menu bar icon or the Show/Hide hotkey. A window that doesn't
   touch the HUD leaves it where it is. A HUD put away with Hide, or closed after a
   reading, stays away until the next reading or a click on the menu bar icon.

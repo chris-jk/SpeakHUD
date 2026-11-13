@@ -215,10 +215,10 @@ final class HUDPanel: NSPanel {
     override var canBecomeKey: Bool { true }   // …or it never sees a keystroke at all
 
     /// Picked in Mission Control (or any other way the system hands it focus) while it sat
-    /// behind a clicked window: that's "I want this", same as clicking the part still showing.
+    /// shrunk to its bar: that's "I want this", same as clicking the bar.
     override func becomeKey() {
         super.becomeKey()
-        if isBehind { comeForward() }
+        if isCollapsed { comeForward() }
     }
 
     /// One entry of the window server's list, which runs front to back.
@@ -230,7 +230,7 @@ final class HUDPanel: NSPanel {
         let bounds: CGRect
     }
 
-    /// The ordinary window a click landed on, if the HUD should step behind it. Layer 0 is
+    /// The ordinary window a click landed on, if the HUD should get out of its way. Layer 0 is
     /// where app windows live; below it is the desktop, which is no window to go behind.
     /// Above it, something screen-sized is an overlay that lets clicks through, but anything
     /// smaller (a context menu, a popover, a palette) took the click itself. A window that
@@ -259,8 +259,48 @@ final class HUDPanel: NSPanel {
         }
     }
 
-    /// Sent behind a window by a click, until something brings it forward.
-    var isBehind: Bool { level != .floating }
+    /// The strip along the top that stays when the HUD shrinks: the pill and the buttons.
+    static let barHeight: CGFloat = 44
+
+    /// Everything the HUD shows. Shrunk, it keeps its size and hangs from the top of the
+    /// window, so only its top strip is in view and nothing in it is laid out again.
+    weak var body: NSView?
+
+    private var full: (height: CGFloat, min: NSSize)?
+
+    /// Shrunk to its bar by a click on another window, until something opens it again.
+    /// Still over every window (Chris, 11-13: "it stays on top, but it just gets out of the way").
+    var isCollapsed: Bool { full != nil }
+
+    /// Where it sits when open: its frame, or the one it will open back to.
+    var fullFrame: NSRect {
+        guard let full else { return frame }
+        return NSRect(x: frame.minX, y: frame.maxY - full.height, width: frame.width, height: full.height)
+    }
+
+    /// Down to the bar, top edge where it was.
+    func collapse() {
+        guard !isCollapsed, let body else { return }
+        let f = frame
+        full = (f.height, minSize)
+        body.autoresizingMask = [.width, .minYMargin]
+        minSize = NSSize(width: minSize.width, height: Self.barHeight)
+        maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: Self.barHeight)
+        setFrame(NSRect(x: f.minX, y: f.maxY - Self.barHeight, width: f.width, height: Self.barHeight), display: true)
+        body.setFrameOrigin(NSPoint(x: 0, y: Self.barHeight - body.frame.height))
+    }
+
+    /// Back to the size it had, top edge where the bar is.
+    func expand() {
+        guard let full, let body else { return }
+        let to = fullFrame
+        self.full = nil
+        minSize = full.min
+        maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        setFrame(to, display: true)
+        body.frame = contentView?.bounds ?? body.frame
+        body.autoresizingMask = [.width, .height]
+    }
 
     /// Over every app window: where it sits to be read.
     /// A reading coming up gets the same check as the menu bar click (comeHere).
@@ -285,6 +325,7 @@ final class HUDPanel: NSPanel {
     /// builds a new window, always worked. So onPulled(false) has the HUD build a new one.
     func comeHere() {
         level = .floating
+        expand()
         keepFullSize()
         orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -310,12 +351,6 @@ final class HUDPanel: NSPanel {
         return list.contains { ($0[kCGWindowNumber as String] as? Int) == windowNumber }
     }
 
-    /// Just under one window, so the work in it shows and anything further back stays covered.
-    func goBehind(window: Int) {
-        level = .normal
-        order(.below, relativeTo: window)
-    }
-
     private var clickWatch: Any?
 
     /// A global monitor only sees clicks meant for other apps, so the HUD's own never get here.
@@ -334,18 +369,18 @@ final class HUDPanel: NSPanel {
         guard !menuOpen else { return }
         let point = NSEvent.mouseLocation
         // visibleFrame leaves out the menu bar and the Dock, which aren't windows being worked in.
-        guard isVisible, !isBehind, let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(point) }),
+        guard isVisible, !isCollapsed, let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(point) }),
               let top = NSScreen.screens.first?.frame.height,
-              let window = Self.windowToStepBehind(at: CGPoint(x: point.x, y: top - point.y), in: Self.screenWindows(),
+              Self.windowToStepBehind(at: CGPoint(x: point.x, y: top - point.y), in: Self.screenWindows(),
                                                    own: ProcessInfo.processInfo.processIdentifier,
                                                    hud: Spotlight.flipped(frame, mainHeight: top),
-                                                   screen: screen.frame.size)
+                                                   screen: screen.frame.size) != nil
         else { return }
-        goBehind(window: window)
-        onWentBehind()
+        collapse()
+        onCollapsed()
     }
 
-    var onWentBehind: () -> Void = {}
+    var onCollapsed: () -> Void = {}
 
     /// The panel is deliberately non-activating, so it can appear mid-sentence without
     /// stealing focus from whatever you're typing in. The cost is that an inactive app
@@ -353,7 +388,12 @@ final class HUDPanel: NSPanel {
     /// did nothing. Clicking the HUD is an unambiguous "I want to use this", so take
     /// focus at that point, and only then.
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown, isBehind { comeForward() }   // the part still showing was clicked
+        // A click on the bar opens it again. Its buttons and the pill do their own job and
+        // leave it shrunk.
+        let onPill = event.type == .leftMouseDown && link?.takesClick(at: event.locationInWindow) == true
+        if event.type == .leftMouseDown, isCollapsed, !onPill, !(body?.hitTest(event.locationInWindow) is NSButton) {
+            comeForward()
+        }
         // The pill sits under the transparent title bar, which takes clicks there as
         // the start of a drag, and the first click on an inactive panel only focuses
         // it. Either way the pill itself would never see the click, so catch it here.

@@ -1,7 +1,7 @@
 // Layering tests. Registered in tests/main.swift.
 //
-// A click on another window sends the HUD behind that window, so the only thing to get
-// wrong is which window that is. The going behind itself is the window server's.
+// A click on another window shrinks the HUD to its bar, so the first thing to get wrong is
+// which window that is. The shrinking and opening are in the Collapse suite below.
 import Cocoa
 
 private typealias W = HUDPanel.ScreenWindow
@@ -71,4 +71,56 @@ let rebuildSuite = Suite("Rebuild") { t in
     t.expect(hud.panel.collectionBehavior.contains(.canJoinAllSpaces), "the new one joins every desktop")
     hud.rebuildWindow()
     t.expect(hud.panel.isVisible, "and again, without the first one's watchers in the way")
+}
+
+// A click on a window under the HUD shrinks it to its top bar, still over everything
+// (Chris, 11-13); a click on the bar, a reading or the menu bar icon opens it again.
+let collapseSuite = Suite("Collapse") { t in
+    _ = NSApplication.shared
+    let hud = Controller(listens: false)
+    hud.buildWindowIfNeeded()
+    let panel = hud.panel!
+    panel.setFrame(NSRect(x: 100, y: 120, width: 520, height: 300), display: false)
+    let open = panel.frame
+    let body = panel.body!
+    let inside = body.frame.size
+    hud.sourceBadge.text = "placerville-powersports"
+    hud.sourceBadge.isLink = true
+    hud.textView.string = "The text being read sits here, under the bar."
+
+    panel.collapse()
+    t.expect(panel.isCollapsed, "shrunk")
+    t.expectEqual(panel.frame, NSRect(x: 100, y: open.maxY - HUDPanel.barHeight, width: 520, height: HUDPanel.barHeight),
+                  "to the bar, top edge where it was")
+    t.expectEqual(panel.level, .floating, "still over every window")
+    t.expectEqual(body.frame.size, inside, "what's in it is not squeezed")
+    t.expectEqual(body.frame.maxY, HUDPanel.barHeight, "and hangs from the top, so the bar is what shows")
+    for b in [hud.replayBtn!, hud.pauseBtn!, hud.speedBtn!, hud.skipBtn!, hud.hideBtn!, hud.sourceBadge!] as [NSView] {
+        let f = b.convert(b.bounds, to: nil)
+        t.expect(f.minY >= 0 && f.maxY <= HUDPanel.barHeight, "\(type(of: b)) at \(f.minX) is inside the bar")
+    }
+    t.expect(hud.sourceBadge.frame.maxX <= hud.replayBtn.frame.minX, "the pill stops before the buttons")
+    t.expectEqual(panel.fullFrame, open, "it knows where it opens back to")
+    panel.collapse()
+    t.expectEqual(panel.fullFrame, open, "shrinking twice keeps the first size")
+
+    panel.expand()
+    t.expect(!panel.isCollapsed, "opened")
+    t.expectEqual(panel.frame, open, "to the size and place it had")
+    t.expectEqual(body.frame, panel.contentView!.bounds, "filling the window again")
+    t.expectEqual(panel.minSize.height, 260, "and it can't be dragged smaller than before")
+
+    panel.collapse()
+    panel.comeForward()
+    t.expectEqual(panel.frame, open, "a reading or the menu bar icon opens it")
+
+    panel.collapse()
+    hud.rebuildWindow()
+    t.expectEqual(hud.panel.frame, open, "a new window for a shrunk one comes up open")
+    t.expect(!hud.panel.isCollapsed, "and is not shrunk")
+
+    t.expectEqual(Controller.icon("❚❚ Pause"), "❚❚", "pause is its mark alone")
+    t.expectEqual(Controller.icon("▶ Resume"), "▶", "so is resume")
+    t.expectEqual(Controller.icon("✕ Close"), "⌫", "the reply window's close doesn't look like Hide")
+    hud.panel.retire()
 }
