@@ -305,7 +305,7 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// The pill takes the room left of the buttons; a longer name is cut short.
     private func fitBadge() {
         let size = sourceBadge.intrinsicContentSize
-        let room = replayBtn.frame.minX - 8 - sourceBadge.frame.minX
+        let room = skipBtn.frame.minX - 8 - sourceBadge.frame.minX
         sourceBadge.setFrameSize(NSSize(width: min(size.width, max(room, 60)), height: size.height))
     }
 
@@ -729,11 +729,12 @@ final class Controller: NSObject, NSWindowDelegate, NSTextViewDelegate {
             x += width
             return b
         }
+        // Most used first, nearest the pill (Chris, 11-13): skip, replay, pause, stop, speed.
+        skipBtn = button("⏭", 34, "Skip", #selector(skip))
         replayBtn = button("↻", 34, "Replay", #selector(replay))
         pauseBtn = button("", 34, nil, #selector(togglePause))
-        speedBtn = button("", 70, "Speed", #selector(changeSpeed))
-        skipBtn = button("⏭", 34, "Skip", #selector(skip))
         _ = button("■", 34, "Stop", #selector(stopAll))
+        speedBtn = button("", 70, "Speed", #selector(changeSpeed))
         // Hide, not Stop: the panel goes away, the speech keeps going, and the
         // menu-bar item brings it back.
         hideBtn = button("✕", 34, "Hide", #selector(minimize))

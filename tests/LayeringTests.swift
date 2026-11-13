@@ -99,7 +99,7 @@ let collapseSuite = Suite("Collapse") { t in
         let f = b.convert(b.bounds, to: nil)
         t.expect(f.minY >= 0 && f.maxY <= HUDPanel.barHeight, "\(type(of: b)) at \(f.minX) is inside the bar")
     }
-    t.expect(hud.sourceBadge.frame.maxX <= hud.replayBtn.frame.minX, "the pill stops before the buttons")
+    t.expect(hud.sourceBadge.frame.maxX <= hud.skipBtn.frame.minX, "the pill stops before the buttons")
     t.expectEqual(panel.fullFrame, open, "it knows where it opens back to")
     panel.collapse()
     t.expectEqual(panel.fullFrame, open, "shrinking twice keeps the first size")
