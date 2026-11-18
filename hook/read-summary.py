@@ -163,6 +163,10 @@ def marked(text):
         lang, body = m.group(1).strip(), m.group(2)
         if not body.strip():                # ```npm test``` on one line
             lang, body = "", lang
+        # A ```text block is words for Chris to paste or send (his rule, 11-06): it
+        # is read aloud like any paragraph. Every other fence stays silent, as code.
+        if lang.lower() == "text" and body.strip():
+            return "\n\n" + body.strip() + "\n\n"
         fences.append((lang.lower(), body))
         return "\n\n" + FENCE_OPEN + str(len(fences) - 1) + FENCE_CLOSE + "\n\n"
     text = re.sub(r"```([^\n`]*)\n?(.*?)```", fence, text, flags=re.DOTALL)
