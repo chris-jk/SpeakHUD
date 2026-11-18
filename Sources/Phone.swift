@@ -175,10 +175,24 @@ final class Phone {
         return true
     }
 
-    /// `text` as a push's body: one line, cut to length.
+    /// `text` as a push's body: one line, redacted, cut to length.
     static func brief(_ text: String) -> String {
-        let line = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        let line = redact(text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " "))
         return line.count > pushLength ? String(line.prefix(pushLength - 1)) + "…" : line
+    }
+
+    private static let emailPattern = try! NSRegularExpression(pattern: "[^\\s@<>()]+@[^\\s@<>()]+\\.[^\\s@<>()]+")
+    private static let digitsPattern = try! NSRegularExpression(pattern: "\\d{4,}")
+
+    /// A turn read aloud can hold an email, a sign-in code or a card number; none of it
+    /// leaves the Mac in a push (notification audit 11-18 M3). Emails become [email],
+    /// runs of 4+ digits [number].
+    static func redact(_ text: String) -> String {
+        var out = text
+        for (pattern, mask) in [(emailPattern, "[email]"), (digitsPattern, "[number]")] {
+            out = pattern.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: mask)
+        }
+        return out
     }
 
     /// The push for a terminal, or nil when there's nowhere to send one. A tap on it
@@ -186,7 +200,7 @@ final class Phone {
     func pushRequest(title: String, message: String, key: String) -> URLRequest? {
         guard let topicURL = config.ntfy.flatMap({ URL(string: $0) }), !topicURL.lastPathComponent.isEmpty,
               topicURL.lastPathComponent != "/" else { return nil }
-        var body: [String: Any] = ["topic": topicURL.lastPathComponent, "title": title, "message": Self.brief(message)]
+        var body: [String: Any] = ["topic": topicURL.lastPathComponent, "title": Self.redact(title), "message": Self.brief(message)]
         if let url = config.url {
             body["click"] = url + "/#" + (key.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? "")
         }
