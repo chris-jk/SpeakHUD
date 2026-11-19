@@ -40,6 +40,8 @@ PLAYER = os.environ.get("READQ_PLAYER") or "/usr/bin/afplay"
 # inside the 600s timeout settings.json gives it.
 MAX_WAIT = float(os.environ.get("READQ_MAX_WAIT") or 120.0)
 BUDGET = 540.0
+# A taken item still held after this long was dropped by the agent, not playing.
+STALE_TAKEN = float(os.environ.get("READQ_STALE_TAKEN") or 900.0)
 MARKERS = os.path.join(os.path.dirname(rs.QUEUE_DIR), "questions")
 # Stop deletes the item's file just as finishing does; only the agent's log tells them
 # apart ("stop: discarded …", written by Playback.stop()).
@@ -171,8 +173,21 @@ def withdraw(stem):
 
 
 def idle():
-    """Nothing queued or playing: every spool item keeps its file until it's let go."""
-    return not any(n.endswith((".json", ".taken")) for n in os.listdir(rs.QUEUE_DIR))
+    """Nothing queued or playing: every spool item keeps its file until it's let go.
+    A `.taken` file older than STALE_TAKEN is one the agent picked up and never let go
+    of (11-18 6:35 PM: three such files muted every question for a day), so it doesn't
+    count as playing."""
+    now = time.time()
+    for n in os.listdir(rs.QUEUE_DIR):
+        if n.endswith(".json"):
+            return False
+        if n.endswith(".taken"):
+            try:
+                if now - os.path.getmtime(os.path.join(rs.QUEUE_DIR, n)) < STALE_TAKEN:
+                    return False
+            except OSError:
+                pass
+    return True
 
 
 def stopped_since(t):

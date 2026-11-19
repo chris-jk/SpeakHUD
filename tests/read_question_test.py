@@ -197,6 +197,20 @@ class ReadQuestion(unittest.TestCase):
         self.assertEqual(self.chime_times(), [], "and no chime")
         self.hud.paused = False
 
+    def test_a_stuck_taken_item_doesnt_hold_the_question(self):
+        stuck = os.path.join(self.queue, "0-stuck.taken")
+        with open(stuck, "w") as f:
+            json.dump({"v": 1, "text": "Dropped.", "source": "x", "key": "other"}, f)
+        old = time.time() - 3600
+        os.utime(stuck, (old, old))
+        self.env["READQ_MAX_WAIT"] = "2"
+        p = self.ask(question("Now?", ("A", ""), ("B", "")), wait=False)
+        self.assertEqual(p.wait(timeout=20), 0)
+        os.unlink(stuck)
+        self.drain()
+        self.assertEqual(self.texts(), ["Now?", "1. A.\n2. B."],
+                         "an item the agent never let go of doesn't mute questions")
+
     def test_text_written_before_asking_leads_the_question(self):
         p = self.ask(question("Ship it?", ("Yes", ""), ("No", "")), wait=False, flushed=False)
         time.sleep(0.3)  # the hook got here before the transcript was flushed
