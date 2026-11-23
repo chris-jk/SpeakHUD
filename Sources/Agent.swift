@@ -193,13 +193,11 @@ final class Agent {
         // with it, is Playback's to decide and to log.
         for item in batch.items {
             let onPhone = phone?.took(item) ?? false
-            if item.quiet {
-                log("quiet: \(item.source) said only Nothing")
-                Spool.done(item.file)
-                continue
+            switch Spool.route(item, readTurns: hud.readTurns) {
+            case .quiet: log("quiet: \(item.source) said only Nothing")
+            case .muted: log("muted: \(item.source) not read")
+            case .play:  hud.playback.enqueue(item, onPhone: onPhone)
             }
-            guard hud.readTurns else { log("muted: \(item.source) not read"); continue }
-            hud.playback.enqueue(item, onPhone: onPhone)
         }
         // Asked for by hand, so it sounds with Read Responses Aloud off, as a hotkey read does.
         for item in batch.rereads { hud.playback.reread(item) }

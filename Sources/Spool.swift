@@ -248,6 +248,19 @@ enum Spool {
             .lowercased() == "nothing"
     }
 
+    /// What the agent does with a drained item.
+    enum Route: Equatable { case quiet, muted, play }
+
+    /// Decide it, and let go of the file of any item that won't be played. Playback
+    /// deletes the file of what it plays; nothing else would delete these, and a `.taken`
+    /// file left behind reads as "still playing" to the question hook, which waits on it
+    /// and gives up (11-21 to 11-23: 73 muted turns left 73 files, and no question was read).
+    static func route(_ item: SpeechItem, readTurns: Bool) -> Route {
+        let route: Route = item.quiet ? .quiet : readTurns ? .play : .muted
+        if route != .play { done(item.file) }
+        return route
+    }
+
     /// This item will never be spoken again — finished, skipped, stopped, or superseded.
     static func done(_ path: String?) {
         guard let path = path else { return }

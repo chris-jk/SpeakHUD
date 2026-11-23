@@ -59,6 +59,27 @@ private func write(_ dir: String, _ name: String, _ body: Any, mtime: Date? = ni
 private func files(_ dir: String) -> [String] { ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).sorted() }
 
 let spoolSuite = Suite("Spool") { t in
+    // -- a turn that won't be played is let go ---------------------------------------
+    // Read Responses Aloud off: the agent takes the turn and never plays it. Its .taken
+    // file must go, or the question hook sees something "still playing" forever.
+    do {
+        let queue = tempDir("muted")
+        let now = Date()
+        write(queue, "1-a.json", ["v": 1, "text": "A turn nobody hears", "key": "s", "created": now.timeIntervalSince1970])
+        write(queue, "2-b.json", ["v": 1, "text": "Nothing.", "key": "s2", "created": now.timeIntervalSince1970])
+        write(queue, "3-c.json", ["v": 1, "text": "A turn to play", "key": "s3", "created": now.timeIntervalSince1970])
+        let items = Spool.drain(in: queue, now: now).items
+        t.expectEqual(items.count, 3, "three turns taken")
+        t.expectEqual(files(queue).count, 3, "each held as a .taken file")
+        if items.count == 3 {
+            t.expectEqual(Spool.route(items[0], readTurns: false), .muted, "reading off: muted")
+            t.expectEqual(Spool.route(items[1], readTurns: true), .quiet, "only Nothing: quiet")
+            t.expectEqual(files(queue), ["3-c.taken"], "muted and quiet turns leave no file behind")
+            t.expectEqual(Spool.route(items[2], readTurns: true), .play, "reading on: played")
+            t.expectEqual(files(queue), ["3-c.taken"], "a turn to play keeps its file until Playback is done")
+        }
+    }
+
     // -- contract: real Python producer, real Swift consumer ----------------------
     do {
         let root = tempDir("contract"), queue = root + "/queue", home = root + "/home"
